@@ -1,6 +1,6 @@
 {
   "name": "autofps",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "description": "Decky plugin: auto FPS tier + lsfg-vk frame generation",
   "type": "module",
   "scripts": {

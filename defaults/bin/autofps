@@ -103,7 +103,18 @@ FG_SAVED="$(cat "$CFG/fg_$APPID" 2>/dev/null)"
 LSFG_VER="$(cat "$CFG/lsfg_version" 2>/dev/null)"
 LSFG_CONF="$CFG/lsfg-vk.toml"
 WANT=0
-if [ "$OPTI_FG" = "1" ]; then
+EXT_FG=0
+if [ "$FG_MODE" = "external" ]; then
+  # генерацією керує окремий плагін Decky LSFG-VK (його лаунчер стоїть у параметрах запуску) —
+  # AutoFPS нічого не вмикає й не вимикає, лише помічає, чи вона активна
+  if [ -z "$DISABLE_LSFGVK" ] && { [ -n "$LSFGVK_PROFILE$LSFGVK_CONFIG$LSFG_PROCESS$LSFG_CONFIG" ] || [ "$ENABLE_LSFG" = "1" ]; }; then
+    EXT_FG=1
+  fi
+  log "генерація кадрів: окремий плагін Decky LSFG-VK (активна: $EXT_FG)"
+fi
+if [ "$FG_MODE" = "external" ]; then
+  :
+elif [ "$OPTI_FG" = "1" ]; then
   log "генерацію кадрів робить OptiScaler — lsfg-vk у цій грі не вмикаю"
 elif [ "$MODE" = "full" ] && [ "$FG_MODE" = "always" ]; then
   # «Завжди» — явний вибір користувача: генерація навіть під час підбору графіки
@@ -112,7 +123,7 @@ elif [ "$MODE" = "full" ] && [ "$FG_MODE" = "always" ]; then
 elif [ "$MODE" = "full" ] && [ "$FG_MODE" != "off" ] && [ "$TUNING" != "1" ]; then
   case "$FG_SAVED" in 2|3|4) WANT="$FG_SAVED" ;; esac
 fi
-[ "$TUNING" = "1" ] && [ "$FG_MODE" != "always" ] && log "графіка цієї гри ще підбирається — запуск без генерації кадрів (для чесного заміру; «Генерація: завжди» вмикає її й зараз)"
+[ "$TUNING" = "1" ] && [ "$FG_MODE" != "always" ] && [ "$FG_MODE" != "external" ] && log "графіка цієї гри ще підбирається — запуск без генерації кадрів (для чесного заміру; «Генерація: завжди» вмикає її й зараз)"
 
 FG_WANT="$WANT"
 USE_LSFG=0
@@ -140,7 +151,9 @@ if [ "$WANT" -ge 2 ] && [ -f "$LSFG_CONF" ]; then
   fi
 fi
 
-if [ "$USE_LSFG" = 1 ] && [ "$LSFG_VER" = "2" ]; then
+if [ "$FG_MODE" = "external" ]; then
+  :   # не чіпаємо змінні lsfg-vk окремого плагіна
+elif [ "$USE_LSFG" = 1 ] && [ "$LSFG_VER" = "2" ]; then
   export LSFGVK_CONFIG="$LSFG_CONF"
   export LSFGVK_PROFILE="autofps"
 elif [ "$USE_LSFG" = 1 ]; then
@@ -154,8 +167,8 @@ else
 fi
 log "mangohud=$USE_MANGO lsfg=$USE_LSFG (v${LSFG_VER:-?}, ×$WANT, режим FG: $FG_MODE)"
 
-printf '{"appid":"%s","pid":%d,"started":%d,"mode":"%s","mangohud":%d,"lsfg":%d,"fg":%d,"fg_want":%d,"opti":"%s","opti_fg":%d,"opti_method":"%s"}\n' \
-  "$APPID" "$$" "$(date +%s)" "$MODE" "$USE_MANGO" "$USE_LSFG" "$WANT" "$FG_WANT" "$OPTI_DLL" "${OPTI_FG:-0}" "$OPTI_METHOD" >"$CACHE/current.json"
+printf '{"appid":"%s","pid":%d,"started":%d,"mode":"%s","mangohud":%d,"lsfg":%d,"fg":%d,"fg_want":%d,"opti":"%s","opti_fg":%d,"opti_method":"%s","ext_fg":%d}\n' \
+  "$APPID" "$$" "$(date +%s)" "$MODE" "$USE_MANGO" "$USE_LSFG" "$WANT" "$FG_WANT" "$OPTI_DLL" "${OPTI_FG:-0}" "$OPTI_METHOD" "$EXT_FG" >"$CACHE/current.json"
 
 # --- запуск (дочірнім процесом, щоб знати, чи гра не впала одразу)
 START=$(date +%s)

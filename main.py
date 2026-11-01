@@ -65,7 +65,7 @@ DEFAULT_SETTINGS = {
     "drop_ratio": 0.88,        # якщо p10 < рівень * drop_ratio — знижуємо
     "warmup_s": 20,            # пропустити завантаження/шейдери
     "probe_s": 20,             # скільки секунд міряти без ліміту
-    "fg_mode": "auto",         # "off" | "auto" | "always"
+    "fg_mode": "external",     # "external" (окремий плагін Decky LSFG-VK) | "off" | "auto" | "always"
     "fg_min_base": 40,         # мінімальний базовий FPS для фрейм-генерації
     "fg_allow_3x": False,
     "fg_flow_scale": 0.8,
@@ -144,6 +144,29 @@ LSFG_PROFILE = "autofps"
 LSFG_VERSION_FILE = os.path.join(CFG_DIR, "lsfg_version")   # читає обгортка гри
 FG_MODE_FILE = os.path.join(CFG_DIR, "fg_mode")             # off | auto | always
 THEIR_CONF = os.path.join(HOME, ".config", "lsfg-vk", "conf.toml")
+# лаунчер Decky LSFG-VK у параметрах запуску: 0.14+ — ~/.lsfg, старіші — ~/lsfg
+LSFG_LAUNCHERS = [("~/.lsfg", os.path.join(HOME, ".lsfg")), ("~/lsfg", os.path.join(HOME, "lsfg")),
+                  ("~/.local/bin/lsfg", os.path.join(HOME, ".local", "bin", "lsfg"))]
+
+
+def lsfg_launcher():
+    for token, path in LSFG_LAUNCHERS:
+        if os.path.isfile(path):
+            return token
+    return ""
+
+
+def their_multiplier():
+    """Множник генерації кадрів у поточному профілі Decky LSFG-VK (типово 2)."""
+    text = _read(THEIR_CONF)
+    cur = re.search(r'^\s*current_profile\s*=\s*"([^"]+)"', text, re.M)
+    blocks = re.split(r"^\s*\[\[(?:game|profile)\]\]\s*$", text, flags=re.M)[1:]
+    for b in blocks:
+        name = re.search(r'^\s*(?:exe|name)\s*=\s*"([^"]+)"', b, re.M)
+        mult = re.search(r"^\s*multiplier\s*=\s*(\d+)", b, re.M)
+        if mult and (not cur or (name and name.group(1) == cur.group(1))):
+            return max(1, int(mult.group(1)))
+    return 2
 LSFG_CLI = os.path.join(HOME, ".local", "bin", "lsfg-vk-cli")
 
 
@@ -454,6 +477,10 @@ class Plugin:
         os.makedirs(PROFILES_DIR, exist_ok=True)
         self.device = detect_device()
         self.settings = {**DEFAULT_SETTINGS, **_load_json(SETTINGS_FILE, {})}
+        # генерацією кадрів тепер керує окремий плагін Decky LSFG-VK (одноразовий перехід)
+        if not self.settings.get("fg_external_migrated"):
+            self.settings.update(fg_mode="external", fg_external_migrated=True)
+            _save_json(SETTINGS_FILE, self.settings)
         self.games = _load_json(GAMES_FILE, {})
         self.reader = LogReader()
         self._reset_game_state()
@@ -607,8 +634,8 @@ class Plugin:
         refresh = best_refresh(self.device,
                                self.device["max_hz"] if self.phase == "probe" else out)
         apply_display(self.device, limit, refresh)
-        if self.sfg >= 2:  # генерація активна — множник змінюється на льоту (лише >= 2)
-            write_lsfg(self.settings, max(2, self.mult))
+        if self.sfg >= 2 and self.settings["fg_mode"] != "external":
+            write_lsfg(self.settings, max(2, self.mult))   # множник змінюється на льоту (лише >= 2)
         self.last_apply = time.time()
 
     def _write_fg_mode(self):
@@ -641,6 +668,13 @@ class Plugin:
         fg = self.settings["fg_mode"]
         if self.cur_info.get("opti_fg"):  # кадри генерує OptiScaler
             return native, 1
+        if fg == "external":
+            # генерацією керує окремий плагін: множник фіксований, підбираємо лише базу
+            m = self.sfg
+            if m < 2:
+                return native, 1
+            fit = [t for t in tiers if t <= native and t * m in tiers]
+            return (max(fit), m) if fit else (native, 1)
         if fg == "off" or not self._lsfg_cached()["ready"]:
             return native, 1
         mults = [2, 3] if self.settings["fg_allow_3x"] else [2]
@@ -710,7 +744,7 @@ class Plugin:
             "device": self.device["id"], "updated": int(time.time()),
         }
         _save_json(GAMES_FILE, self.games)
-        self._fg_next(self.appid, mult if self.settings["fg_mode"] != "off" else 1)
+        self._fg_next(self.appid, mult if self.settings["fg_mode"] not in ("off", "external") else 1)
 
     def _start_probe(self, now, upgrade=False):
         self.phase, self.phase_t, self.samples = "probe", now, []
@@ -819,6 +853,8 @@ class Plugin:
             self.last_appid = self.appid
             self.cur_info = cur
             self.sfg = int(cur.get("fg", 0) or 0)
+            if self.settings["fg_mode"] == "external":
+                self.sfg = their_multiplier() if cur.get("ext_fg") else 0
             decky.logger.info(f"game start: {json.dumps(cur)}")
             if self.sfg >= 2:
                 self.mult = self.sfg
@@ -996,6 +1032,7 @@ class Plugin:
             "tune": self._tune_status(),
             "events": list(reversed(getattr(self, "events", []))),
             "launch_option": LAUNCH_OPTION,
+            "lsfg_launcher": lsfg_launcher(),
         }
 
     def _lsfg_cached(self):

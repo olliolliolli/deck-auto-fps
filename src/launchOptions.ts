@@ -18,14 +18,28 @@ export function isOldWrapper(options: string): boolean {
   return hasWrapper(options) && !/autofps-launch/.test(options);
 }
 
-/** Вставляє лаунчер перед %command%; змінні середовища та інші обгортки лишаються. */
-export function addWrapper(options: string): string {
-  const t = isOldWrapper(options) ? removeWrapper(options) : options.trim();
-  if (hasWrapper(t)) return t;
-  const i = t.indexOf(CMD);
-  if (i >= 0) return `${t.slice(0, i)}${WRAPPER} ${t.slice(i)}`.trim();
-  // без %command% Steam вважає параметри аргументами гри — зберігаємо їх після
-  return `${WRAPPER} ${CMD}${t ? " " + t : ""}`;
+// лаунчери Decky LSFG-VK (0.14+ — ~/.lsfg, старіші — ~/lsfg) і MAKO
+const LSFG_RE = /(^|\s)(~\/\.lsfg|~\/lsfg|~\/\.local\/bin\/lsfg\S*|\/home\/[^/\s]+\/(?:\.lsfg|lsfg)|\S*mako-(?:run|launch))(?=\s)/;
+
+export function hasLsfg(options: string): boolean {
+  return LSFG_RE.test(` ${options} `);
+}
+
+/** Вставляє лаунчер перед %command%; змінні середовища та інші обгортки лишаються.
+ *  lsfgLauncher — лаунчер окремого плагіна Decky LSFG-VK: додається разом з AutoFPS. */
+export function addWrapper(options: string, lsfgLauncher = ""): string {
+  let t = isOldWrapper(options) ? removeWrapper(options) : options.trim();
+  if (!hasWrapper(t)) {
+    const i = t.indexOf(CMD);
+    if (i >= 0) t = `${t.slice(0, i)}${WRAPPER} ${t.slice(i)}`.trim();
+    // без %command% Steam вважає параметри аргументами гри — зберігаємо їх після
+    else t = `${WRAPPER} ${CMD}${t ? " " + t : ""}`;
+  }
+  if (lsfgLauncher && !hasLsfg(t)) {
+    const j = t.indexOf(WRAPPER);
+    t = `${t.slice(0, j)}${lsfgLauncher} ${t.slice(j)}`.trim();
+  }
+  return t;
 }
 
 export function removeWrapper(options: string): string {

@@ -21,6 +21,7 @@ import { memo, useEffect, useMemo, useState } from "react";
 import { FaTachometerAlt } from "react-icons/fa";
 import {
   addWrapper,
+  hasLsfg,
   hasWrapper,
   isOldWrapper,
   readLaunchOptions,
@@ -35,7 +36,7 @@ type Settings = {
   drop_ratio: number;
   warmup_s: number;
   probe_s: number;
-  fg_mode: "off" | "auto" | "always";
+  fg_mode: "external" | "off" | "auto" | "always";
   fg_min_base: number;
   fg_allow_3x: boolean;
   fg_flow_scale: number;
@@ -65,6 +66,7 @@ type Tune = {
 };
 
 type Status = {
+  lsfg_launcher: string;
   device: {
     id: string;
     label: string;
@@ -204,6 +206,10 @@ const optiDirectFeedback = callable<[appid: number, ok: boolean], OptiResult>("o
 const optiPdScan = callable<[], PdStatus>("opti_pd_scan");
 const optiPdImport = callable<[path: string], PdStatus>("opti_pd_import");
 
+// Лаунчер окремого плагіна Decky LSFG-VK (з бекенда): додається в параметри разом з AutoFPS
+let lsfgLauncher = "";
+let fgExternal = true;
+
 // Номер запиту: відповідь для попередньо вибраної гри не перезапише нову
 let readSeq = 0;
 // Вибір гри переживає закриття/відкриття меню
@@ -289,14 +295,18 @@ const GameLaunchSection = memo(function GameLaunchSection() {
   // якщо список змінився (з'явилась ✓), список створюється наново з правильним вибором
   const optsKey = useMemo(() => opts.map((o) => o.label).join("|").length + ":" + opts.length, [opts]);
   const enabled = options !== null && hasWrapper(options);
-  const outdated = options !== null && isOldWrapper(options);
+  // AutoFPS увімкнено, але без лаунчера Decky LSFG-VK — пропонуємо оновити параметр
+  const needsLsfg = options !== null && hasWrapper(options) && fgExternal && !!lsfgLauncher && !hasLsfg(options);
+  const outdated = options !== null && (isOldWrapper(options) || needsLsfg);
   // параметрами гри керує Decky Launch Options — не чіпаємо, щоб не зламати запуск
   const dlo = options !== null && /\.dlo\/run/.test(options);
 
   let statusLabel = "Читаю параметри запуску…";
   if (options !== null) {
     statusLabel = outdated
-      ? "⚠ Старий параметр запуску — натисни «Оновити»"
+      ? needsLsfg
+        ? "⚠ Без Lossless — натисни «Оновити», щоб додати лаунчер Decky LSFG-VK"
+        : "⚠ Старий параметр запуску — натисни «Оновити»"
       : enabled
         ? "✓ AutoFPS увімкнено"
         : "AutoFPS не увімкнено";
@@ -316,7 +326,7 @@ const GameLaunchSection = memo(function GameLaunchSection() {
         setOptiBusy(opti.installed ? "Встановлюю в гру…" : "Завантажую OptiScaler…");
         const current = await readLaunchOptions(appid);
         if (!hasWrapper(current) || isOldWrapper(current)) {
-          const ok = await writeLaunchOptions(appid, addWrapper(current));
+          const ok = await writeLaunchOptions(appid, addWrapper(current, fgExternal ? lsfgLauncher : ""));
           if (!ok) throw new Error("Steam не зберіг параметри запуску");
           await setGameEnabled(appid, true);
         }
@@ -442,8 +452,9 @@ const GameLaunchSection = memo(function GameLaunchSection() {
       // перечитуємо саме цю гру безпосередньо перед зміною
       const current = await readLaunchOptions(appid);
       // стара форма — оновлюємо на новий лаунчер, а не вимикаємо
-      const turnOn = !hasWrapper(current) || isOldWrapper(current);
-      const next = turnOn ? addWrapper(current) : removeWrapper(current);
+      const turnOn = !hasWrapper(current) || isOldWrapper(current) ||
+        (fgExternal && !!lsfgLauncher && !hasLsfg(current));
+      const next = turnOn ? addWrapper(current, fgExternal ? lsfgLauncher : "") : removeWrapper(current);
       const ok = await writeLaunchOptions(appid, next);
       if (ok) await setGameEnabled(appid, turnOn);
       await reloadGames();
@@ -689,6 +700,8 @@ function Content() {
     const poll = async () => {
       try {
         const s = await getStatus();
+        lsfgLauncher = s.lsfg_launcher || "";
+        fgExternal = s.settings.fg_mode === "external";
         if (alive) setSt(s);
       } catch {
         /* бекенд ще стартує */
@@ -729,6 +742,7 @@ function Content() {
       .map((t) => ({ data: String(t), label: `${t} FPS` })),
   ];
   const fgOptions = [
+    { data: "external", label: "Окремий плагін Decky LSFG-VK" },
     { data: "off", label: "Вимкнено" },
     { data: "auto", label: "Авто (коли не тягне)" },
     { data: "always", label: "Завжди, якщо можна" },
@@ -851,41 +865,53 @@ function Content() {
 
       <OptiSection settings={s} update={update} />
 
-      <PanelSection title="Фрейм-генерація (lsfg-vk)">
-        <PanelSectionRow>
-          <Field
-            label={st.lsfg.ready ? "✓ Готово" : "⚠ Не готово"}
-            description={st.lsfg.hint}
-          />
-        </PanelSectionRow>
+      <PanelSection title="Фрейм-генерація (Lossless)">
         <PanelSectionRow>
           <DropdownItem
-            label="Режим"
+            label="Хто керує генерацією кадрів"
             rgOptions={fgOptions}
             selectedOption={s.fg_mode}
             onChange={(o: { data: string }) => update("fg_mode", o.data)}
           />
         </PanelSectionRow>
-        <PanelSectionRow>
-          <SliderField
-            label="Мінімальний базовий FPS"
-            description="Нижче за це FG не вмикається — інакше затримка вводу"
-            value={s.fg_min_base}
-            min={30}
-            max={60}
-            step={5}
-            showValue
-            onChange={(v: number) => update("fg_min_base", v)}
-          />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ToggleField
-            label="Дозволити ×3"
-            description="Напр. 40 → 120 на Legion Go S. Більше артефактів."
-            checked={s.fg_allow_3x}
-            onChange={(v: boolean) => update("fg_allow_3x", v)}
-          />
-        </PanelSectionRow>
+        {s.fg_mode === "external" ? (
+          <PanelSectionRow>
+            <Field
+              label={st.lsfg_launcher ? `✓ Лаунчер ${st.lsfg_launcher}` : "⚠ Decky LSFG-VK не знайдено"}
+              description={
+                st.lsfg_launcher
+                  ? "Кнопка «Увімкнути AutoFPS у цій грі» додає в параметри запуску і його лаунчер. Множник і налаштування — у плагіні Decky LSFG-VK; AutoFPS лише враховує їх при підборі FPS"
+                  : "Встанови плагін Decky LSFG-VK і ввімкни його — тоді AutoFPS додаватиме його лаунчер разом зі своїм"
+              }
+            />
+          </PanelSectionRow>
+        ) : (
+          <>
+            <PanelSectionRow>
+              <Field label={st.lsfg.ready ? "✓ Готово" : "⚠ Не готово"} description={st.lsfg.hint} />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <SliderField
+                label="Мінімальний базовий FPS"
+                description="Нижче за це FG не вмикається — інакше затримка вводу"
+                value={s.fg_min_base}
+                min={30}
+                max={60}
+                step={5}
+                showValue
+                onChange={(v: number) => update("fg_min_base", v)}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ToggleField
+                label="Дозволити ×3"
+                description="Напр. 40 → 120 на Legion Go S. Більше артефактів."
+                checked={s.fg_allow_3x}
+                onChange={(v: boolean) => update("fg_allow_3x", v)}
+              />
+            </PanelSectionRow>
+          </>
+        )}
       </PanelSection>
 
       <PanelSection title="Що зробив AutoFPS">
