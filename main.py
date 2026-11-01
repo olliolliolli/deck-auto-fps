@@ -72,6 +72,7 @@ DEFAULT_SETTINGS = {
     "fps_counts_generated": True,  # MangoHud бачить згенеровані кадри
     "autotune": True,          # автопідбір графіки гри (Unreal/Unity)
     "quality_target": "auto",  # базовий FPS, під який підбирається графіка
+    "respect_manual_graphics": False,  # True — ручні зміни в меню гри зупиняють підбір
 }
 
 
@@ -503,6 +504,7 @@ class Plugin:
     def _notify(self, title, body):
         """Тост у Steam + запис у журнал плагіна."""
         self.events.append({"t": int(time.time()), "title": title, "body": body})
+        decky.logger.info(f"[{self.appid or '-'}] {title}: {body.replace(chr(10), ' / ')}")
         del self.events[:-12]
         emit = getattr(decky, "emit", None)
         loop = getattr(self, "loop", None)
@@ -770,6 +772,7 @@ class Plugin:
             self.last_appid = self.appid
             self.cur_info = cur
             self.sfg = int(cur.get("fg", 0) or 0)
+            decky.logger.info(f"game start: {json.dumps(cur)}")
             if self.sfg >= 2:
                 self.mult = self.sfg
             self._mark_app(self.appid, seen=int(now))

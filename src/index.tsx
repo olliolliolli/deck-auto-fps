@@ -44,6 +44,7 @@ type Settings = {
   fps_counts_generated: boolean;
   autotune: boolean;
   quality_target: string;
+  respect_manual_graphics: boolean;
 };
 
 type Tune = {
@@ -201,6 +202,8 @@ const GameLaunchSection = memo(function GameLaunchSection() {
   const optsKey = useMemo(() => opts.map((o) => o.label).join("|").length + ":" + opts.length, [opts]);
   const enabled = options !== null && hasWrapper(options);
   const outdated = options !== null && isOldWrapper(options);
+  // параметрами гри керує Decky Launch Options — не чіпаємо, щоб не зламати запуск
+  const dlo = options !== null && /\.dlo\/run/.test(options);
 
   let statusLabel = "Читаю параметри запуску…";
   if (options !== null) {
@@ -210,6 +213,7 @@ const GameLaunchSection = memo(function GameLaunchSection() {
         ? "✓ AutoFPS увімкнено"
         : "AutoFPS не увімкнено";
     if (readError) statusLabel = "⚠ Steam не віддав параметри запуску";
+    if (dlo) statusLabel = "⚠ Цією грою керує Decky Launch Options";
   }
   const seenText = game?.seen
     ? `Останній запуск з AutoFPS: ${new Date(game.seen * 1000).toLocaleString()}`
@@ -261,7 +265,15 @@ const GameLaunchSection = memo(function GameLaunchSection() {
           />
         </PanelSectionRow>
       )}
-      {appid !== null && options !== null && (
+      {dlo && (
+        <PanelSectionRow>
+          <Field
+            label="AutoFPS не змінюватиме параметри цієї гри"
+            description="Два плагіни, що керують запуском однієї гри, ламають її старт. Вимкни Decky Launch Options для цієї гри, і кнопка з'явиться"
+          />
+        </PanelSectionRow>
+      )}
+      {appid !== null && options !== null && !dlo && (
         <PanelSectionRow>
           <ButtonItem layout="below" disabled={busy} onClick={toggle}>
             {outdated
@@ -425,6 +437,14 @@ function Content() {
             rgOptions={qualityOptions}
             selectedOption={s.quality_target}
             onChange={(o: { data: string }) => update("quality_target", o.data)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="Залишати мої ручні налаштування"
+            description="Увімкни, якщо після змін у меню гри AutoFPS має більше не чіпати її графіку"
+            checked={s.respect_manual_graphics}
+            onChange={(v: boolean) => update("respect_manual_graphics", v)}
           />
         </PanelSectionRow>
         {st.tune && (

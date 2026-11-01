@@ -408,7 +408,7 @@ def decide(entry, target, n):
     lvl = max(0, min(int(entry.get("level", 0)), n - 1))
     last = entry.pop("last", None)
     if entry.get("converged") or entry.get("ineffective"):
-        return lvl, entry.get("note", "")
+        return lvl, entry.get("decision_note") or entry.get("note", "")
     if not last or last.get("level") != lvl or last.get("target") != target:
         return lvl, f"Сходинка {lvl + 1}/{n}: вимірюю"
 
@@ -521,10 +521,19 @@ def run(appid, args, device=None, log=print):
         C.save_json(C.TUNE_FILE, tune)
         return
 
-    # Користувач змінив графіку в меню гри — більше не чіпаємо (до «Підібрати заново»)
+    # Користувач змінив графіку в меню гри.
+    # За замовчуванням підбір триває (плагін повертає підібрані налаштування);
+    # з увімкненим «Залишати мої ручні налаштування» — більше не чіпаємо гру.
+    respect = bool(settings.get("respect_manual_graphics", False))
+    manual_note = ""
     applied = entry.get("applied_values")
-    if applied and not entry.get("user_override") and changed_by_user(applied, adapter.read(cfg)):
-        entry["user_override"] = True
+    if applied and changed_by_user(applied, adapter.read(cfg)):
+        if respect:
+            entry["user_override"] = True
+        else:
+            manual_note = "Графіку змінено в меню гри — повертаю підібрану. "
+    if not respect:
+        entry.pop("user_override", None)
     if entry.get("user_override"):
         entry.pop("applied_level", None)
         entry["note"] = "Графіку змінено в меню гри — залишаю твої налаштування"
@@ -545,7 +554,8 @@ def run(appid, args, device=None, log=print):
     adapter.write(cfg, values)
     prev = entry.get("applied_values")
     entry.update(level=level, applied_level=level, steps=len(ladder),
-                 note=note, summary=adapter.describe(values),
+                 note=manual_note + note, decision_note=note,
+                 summary=adapter.describe(values),
                  applied_values=adapter.comparable(values),
                  changed=prev != adapter.comparable(values))
     C.save_json(C.TUNE_FILE, tune)
