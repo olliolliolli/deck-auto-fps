@@ -46,6 +46,7 @@ type Settings = {
   autotune: boolean;
   quality_target: string;
   respect_manual_graphics: boolean;
+  lowres_for_quality: boolean;
   opti_upscaler: string;
   opti_method: string;
   opti_gpu_arch: string;
@@ -888,6 +889,14 @@ function Content() {
             description="Увімкни, якщо після змін у меню гри AutoFPS має більше не чіпати її графіку"
             checked={s.respect_manual_graphics}
             onChange={(v: boolean) => update("respect_manual_graphics", v)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="Знижувати роздільність заради графіки"
+            description="Для вибагливих ігор на екрані 1080p+ (Legion Go S): якщо на повній роздільності графіку довелось сильно знизити, AutoFPS спробує рендер ≈HD (1280×800) з вищими налаштуваннями й лишить той варіант, де графіка краща (мінімум на 3 сходинки). Інтерфейс лишається чітким. Unreal і Unity"
+            checked={s.lowres_for_quality}
+            onChange={(v: boolean) => update("lowres_for_quality", v)}
           />
         </PanelSectionRow>
         {st.tune && (

@@ -50,21 +50,41 @@ UE_DELTAS = [
 ]
 
 
-def ue_ladder():
+def ue_ladder(lowres=None):
+    """lowres=67 — та сама сходинка якості, але роздільність рендеру зафіксовано (≈HD)."""
     cur = {k.split(".", 1)[1]: 3 for k in UE_KEYS}
-    cur["ResolutionQuality"] = 100
+    cur["ResolutionQuality"] = lowres or 100
     ladder = [dict(cur)]
     for d in UE_DELTAS:
-        cur.update(d)
+        cur.update({k: v for k, v in d.items() if not (lowres and k == "ResolutionQuality")})
         ladder.append(dict(cur))
     return [{f"sg.{k}": str(v) for k, v in step.items()} for step in ladder]
+
+
+# ---- Роздільність заради графіки: для екранів 1080p+ (Legion Go S 1920×1200) можна рендерити
+# у ≈HD (1280×800) і натомість тримати вищі налаштування. Вирішує замір, а не здогадка.
+LOWRES_HEIGHT = 800
+LOWRES_MIN_GAIN = 3      # мінімум на скільки сходинок якості має стати краще, щоб варто було
+
+
+def lowres_scale(device):
+    """Масштаб (%) рендеру ≈HD для цього екрана або None, якщо екран і так ≤ 1080p."""
+    h = int((device or {}).get("res", [0, 0])[1])
+    if h < 1080:
+        return None
+    return int(round(LOWRES_HEIGHT * 100.0 / h))
 
 
 RES_SCALES = [100, 85, 75, 67, 58, 50]
 
 
-def unity_ladder(q0):
-    """Чергуємо: рівень якості Unity ↓, роздільна здатність ↓."""
+def unity_ladder(q0, lowres=None):
+    """Чергуємо: рівень якості Unity ↓, роздільна здатність ↓.
+    lowres — роздільність зафіксовано на ≈HD, знижується лише рівень якості."""
+    if lowres:
+        if q0 is None:
+            return [{"quality": None, "scale": lowres}]
+        return [{"quality": q, "scale": lowres} for q in range(q0, -1, -1)]
     q = q0 if q0 is not None else None
     si = 0
     ladder = [{"quality": q, "scale": RES_SCALES[0]}]
@@ -213,8 +233,18 @@ class UnrealAdapter:
         vals = read_ini_section(cfg, self.SECTION)
         return {k: vals[k] for k in UE_KEYS if k in vals}
 
-    def ladder(self, original):
-        return ue_ladder()
+    def ladder(self, original, lowres=None):
+        return ue_ladder(lowres)
+
+    def rank(self, values, ladder):
+        """Наскільки знижено налаштування (без роздільності): номер сходинки."""
+        return ladder.index(values) if values in ladder else 0
+
+    def res_scale(self, values):
+        try:
+            return int(float(values.get("sg.ResolutionQuality", 100)))
+        except ValueError:
+            return 100
 
     def write(self, cfg, values):
         backup_once(cfg)
@@ -326,8 +356,18 @@ class UnityAdapter:
                     out[name] = int(m.group(1))
         return out
 
-    def ladder(self, original):
-        return unity_ladder(original.get("quality"))
+    lowres_min_gain = 2        # рівнів якості Unity мало (зазвичай 0–5), кожен — помітний
+
+    def ladder(self, original, lowres=None):
+        return unity_ladder(original.get("quality"), lowres)
+
+    def rank(self, values, ladder):
+        q0 = ladder[0].get("quality")
+        q = values.get("quality")
+        return 0 if q0 is None or q is None else q0 - q
+
+    def res_scale(self, values):
+        return int(values.get("scale", 100))
 
     def _concrete(self, values):
         if "scale" not in values:  # оригінальні значення при відновленні
@@ -450,7 +490,15 @@ class REEngineAdapter:
                     ceil[k] = max(ceil[k], int(v))
         return ceil
 
-    def ladder(self, original):
+    lowres_supported = False   # роздільність RE Engine не з'ясована — не чіпаємо
+
+    def rank(self, values, ladder):
+        return ladder.index(values) if values in ladder else 0
+
+    def res_scale(self, values):
+        return 100
+
+    def ladder(self, original, lowres=None):
         cur = self._ceiling(original)
         ladder = [dict(cur)]
         keys = [k for k in RE_KEYS if k in cur]
@@ -631,17 +679,61 @@ def run(appid, args, device=None, log=print):
         return
 
     target = C.quality_target(settings, device)
-    if entry.get("target") != target:
-        for k in ("history", "failed", "converged", "ineffective", "last"):
+    allow_low = bool(settings.get("lowres_for_quality", True))
+    if entry.get("target") != target or (not allow_low and entry.get("track") == "lowres"):
+        for k in ("history", "failed", "converged", "ineffective", "last", "track",
+                  "native_result", "lowres_done"):
             entry.pop(k, None)
         entry["target"] = target
 
-    ladder = adapter.ladder(entry["original"])
+    scale = lowres_scale(device) if getattr(adapter, "lowres_supported", True) else None
+    track = entry.get("track", "native")
+    ladder = adapter.ladder(entry["original"], scale if track == "lowres" else None)
     level, note = decide(entry, target, len(ladder))
+
+    # Підбір на повній роздільності завершено → чи не краще ≈HD з вищою графікою?
+    if track == "native" and entry.get("converged") and not entry.get("ineffective") \
+            and allow_low and scale and not entry.get("lowres_done"):
+        nat = ladder[level]
+        r_nat = adapter.rank(nat, ladder)
+        min_gain = getattr(adapter, "lowres_min_gain", LOWRES_MIN_GAIN)
+        if r_nat >= min_gain and adapter.res_scale(nat) >= scale + 15:
+            entry["native_result"] = {"level": level, "rank": r_nat,
+                                      "res": adapter.res_scale(nat), "note": note}
+            for k in ("history", "failed", "converged", "last"):
+                entry.pop(k, None)
+            track = entry["track"] = "lowres"
+            ladder = adapter.ladder(entry["original"], scale)
+            # ті самі налаштування на ≈HD гарантовано тягнуть ціль — далі підбір піде вгору
+            level = min(len(ladder) - 1, r_nat)
+            note = (f"На повній роздільності вийшло лише {r_nat + 1}-ю сходинкою — пробую рендер "
+                    f"{scale}% (≈{LOWRES_HEIGHT}p) з вищою графікою")
+        else:
+            entry["lowres_done"] = True
+
+    # Підбір на ≈HD завершено → порівняти з повною роздільністю й вибрати краще
+    elif track == "lowres" and entry.get("converged") and not entry.get("lowres_done"):
+        nat = entry.get("native_result") or {}
+        gain = int(nat.get("rank", 0)) - adapter.rank(ladder[level], ladder)
+        entry["lowres_done"] = True
+        if gain >= getattr(adapter, "lowres_min_gain", LOWRES_MIN_GAIN) and not entry.get("ineffective"):
+            note = (f"Рендер {scale}% (≈{LOWRES_HEIGHT}p): графіка на {gain} сходин. краща, ніж на "
+                    f"повній роздільності при тих самих {target} FPS — лишаю так")
+        else:
+            entry.pop("track", None)
+            track = "native"
+            ladder = adapter.ladder(entry["original"], None)
+            level = max(0, min(int(nat.get("level", level)), len(ladder) - 1))
+            entry["converged"] = True
+            entry.pop("ineffective", None)
+            note = (f"≈{LOWRES_HEIGHT}p дає замало виграшу ({max(gain, 0)} сходин.) — лишаю повну "
+                    "роздільність. " + (nat.get("note") or ""))
+        entry["decision_note"] = note
+
     values = ladder[level]
     adapter.write(cfg, values)
     prev = entry.get("applied_values")
-    entry.update(level=level, applied_level=level, steps=len(ladder),
+    entry.update(level=level, applied_level=level, steps=len(ladder), lowres=(track == "lowres"),
                  note=manual_note + note, decision_note=note,
                  summary=adapter.describe(values),
                  applied_values=adapter.comparable(values),

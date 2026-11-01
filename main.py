@@ -73,7 +73,8 @@ DEFAULT_SETTINGS = {
     "fps_counts_generated": True,  # MangoHud бачить згенеровані кадри
     "autotune": True,          # автопідбір графіки гри (Unreal/Unity)
     "quality_target": "auto",  # базовий FPS, під який підбирається графіка
-    "respect_manual_graphics": False,  # True — ручні зміни в меню гри зупиняють підбір
+    "respect_manual_graphics": False,
+    "lowres_for_quality": True,  # екран 1080p+: пробувати рендер ≈HD, якщо так графіка вища  # True — ручні зміни в меню гри зупиняють підбір
     "opti_upscaler": "auto",   # auto (FSR 4.1) | fsr4 | fsr40 | fsr31 | xess — чим замінювати DLSS
     "opti_method": "auto",     # auto (гра з FSR 3.1 → «один файл» FSR 4) | direct | optiscaler
     "opti_gpu_arch": "auto",   # auto | rdna2 | rdna3 | rdna4 — якщо автовизначення помилилось
@@ -587,6 +588,8 @@ class Plugin:
         if e.get("applied_level") is None:
             return e.get("note") or "Графіку не змінено"
         step = f"сходинка {e['applied_level'] + 1}/{e.get('steps', '?')}"
+        if e.get("lowres"):
+            step += ", рендер ≈HD заради графіки"
         verb = "Змінено графіку" if e.get("changed") else "Графіка без змін"
         return f"{verb} ({eng}, {step}): {e.get('summary', '')}. {e.get('note', '')}".strip()
 
