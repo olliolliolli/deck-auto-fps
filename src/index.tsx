@@ -145,6 +145,17 @@ type OptiGame = {
   unsupported: string;
   anticheat: string;
   found: boolean;
+  check: {
+    t: number;
+    status: string;
+    title: string;
+    message: string;
+    fsr_version: string;
+    proxy: string;
+  } | null;
+  dll_tried: string[];
+  dll_ok: string;
+  disabled_reason: string;
 };
 type OptiStatus = {
   gpu: { vendor: string; arch: string; name: string; forced?: boolean };
@@ -324,8 +335,14 @@ const GameLaunchSection = memo(function GameLaunchSection() {
       optiBlocked = !og.enabled;
     } else if (og.enabled) {
       optiLabel = `⚡ DLSS → ${og.upscaler ?? "FSR"} (OptiScaler ${og.tag ?? ""})`;
+      const chk = og.check
+        ? `\nОстання перевірка (${new Date(og.check.t * 1000).toLocaleString()}): ${og.check.title}. ${og.check.message}`
+        : "\nПеревірка буде після першої гри (пограй хоча б хвилину)";
       optiDesc = `${og.engine}: ${og.target}, ${og.dll}. У грі вибери DLSS у налаштуваннях графіки` +
-        (og.error ? `\n⚠ ${og.error}` : "");
+        chk + (og.error ? `\n⚠ ${og.error}` : "");
+    } else if (og.disabled_reason) {
+      optiLabel = "DLSS вимкнено самоперевіркою";
+      optiDesc = `${og.disabled_reason}. Можна спробувати ще раз — перебір почнеться спочатку`;
     } else {
       optiLabel = "DLSS вимкнено";
       optiDesc = `${og.engine} → буде ${opti?.upscaler_auto ?? "FSR 3.1"} замість DLSS. ` +

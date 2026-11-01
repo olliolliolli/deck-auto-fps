@@ -497,13 +497,40 @@ def ini_set(path, overrides):
         f.write(nl.join(lines) + nl)
 
 
-def ini_overrides(engine, appid, upscaler, opti_fg, variant=None):
+def ffx_key(src_ini):
+    """Як ця версія OptiScaler називає FSR 3.1/4 у Dx12Upscaler: 'fsr31' (0.9.x) чи 'ffx' (новіші).
+    Беремо з блоку коментарів над Dx12Upscaler у самому ini версії."""
+    block = []
+    try:
+        with open(src_ini, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                st = line.strip()
+                if st.startswith("Dx12Upscaler"):
+                    break
+                block = block + [st] if st.startswith(";") else []
+    except OSError:
+        pass
+    text = " ".join(block)
+    if re.search(r"\bffx\b", text) and not re.search(r"\bfsr31\b", text):
+        return "ffx"
+    return "fsr31"
+
+
+def ini_overrides(engine, appid, upscaler, opti_fg, variant=None, ffx="fsr31"):
+    fsr = upscaler in ("fsr4", "fsr40", "fsr31")
     ov = {
+        # журнал для самоперевірки після гри (Info — без зайвого навантаження)
+        "Log.LogToFile": "true",
+        "Log.LogLevel": "2",
+        "Log.SingleFile": "true",
         "Menu.UseHQFont": "false",          # на Proton автоматичний шрифт падає (Decky Framegen)
-        # DLSS-ігри здебільшого DX12; FSR 4 = шлях FSR 3.1 + оновлення до FSR 4
-        "Upscalers.Dx12Upscaler": "fsr31" if upscaler in ("fsr4", "fsr40") else upscaler,
+        # DLSS-ігри здебільшого DX12. FSR 3.1/4 — один шлях; бекенд задає UpscalerIndex:
+        # 0 = FSR 4, 1 = FSR 3.1 (за замовчуванням на не-RDNA4 OptiScaler бере FSR 3!)
+        "Upscalers.Dx12Upscaler": ffx if fsr else upscaler,
         "FSR.Fsr4Update": "true" if upscaler in ("fsr4", "fsr40") else "false",
     }
+    if fsr:
+        ov["FSR.UpscalerIndex"] = "1" if upscaler == "fsr31" else "0"
     if opti_fg:
         ov.update({"FrameGen.FGInput": "nukems", "FrameGen.FGOutput": "nukems"})
     else:
@@ -532,8 +559,9 @@ def _files_to_copy(src):
     return out
 
 
-def install(appid, install_path, game_name="", args=None, settings=None, log=print):
-    """Встановлює OptiScaler у гру. Повертає словник стану гри."""
+def install(appid, install_path, game_name="", args=None, settings=None, log=print, reset=False):
+    """Встановлює OptiScaler у гру. Повертає словник стану гри.
+    reset=True — ручне ввімкнення: почати перебір назв DLL спочатку."""
     settings = settings or C.load_json(C.SETTINGS_FILE, {})
     appid = str(appid)
     prof = GAME_PROFILES.get(appid, {})
@@ -555,6 +583,9 @@ def install(appid, install_path, game_name="", args=None, settings=None, log=pri
         raise RuntimeError(f"немає прав на запис у теку гри: {target}")
 
     game = load_game(appid)
+    if reset:
+        for k in ("dll", "dll_tried", "dll_ok", "disabled_reason", "check"):
+            game.pop(k, None)
     if game.get("target") and game["target"] != target and game.get("installed"):
         _remove_files(game)  # тека змінилась — прибрати старе
     dll = game.get("dll") or ENGINE_PROFILES[engine]["dll"]
@@ -613,7 +644,8 @@ def install(appid, install_path, game_name="", args=None, settings=None, log=pri
     # 4) налаштування
     ini = os.path.join(target, "OptiScaler.ini")
     if os.path.isfile(ini):
-        ini_set(ini, ini_overrides(engine, appid, upscaler, opti_fg, variant))
+        ini_set(ini, ini_overrides(engine, appid, upscaler, opti_fg, variant,
+                                   ffx_key(os.path.join(src, "OptiScaler.ini"))))
     marker = {"appid": appid, "tag": tag, "dll": dll, "files": files, "backups": backups,
               "installed_at": int(time.time())}
     with open(os.path.join(target, MARKER), "w", encoding="utf-8") as f:
@@ -696,6 +728,116 @@ def ensure(appid, args, settings=None, log=print):
     dll = game.get("dll", "dxgi.dll")
     stem = None if dll.endswith(".asi") else os.path.splitext(dll)[0]
     return stem, bool(game.get("opti_fg"))
+
+
+# ------------------------------------------------------------------ самоперевірка
+
+# порядок назв підмінної бібліотеки (вікі OptiScaler: dxgi → … → d3d12, якщо DLSS падає)
+DLL_CHAIN = ["dxgi.dll", "winmm.dll", "version.dll", "d3d12.dll"]
+MIN_RUN_FOR_VERDICT = 60      # коротша сесія без журналу — не вердикт
+CRASH_SECONDS = 20
+
+
+def _read_log(target, started):
+    path = os.path.join(target or "", "OptiScaler.log")
+    try:
+        if os.path.getmtime(path) < started - 5:
+            return ""          # журнал від попередньої сесії
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            return f.read()[-400_000:]
+    except OSError:
+        return ""
+
+
+def parse_log(text):
+    """Що OptiScaler написав про цю сесію (рядки з його вихідного коду)."""
+    working = re.findall(r"OptiScaler working as ([\w.\-]+)", text)
+    created = re.findall(r"Creating new (\w+) upscaler", text)
+    srver = re.findall(r"FfxApi Dx12 SR version: (\d+\.\d+\.\d+)", text)
+    errors = [ln.strip()[-160:] for ln in text.splitlines()
+              if re.search(r"Upscaler can't created|_createContext error|InitFSR\w* fail", ln)]
+    return {
+        "loaded": bool(working) or bool(re.search(r"OptiScaler v[\w.\-]+ loaded", text)),
+        "proxy": working[-1] if working else "",
+        "wine": "Running on Wine" in text,
+        "upscalers": sorted(set(created)),
+        "fsr_version": srver[-1] if srver else "",
+        "errors": errors[-3:],
+    }
+
+
+def _next_dll(game):
+    tried = set(game.get("dll_tried", [])) | {game.get("dll", "dxgi.dll")}
+    for name in DLL_CHAIN:
+        if name not in tried:
+            return name
+    return None
+
+
+def analyze(appid, started, duration, crashed=False, log=print):
+    """Після виходу з гри: чи OptiScaler працював. Перемикає назву DLL або вимикає.
+    Повертає {"status", "title", "message"} або None, якщо OptiScaler у грі не ввімкнено."""
+    appid = str(appid)
+    game = load_game(appid)
+    if not game.get("enabled"):
+        return None
+    info = parse_log(_read_log(game.get("target"), started))
+    dll = game.get("dll", "dxgi.dll")
+    res = {"t": int(time.time()), "duration": int(duration), "dll": dll, **info}
+
+    def switch(reason):
+        nxt = _next_dll(game)
+        tried = sorted(set(game.get("dll_tried", [])) | {dll})
+        game["dll_tried"] = tried
+        if nxt:
+            game["dll"] = nxt          # ensure() перевстановить під новою назвою
+            res["next_dll"] = nxt
+            return (f"{reason}. Наступного разу спробую назву {nxt} "
+                    f"(спроба {len(tried) + 1} з {len(DLL_CHAIN)})")
+        names = ", ".join(os.path.splitext(n)[0] for n in DLL_CHAIN)
+        game["disabled_reason"] = f"Не спрацювала жодна назва бібліотеки ({names})"
+        save_game(appid, game)
+        uninstall(appid, log)
+        game.update(load_game(appid))
+        return (f"{reason}. Перепробувано всі назви бібліотеки ({names}) — OptiScaler для цієї гри "
+                "вимкнено, оригінальні файли повернуто")
+
+    if crashed or duration < CRASH_SECONDS and not info["loaded"]:
+        res["status"] = "crash"
+        title = "DLSS: гра закрилась одразу"
+        msg = switch(f"Гра закрилась через {int(duration)} с з OptiScaler ({dll})")
+    elif not info["loaded"] and duration >= MIN_RUN_FOR_VERDICT:
+        res["status"] = "not_loaded"
+        title = "DLSS: OptiScaler не завантажився"
+        msg = switch(f"Гра не підхопила {dll}")
+    elif not info["loaded"]:
+        res["status"] = "short"
+        title = "DLSS: замало часу для перевірки"
+        msg = "Пограй хоча б хвилину — тоді плагін перевірить, чи працює OptiScaler"
+    elif info["upscalers"] and not info["errors"]:
+        res["status"] = "ok"
+        game["dll_ok"] = dll
+        lbl = game.get("upscaler_label", "FSR")
+        fsr = f" (FSR {info['fsr_version']})" if info["fsr_version"] and info["fsr_version"] not in lbl else ""
+        title = "✓ DLSS працює"
+        msg = (f"OptiScaler як {info['proxy'] or dll}, гра використовує DLSS → "
+               f"{lbl}{fsr}")
+    elif info["errors"]:
+        res["status"] = "error"
+        title = "DLSS: помилка масштабування"
+        msg = (f"OptiScaler завантажився, але не зміг створити {game.get('upscaler_label', 'FSR')}: "
+               f"{info['errors'][-1][:120]}. Спробуй «FSR 4.0» або «FSR 3.1»")
+    else:
+        res["status"] = "no_dlss"
+        game["dll_ok"] = dll
+        title = "DLSS: OptiScaler готовий, але DLSS не вибрано"
+        msg = ("OptiScaler завантажився, але гра не запитувала DLSS. "
+               "Вибери DLSS у налаштуваннях графіки гри")
+    res.update(title=title, message=msg)
+    game["check"] = res
+    save_game(appid, game)
+    log(f"самоперевірка {appid}: {res['status']} — {msg}")
+    return res
 
 
 def main():

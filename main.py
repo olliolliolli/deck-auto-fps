@@ -518,6 +518,22 @@ class Plugin:
             except Exception as e:  # noqa: BLE001
                 decky.logger.warning(f"emit failed: {e}")
 
+    def _opti_selfcheck(self, now):
+        """Після виходу з гри: перевірити журнал OptiScaler і, якщо треба, змінити назву DLL."""
+        if not self.cur_info.get("opti"):
+            return
+        crash = _load_json(os.path.join(CACHE_DIR, "last_crash.json"), None) or {}
+        crashed = (str(crash.get("appid")) == str(self.appid)
+                   and int(crash.get("t", 0)) >= int(self.game_started))
+        try:
+            res = O.analyze(self.appid, self.game_started, now - self.game_started, crashed,
+                            decky.logger.info)
+        except Exception as e:  # noqa: BLE001
+            decky.logger.error(f"OptiScaler self-check failed: {e}")
+            return
+        if res:
+            self._notify(f"AutoFPS: {res['title']}", res["message"])
+
     def _report_crash(self):
         crash = _load_json(os.path.join(CACHE_DIR, "last_crash.json"), None)
         if not crash or int(crash.get("t", 0)) <= self.last_crash_t:
@@ -772,6 +788,7 @@ class Plugin:
 
         if not cur:
             if self.appid is not None:
+                self._opti_selfcheck(now)
                 self._report_crash()
                 self._restore_display()
                 self._reset_game_state()
@@ -1108,6 +1125,9 @@ class Plugin:
                 "engine": O.ENGINE_PROFILES[engine]["label"],
                 "unsupported": prof.get("unsupported", ""),
                 "anticheat": (O.has_anticheat(install) or "") if install and os.path.isdir(install) else "",
+                "check": g.get("check") or None,
+                "dll_tried": g.get("dll_tried", []), "dll_ok": g.get("dll_ok", ""),
+                "disabled_reason": g.get("disabled_reason", ""),
                 "found": bool(install and os.path.isdir(install)),
             }
         return res
@@ -1134,7 +1154,7 @@ class Plugin:
         if not O.installed_tag():
             O.download_latest(decky.logger.info)
         return O.install(a, info["install"], info["name"], settings=self.settings,
-                         log=decky.logger.info)
+                         log=decky.logger.info, reset=True)
 
     async def opti_enable(self, appid):
         try:
@@ -1258,6 +1278,15 @@ class Plugin:
             add(f"  {os.path.basename(fn)}: enabled={g.get('enabled')} tag={g.get('tag')} "
                 f"dll={g.get('dll')} engine={g.get('engine')} upscaler={g.get('upscaler')} "
                 f"target={g.get('target')} error={g.get('error', '')}")
+            chk = g.get("check") or {}
+            if chk:
+                add(f"     перевірка: {chk.get('status')} — {chk.get('message', '')} | proxy={chk.get('proxy')} "
+                    f"fsr={chk.get('fsr_version')} upscalers={chk.get('upscalers')} errors={chk.get('errors')}")
+            if g.get("dll_tried") or g.get("disabled_reason"):
+                add(f"     спробувано: {g.get('dll_tried')} {g.get('disabled_reason', '')}")
+            log_tail = _read(os.path.join(g.get("target", ""), "OptiScaler.log")).splitlines()[-25:]
+            if log_tail:
+                add("     OptiScaler.log (кінець):\n       " + "\n       ".join(log_tail))
 
         sec("Режими запуску й падіння")
         add("lsfg_version: " + (_read(LSFG_VERSION_FILE) or "?") + "  fg_mode: " + (_read(FG_MODE_FILE) or "?"))
