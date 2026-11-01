@@ -95,11 +95,14 @@ LSFG_CONF="$CFG/lsfg-vk.toml"
 WANT=0
 if [ "$OPTI_FG" = "1" ]; then
   log "генерацію кадрів робить OptiScaler — lsfg-vk у цій грі не вмикаю"
+elif [ "$MODE" = "full" ] && [ "$FG_MODE" = "always" ]; then
+  # «Завжди» — явний вибір користувача: генерація навіть під час підбору графіки
+  # (плагін ділить FPS MangoHud на множник, тож замір лишається приблизно чесним)
+  case "$FG_SAVED" in 2|3|4) WANT="$FG_SAVED" ;; *) WANT=2 ;; esac
 elif [ "$MODE" = "full" ] && [ "$FG_MODE" != "off" ] && [ "$TUNING" != "1" ]; then
   case "$FG_SAVED" in 2|3|4) WANT="$FG_SAVED" ;; esac
-  [ "$WANT" = 0 ] && [ "$FG_MODE" = "always" ] && WANT=2
 fi
-[ "$TUNING" = "1" ] && log "графіка цієї гри ще підбирається — запуск без генерації кадрів (для чесного заміру)"
+[ "$TUNING" = "1" ] && [ "$FG_MODE" != "always" ] && log "графіка цієї гри ще підбирається — запуск без генерації кадрів (для чесного заміру; «Генерація: завжди» вмикає її й зараз)"
 
 FG_WANT="$WANT"
 USE_LSFG=0

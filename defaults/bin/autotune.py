@@ -491,6 +491,7 @@ class REEngineAdapter:
         return ceil
 
     lowres_supported = False   # роздільність RE Engine не з'ясована — не чіпаємо
+    ceiling_from_user = True   # вище за те, що ставив користувач (чи гра за замовч.), не йдемо
 
     def rank(self, values, ladder):
         return ladder.index(values) if values in ladder else 0
@@ -666,6 +667,24 @@ def run(appid, args, device=None, log=print):
     if applied and changed_by_user(applied, adapter.read(cfg)):
         if respect:
             entry["user_override"] = True
+        elif getattr(adapter, "ceiling_from_user", False):
+            # RE Engine: максимуми невідомі, стеля — те, що ставив користувач. Підвищив у меню →
+            # це нова стеля; підбір починається заново від неї (а не повертає стару низьку).
+            raised = False
+            for k, v in adapter.read(cfg).items():
+                try:
+                    if int(v) > int(entry["original"].get(k, -1)):
+                        entry["original"][k] = v
+                        raised = True
+                except ValueError:
+                    pass
+            if raised:
+                for k in ("history", "failed", "converged", "ineffective", "last",
+                          "start_scaled", "track", "native_result", "lowres_done"):
+                    entry.pop(k, None)
+                manual_note = "Ти підвищив графіку в меню — це нова стеля, підбираю від неї. "
+            else:
+                manual_note = "Графіку змінено в меню гри — повертаю підібрану. "
         else:
             manual_note = "Графіку змінено в меню гри — повертаю підібрану. "
     if not respect:
