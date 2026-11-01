@@ -20,9 +20,7 @@ import {
 import { memo, useEffect, useMemo, useState } from "react";
 import { FaTachometerAlt } from "react-icons/fa";
 import {
-  WRAPPER,
   addWrapper,
-  copyText,
   hasWrapper,
   isOldWrapper,
   readLaunchOptions,
@@ -199,7 +197,6 @@ type OptiResult = {
 };
 
 const optiStatus = callable<[appid?: number], OptiStatus>("opti_status");
-const optiCheck = callable<[], OptiStatus>("opti_check");
 const optiUpdate = callable<[], OptiResult>("opti_update");
 const optiEnable = callable<[appid: number], OptiResult>("opti_enable");
 const optiDisable = callable<[appid: number], OptiResult>("opti_disable");
@@ -606,22 +603,6 @@ const GameLaunchSection = memo(function GameLaunchSection() {
           )}
         </>
       )}
-      <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={() => {
-            const ok = copyText(`${WRAPPER} %command%`);
-            toaster.toast({
-              title: "AutoFPS",
-              body: ok
-                ? "Параметр запуску скопійовано"
-                : "Steam не дав скопіювати — скористайтеся кнопкою «Увімкнути AutoFPS у цій грі»",
-            });
-          }}
-        >
-          Скопіювати параметр запуску
-        </ButtonItem>
-      </PanelSectionRow>
     </PanelSection>
   );
 });
@@ -641,31 +622,15 @@ function OptiSection({
   if (!st) return null;
 
   const upOptions = [
-    { data: "auto", label: "Авто (FSR 4.1)" },
-    { data: "fsr4", label: "FSR 4.1 — найкраща картинка" },
-    { data: "fsr40", label: "FSR 4.0 — сумісний режим" },
+    { data: "auto", label: "Авто (FSR 4)" },
+    { data: "fsr4", label: "FSR 4 — найкраща картинка" },
     { data: "fsr31", label: "FSR 3.1 — найшвидше" },
-    { data: "xess", label: "XeSS" },
   ];
-  const archLabel: Record<string, string> = {
-    rdna2: "RDNA2", rdna3: "RDNA3", "rdna3.5": "RDNA3.5", rdna4: "RDNA4", unknown: "невідомо",
-  };
-  const archOptions = [
-    { data: "auto", label: `Авто (${archLabel[st.detected_arch] ?? st.detected_arch})` },
-    { data: "rdna2", label: "RDNA2 (Z2 Go, Steam Deck)" },
-    { data: "rdna3", label: "RDNA3 (Z1 Extreme)" },
-    { data: "rdna4", label: "RDNA4" },
-  ];
-  const usingFsr4 = settings.opti_upscaler === "auto" || settings.opti_upscaler === "fsr4" ||
-    settings.opti_upscaler === "fsr40";
-  const fsr4slow = usingFsr4 && st.gpu.arch !== "rdna4";
-  let version = st.installed ? `Встановлено ${st.installed}` : "Ще не завантажено";
+  let version = st.installed ? `OptiScaler ${st.installed}` : "OptiScaler ще не завантажено";
   if (st.latest && st.update && st.installed) version += ` · доступна ${st.latest}`;
-  if (st.latest && !st.update && st.installed) version += " · остання версія";
-  if (st.check_error) version += ` · не вдалося перевірити оновлення`;
 
   return (
-    <PanelSection title="DLSS (OptiScaler)">
+    <PanelSection title="FSR 4 / DLSS">
       {st.update && st.installed && (
         <PanelSectionRow>
           <ButtonItem
@@ -687,22 +652,13 @@ function OptiSection({
         </PanelSectionRow>
       )}
       <PanelSectionRow>
-        <Field
-          label={version}
-          description={
-            `Відеокарта: ${st.gpu.name} (${archLabel[st.gpu.arch] ?? st.gpu.arch}` +
-            `${st.gpu.forced ? ", вибрано вручну" : ""}) → ${st.current}. ` +
-            `Справжній DLSS є лише на NVIDIA — OptiScaler підставляє ` +
-            `замість нього FSR/XeSS, а гра думає, що це DLSS.` +
-            (!st.extractor ? "\n⚠ Не знайдено 7z/bsdtar для розпакування" : "")
-          }
-        />
+        <Field label={version} description={`Відеокарта: ${st.gpu.name}`} />
       </PanelSectionRow>
       <PanelSectionRow>
         <DropdownItem
-          label="Чим замінювати DLSS"
+          label="Масштабування в іграх з DLSS"
           rgOptions={upOptions}
-          selectedOption={settings.opti_upscaler}
+          selectedOption={["auto", "fsr4", "fsr31"].includes(settings.opti_upscaler) ? settings.opti_upscaler : "auto"}
           onChange={async (o: { data: string }) => {
             await update("opti_upscaler", o.data);
             setSt(await optiStatus());
@@ -711,81 +667,15 @@ function OptiSection({
       </PanelSectionRow>
       <PanelSectionRow>
         <DropdownItem
-          label="Спосіб для ігор з власним FSR 3.1"
-          description="«Один файл» (як у Deck Wizard): поруч з FSR 3.1 гри кладеться amdxcffx64.dll — вбудований FSR стає FSR 4, без OptiScaler. Capcom: MH Wilds, RE Requiem, Dragon's Dogma 2. У RE4 Remake / RE2 / RE3 / RE7 / RE8 FSR 3.1 немає — там лише REFramework + OptiScaler"
+          label="Resident Evil 4"
+          description="FSR 4 — найкраща картинка, FSR 3.1 — на ~15% більше FPS. Діє одразу, навіть посеред гри"
           rgOptions={[
-            { data: "auto", label: "Авто: «один файл», якщо гра має FSR 3.1" },
-            { data: "optiscaler", label: "Завжди OptiScaler" },
-          ]}
-          selectedOption={settings.opti_method === "optiscaler" ? "optiscaler" : "auto"}
-          onChange={(o: { data: string }) => update("opti_method", o.data)}
-        />
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <DropdownItem
-          label="Міст FSR 4 (Resident Evil 4)"
-          description="Чим міст замінює FSR 2 гри. FSR 4 — найкраща картинка; FSR 3.1 — на ~15% більше FPS на Legion Go S / Steam Deck. Діє одразу, навіть посеред гри"
-          rgOptions={[
-            { data: "4", label: "FSR 4 (якість)" },
+            { data: "4", label: "FSR 4" },
             { data: "3", label: "FSR 3.1 (швидше)" },
           ]}
           selectedOption={settings.bridge_version ?? "4"}
           onChange={(o: { data: string }) => update("bridge_version", o.data)}
         />
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <DropdownItem
-          label="Чіткість тексту в RE2/3/4/7/8, DMC5"
-          description="REFramework масштабує кадр разом з інтерфейсом, тож за низької внутрішньої роздільності текст розмитий. Вище — чіткіше, але менше FPS. Діє з наступного запуску гри"
-          rgOptions={[
-            { data: "sharp", label: "Чіткий: рендер 77%" },
-            { data: "native", label: "Найчіткіший: 100% (FSR 4 як згладжування)" },
-            { data: "auto", label: "Як вибрано в меню REFramework" },
-          ]}
-          selectedOption={settings.ref_sharpness ?? "sharp"}
-          onChange={(o: { data: string }) => update("ref_sharpness", o.data)}
-        />
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <DropdownItem
-          label="Архітектура відеокарти"
-          description="Від неї залежать файли FSR 4.1. Змінюй, лише якщо автовизначення помилилось"
-          rgOptions={archOptions}
-          selectedOption={settings.opti_gpu_arch}
-          onChange={async (o: { data: string }) => {
-            await update("opti_gpu_arch", o.data);
-            setSt(await optiStatus());
-          }}
-        />
-      </PanelSectionRow>
-      {fsr4slow && (
-        <PanelSectionRow>
-          <Field
-            label="FSR 4 на цій відеокарті важчий за FSR 3.1"
-            description="Картинка помітно краща, але частина приросту FPS іде на сам FSR 4. Якщо гра не тягне — вибери FSR 3.1"
-          />
-        </PanelSectionRow>
-      )}
-      <PanelSectionRow>
-        <ToggleField
-          label="Генерація кадрів OptiScaler"
-          description="Замість lsfg-vk у іграх з DLSS. Разом вони не працюють — AutoFPS вимкне lsfg-vk"
-          checked={settings.opti_fg}
-          onChange={(v: boolean) => update("opti_fg", v)}
-        />
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          disabled={!!busy}
-          onClick={async () => {
-            setBusy("Перевіряю…");
-            setSt(await optiCheck());
-            setBusy("");
-          }}
-        >
-          {busy === "Перевіряю…" ? busy : "Перевірити оновлення"}
-        </ButtonItem>
       </PanelSectionRow>
     </PanelSection>
   );
@@ -895,25 +785,13 @@ function Content() {
             onChange={(o: { data: string }) => update("mode", o.data)}
           />
         </PanelSectionRow>
-        <PanelSectionRow>
-          <SliderField
-            label="Запас стабільності"
-            description="Наскільки близько до цілі має бути 10% найгірших кадрів"
-            value={Math.round(s.headroom * 100)}
-            min={80}
-            max={100}
-            step={1}
-            showValue
-            onChange={(v: number) => update("headroom", v / 100)}
-          />
-        </PanelSectionRow>
       </PanelSection>
 
       <PanelSection title="Графіка гри (автопідбір)">
         <PanelSectionRow>
           <ToggleField
             label="Автоналаштування графіки"
-            description="Unreal і Unity: підбирає якість за кілька запусків гри"
+            description="Підбирає якість за кілька запусків гри"
             checked={s.autotune}
             onChange={(v: boolean) => update("autotune", v)}
           />
@@ -937,7 +815,7 @@ function Content() {
         <PanelSectionRow>
           <ToggleField
             label="Знижувати роздільність заради графіки"
-            description="Для вибагливих ігор на екрані 1080p+ (Legion Go S): якщо на повній роздільності графіку довелось сильно знизити, AutoFPS спробує рендер ≈HD (1280×800) з вищими налаштуваннями й лишить той варіант, де графіка краща (мінімум на 3 сходинки). Інтерфейс лишається чітким. Unreal і Unity"
+            description="Якщо так графіка буде помітно кращою — рендер ≈HD замість повної роздільності"
             checked={s.lowres_for_quality}
             onChange={(v: boolean) => update("lowres_for_quality", v)}
           />
@@ -1008,25 +886,6 @@ function Content() {
             onChange={(v: boolean) => update("fg_allow_3x", v)}
           />
         </PanelSectionRow>
-        <PanelSectionRow>
-          <SliderField
-            label="Flow scale"
-            description="Нижче — швидше, вище — якісніше"
-            value={Math.round(s.fg_flow_scale * 100)}
-            min={25}
-            max={100}
-            step={5}
-            showValue
-            onChange={(v: number) => update("fg_flow_scale", v / 100)}
-          />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ToggleField
-            label="Performance mode"
-            checked={s.fg_performance_mode}
-            onChange={(v: boolean) => update("fg_performance_mode", v)}
-          />
-        </PanelSectionRow>
       </PanelSection>
 
       <PanelSection title="Що зробив AutoFPS">
@@ -1065,17 +924,8 @@ function Content() {
         </PanelSectionRow>
         <PanelSectionRow>
           <Field
-            label="Як надіслати"
-            description="Файл ~/autofps-diagnostics.txt (тека «Домашня»). Найкраще зібрати під час або одразу після гри. Режим робочого столу → браузер → claude.ai → прикріпити файл до чату."
-          />
-        </PanelSectionRow>
-      </PanelSection>
-
-      <PanelSection title="Інше">
-        <PanelSectionRow>
-          <Field
-            label="Порада"
-            description="У меню швидкого доступу Steam (…) → Продуктивність вимкніть власний ліміт кадрів, щоб він не сперечався з AutoFPS."
+            label="Що далі"
+            description="Файл ~/autofps-diagnostics.txt — зібрати одразу після гри й надіслати в чат"
           />
         </PanelSectionRow>
         <PanelSectionRow>
@@ -1084,6 +934,7 @@ function Content() {
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
+
     </>
   );
 }
