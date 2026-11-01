@@ -65,6 +65,7 @@ DEFAULT_SETTINGS = {
     "drop_ratio": 0.88,        # якщо p10 < рівень * drop_ratio — знижуємо
     "warmup_s": 20,            # пропустити завантаження/шейдери
     "probe_s": 20,             # скільки секунд міряти без ліміту
+    "start_on_button": True,   # підбір FPS починається лише після кнопки «Почати підбір» (не в меню гри)
     "fg_mode": "external",     # "external" (окремий плагін Decky LSFG-VK) | "off" | "auto" | "always"
     "fg_min_base": 40,         # мінімальний базовий FPS для фрейм-генерації
     "fg_allow_3x": False,
@@ -523,6 +524,7 @@ class Plugin:
         self.last_apply = 0.0
         self.tuning = False       # цей запуск — крок автопідбору графіки
         self.manual_measured = False  # фіксований FPS: замір для автопідбору вже зроблено
+        self.user_started = False     # натиснуто «Почати підбір» у цій сесії гри
         self.warned_no_data = False
         self.cur_info = {}
         self.sfg = 0              # множник генерації кадрів, увімкненої обгорткою в цій сесії
@@ -869,6 +871,8 @@ class Plugin:
                     nxt = "застосую рівень з минулого разу після розігріву (~20 с)"
                 else:
                     nxt = "заміряю FPS після розігріву (~20–40 с)"
+                if self.settings.get("start_on_button", True):
+                    nxt = "коли почнеш грати (не в меню), відкрий AutoFPS і натисни «▶ Почати підбір»"
                 extra = self._mode_report(cur)
                 body = "\n".join([self._graphics_report(), *extra, f"Далі: {nxt}"])
                 self._notify("AutoFPS підключено", body)
@@ -881,6 +885,16 @@ class Plugin:
             return
         if self.phase == "disabled":
             self.phase, self.phase_t = "warmup", now
+
+        # Підбір за кнопкою: поки гравець у меню/заставці, нічого не міряємо й не обмежуємо
+        if self.settings.get("start_on_button", True) and not self.user_started:
+            for _ in self.reader.read(self.game_started):
+                pass                      # вичитуємо лог, щоб не накопичувати кадри меню
+            self.samples = []
+            if self.phase != "waiting":
+                self.phase, self.phase_t = "waiting", now
+            self.message = "Чекаю: коли почнеш грати, натисни «▶ Почати підбір» у меню AutoFPS"
+            return
 
         for fps, gpu in self.reader.read(self.game_started):
             if self.sfg >= 2 and self.settings["fps_counts_generated"]:
@@ -1097,6 +1111,20 @@ class Plugin:
                         O.bridge_set_version(g["target"], self.settings)
                     except Exception as e:  # noqa: BLE001
                         decky.logger.warning(f"bridge version: {e}")
+        return True
+
+    async def start_tuning(self):
+        """Кнопка «Почати підбір»: гравець уже в грі — короткий розігрів і замір."""
+        if not self.appid:
+            return False
+        self.user_started = True
+        now = time.time()
+        self.samples = []
+        # розігрів 5 с замість звичайних 20: шейдери меню вже скомпільовано
+        self.phase = "warmup"
+        self.phase_t = now - max(0.0, float(self.settings["warmup_s"]) - 5.0)
+        self.message = "Розігрів 5 с, далі замір FPS…"
+        self._notify("AutoFPS: підбір почався", "Грай як звичайно — за ~30 с AutoFPS підбере рівень FPS")
         return True
 
     async def reprobe(self):

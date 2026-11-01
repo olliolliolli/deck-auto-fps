@@ -45,6 +45,7 @@ type Settings = {
   autotune: boolean;
   quality_target: string;
   respect_manual_graphics: boolean;
+  start_on_button: boolean;
   lowres_for_quality: boolean;
   opti_upscaler: string;
   opti_method: string;
@@ -119,6 +120,7 @@ const TUNE_STATE: Record<string, string> = {
 
 const PHASE: Record<string, string> = {
   idle: "очікування",
+  waiting: "чекає на кнопку",
   warmup: "розігрів",
   probe: "вимірювання",
   locked: "стабільно",
@@ -198,6 +200,7 @@ type OptiResult = {
   method?: string;
 };
 
+const startTuning = callable<[], boolean>("start_tuning");
 const optiStatus = callable<[appid?: number], OptiStatus>("opti_status");
 const optiUpdate = callable<[], OptiResult>("opti_update");
 const optiEnable = callable<[appid: number], OptiResult>("opti_enable");
@@ -772,7 +775,20 @@ function Content() {
             />
           </PanelSectionRow>
         )}
-        {st.appid && st.phase !== "idle" && (
+        {st.appid && st.phase === "waiting" && (
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              onClick={async () => {
+                await startTuning();
+                toaster.toast({ title: "AutoFPS", body: "Підбір почався — грай як звичайно ~30 с" });
+              }}
+            >
+              ▶ Почати підбір
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
+        {st.appid && st.phase !== "idle" && st.phase !== "waiting" && (
           <PanelSectionRow>
             <ButtonItem layout="below" onClick={() => reprobe()}>
               Переміряти цю гру
@@ -789,6 +805,14 @@ function Content() {
             label="Автоматичний підбір"
             checked={s.enabled}
             onChange={(v: boolean) => update("enabled", v)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="Починати підбір за кнопкою"
+            description="Щоб не міряти FPS у меню гри: підбір стартує, коли натиснеш «▶ Почати підбір» у розділі «Стан»"
+            checked={s.start_on_button ?? true}
+            onChange={(v: boolean) => update("start_on_button", v)}
           />
         </PanelSectionRow>
         <PanelSectionRow>
