@@ -74,7 +74,8 @@ DEFAULT_SETTINGS = {
     "autotune": True,          # автопідбір графіки гри (Unreal/Unity)
     "quality_target": "auto",  # базовий FPS, під який підбирається графіка
     "respect_manual_graphics": False,  # True — ручні зміни в меню гри зупиняють підбір
-    "opti_upscaler": "auto",   # auto | fsr31 | xess | fsr4 — чим OptiScaler замінює DLSS
+    "opti_upscaler": "auto",   # auto (FSR 4.1) | fsr4 | fsr40 | fsr31 | xess — чим замінювати DLSS
+    "opti_gpu_arch": "auto",   # auto | rdna2 | rdna3 | rdna4 — якщо автовизначення помилилось
     "opti_fg": False,          # генерація кадрів OptiScaler (тоді lsfg-vk у цій грі вимикається)
 }
 
@@ -1083,13 +1084,15 @@ class Plugin:
     async def opti_status(self, appid=None):
         st = O.load_state()
         tool, _ = O.extractor()
-        gpu = O.detect_gpu()
+        gpu = O.effective_gpu(self.settings)
         res = {
             "gpu": gpu, "installed": O.installed_tag(), "latest": st.get("latest_tag"),
             "latest_name": st.get("latest_name"), "published": st.get("latest_published", ""),
             "update": O.update_available(st), "check_error": st.get("check_error", ""),
             "checked_at": st.get("checked_at", 0), "extractor": tool or "",
-            "upscaler_auto": O.resolve_upscaler("auto", gpu)[1], "game": None,
+            "upscaler_auto": O.resolve_upscaler("auto", gpu)[1],
+            "current": O.resolve_upscaler(self.settings.get("opti_upscaler", "auto"), gpu)[1],
+            "detected_arch": O.detect_gpu().get("arch"), "game": None,
         }
         if appid:
             a = str(appid)

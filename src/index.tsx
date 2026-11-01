@@ -46,6 +46,7 @@ type Settings = {
   quality_target: string;
   respect_manual_graphics: boolean;
   opti_upscaler: string;
+  opti_gpu_arch: string;
   opti_fg: boolean;
 };
 
@@ -146,7 +147,9 @@ type OptiGame = {
   found: boolean;
 };
 type OptiStatus = {
-  gpu: { vendor: string; arch: string; name: string };
+  gpu: { vendor: string; arch: string; name: string; forced?: boolean };
+  detected_arch: string;
+  current: string;
   installed: string | null;
   latest: string | null;
   latest_name: string | null;
@@ -444,12 +447,24 @@ function OptiSection({
   if (!st) return null;
 
   const upOptions = [
-    { data: "auto", label: `Авто (${st.upscaler_auto})` },
-    { data: "fsr31", label: "FSR 3.1 — швидко" },
+    { data: "auto", label: "Авто (FSR 4.1)" },
+    { data: "fsr4", label: "FSR 4.1 — найкраща картинка" },
+    { data: "fsr40", label: "FSR 4.0 — сумісний режим" },
+    { data: "fsr31", label: "FSR 3.1 — найшвидше" },
     { data: "xess", label: "XeSS" },
-    { data: "fsr4", label: "FSR 4 — найкраща картинка" },
   ];
-  const fsr4slow = settings.opti_upscaler === "fsr4" && st.gpu.arch !== "rdna4";
+  const archLabel: Record<string, string> = {
+    rdna2: "RDNA2", rdna3: "RDNA3", "rdna3.5": "RDNA3.5", rdna4: "RDNA4", unknown: "невідомо",
+  };
+  const archOptions = [
+    { data: "auto", label: `Авто (${archLabel[st.detected_arch] ?? st.detected_arch})` },
+    { data: "rdna2", label: "RDNA2 (Z2 Go, Steam Deck)" },
+    { data: "rdna3", label: "RDNA3 (Z1 Extreme)" },
+    { data: "rdna4", label: "RDNA4" },
+  ];
+  const usingFsr4 = settings.opti_upscaler === "auto" || settings.opti_upscaler === "fsr4" ||
+    settings.opti_upscaler === "fsr40";
+  const fsr4slow = usingFsr4 && st.gpu.arch !== "rdna4";
   let version = st.installed ? `Встановлено ${st.installed}` : "Ще не завантажено";
   if (st.latest && st.update && st.installed) version += ` · доступна ${st.latest}`;
   if (st.latest && !st.update && st.installed) version += " · остання версія";
@@ -481,7 +496,9 @@ function OptiSection({
         <Field
           label={version}
           description={
-            `Відеокарта: ${st.gpu.name}. Справжній DLSS є лише на NVIDIA — OptiScaler підставляє ` +
+            `Відеокарта: ${st.gpu.name} (${archLabel[st.gpu.arch] ?? st.gpu.arch}` +
+            `${st.gpu.forced ? ", вибрано вручну" : ""}) → ${st.current}. ` +
+            `Справжній DLSS є лише на NVIDIA — OptiScaler підставляє ` +
             `замість нього FSR/XeSS, а гра думає, що це DLSS.` +
             (!st.extractor ? "\n⚠ Не знайдено 7z/bsdtar для розпакування" : "")
           }
@@ -492,14 +509,29 @@ function OptiSection({
           label="Чим замінювати DLSS"
           rgOptions={upOptions}
           selectedOption={settings.opti_upscaler}
-          onChange={(o: { data: string }) => update("opti_upscaler", o.data)}
+          onChange={async (o: { data: string }) => {
+            await update("opti_upscaler", o.data);
+            setSt(await optiStatus());
+          }}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <DropdownItem
+          label="Архітектура відеокарти"
+          description="Від неї залежать файли FSR 4.1. Змінюй, лише якщо автовизначення помилилось"
+          rgOptions={archOptions}
+          selectedOption={settings.opti_gpu_arch}
+          onChange={async (o: { data: string }) => {
+            await update("opti_gpu_arch", o.data);
+            setSt(await optiStatus());
+          }}
         />
       </PanelSectionRow>
       {fsr4slow && (
         <PanelSectionRow>
           <Field
-            label="⚠ FSR 4 на цій відеокарті повільніший"
-            description="На RDNA2/3 FSR 4 працює через сумісний режим і з'їдає частину приросту FPS"
+            label="FSR 4 на цій відеокарті важчий за FSR 3.1"
+            description="Картинка помітно краща, але частина приросту FPS іде на сам FSR 4. Якщо гра не тягне — вибери FSR 3.1"
           />
         </PanelSectionRow>
       )}

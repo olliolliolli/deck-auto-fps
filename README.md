@@ -68,8 +68,17 @@ OptiScaler. Далі в грі вибери **DLSS** у налаштування
 | Cyberpunk, Witcher 3, BG3, Hitman, Darktide, Vermintide 2 | тека справжньої гри, а не лаунчера |
 | Ігри з EasyAntiCheat / BattlEye | **відмова** — ризик бану |
 
-- **Чим замінювати DLSS:** Авто (за відеокартою: RDNA4 → FSR 4, інші → FSR 3.1), FSR 3.1, XeSS, FSR 4
-  (на RDNA2/3 — сумісна INT8-збірка, повільніша).
+- **Чим замінювати DLSS:** за замовчуванням **FSR 4.1**, з файлами під архітектуру відеокарти
+  (як у Decky Framegen, з перевіркою sha256):
+
+  | Відеокарта | Варіант FSR 4.1.1 |
+  |---|---|
+  | RDNA3 — Legion Go S на Z1 Extreme | офіційна підміна драйвера `amdxcffx64.dll` 4.1.1 |
+  | RDNA2 — Legion Go S на Z2 Go, Steam Deck | Valve RDNA2: `amdxcffx64.dll` + `amdxc64.dll`, OptiScaler 0.10.0-pre1 (поки стабільна < 0.10), `Fsr4ForceModel=2`, `LoadCustomAmdxc64OnRdna2=true` |
+  | RDNA4 | FSR 4.1.1 SDK з архіву OptiScaler |
+
+  Також є FSR 4.0 (сумісний INT8), FSR 3.1 і XeSS. Архітектура визначається автоматично,
+  але її можна вибрати вручну.
 - **Генерація кадрів:** за замовчуванням лишається lsfg-vk. Перемикач «Генерація кадрів OptiScaler»
   вмикає її (FSR FG через DLSS-G) і автоматично вимикає lsfg-vk у цій грі.
 - **Оновлення:** раз на 6 год плагін перевіряє новий реліз OptiScaler, показує сповіщення й кнопку
