@@ -389,7 +389,7 @@ const GameLaunchSection = memo(function GameLaunchSection() {
     } else if (og.planned === "bridge" && !og.enabled) {
       optiLabel = "FSR 4 вимкнено · доступний міст AutoFPS";
       optiDesc = "Для цієї гри є власний міст FSR2→FSR4: чіткий інтерфейс, без REFramework і Nexus. " +
-        "Натисни кнопку нижче, потім у грі вибери FSR 2";
+        "Кнопка нижче поставить у грі FSR 2 «Продуктивність» (рендер 50%) — FSR 4 тримає картинку майже як «Якість», а FPS значно вищий";
     } else if (og.enabled && og.method === "direct") {
       optiLabel = `⚡ FSR 4 у вбудований FSR 3.1 гри (${og.upscaler ?? "один файл"})`;
       const chk = og.direct_confirmed

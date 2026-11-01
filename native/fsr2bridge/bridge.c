@@ -579,6 +579,9 @@ static void dump_dispatch(cl_state *st, const char *name, UINT x, UINT y, UINT z
 }
 
 
+static volatile LONG g_bridged, g_fallback;   /* статистика (визначено тут, бо потрібна й нижче) */
+static void write_status(const char *state);
+
 /* ------------------------------------------------------------------ налаштування (autofps_fsr.ini) */
 
 static struct {

@@ -1156,14 +1156,20 @@ def bridge_remove(game):
     game.update(bridge_files=[], bridge_backups=[])
 
 
-def _re_engine_enable_fsr2(install):
-    """Міст працює лише коли в грі ввімкнено FSR 2: якщо вимкнено — ставимо «Якість»."""
+# RE Engine: AppUpScalingTypeFSR2 — 0 вимк., 1 «Якість», 2 «Баланс», 3 «Продуктивність», 4 «Ультрапродуктивність».
+# За замовчуванням — «Продуктивність» (рендер 50%): FSR 4 сам бере свою модель для цього режиму і
+# тримає картинку майже як «Якість» FSR 2, а FPS — значно вищий (як пресет Decky Framegen для handheld).
+RE_FSR2_DEFAULT_MODE = 3
+
+
+def _re_engine_enable_fsr2(install, mode=RE_FSR2_DEFAULT_MODE):
+    """Міст працює лише коли в грі ввімкнено FSR 2: ставимо режим (типово «Продуктивність»)."""
     ini = os.path.join(install, "local_config.ini")
     try:
         text = open(ini, encoding="utf-8", errors="ignore").read()
     except OSError:
         return False
-    new = re.sub(r"^AppUpScalingTypeFSR2=0\s*$", "AppUpScalingTypeFSR2=1", text, flags=re.M)
+    new = re.sub(r"^AppUpScalingTypeFSR2=\d+\s*$", f"AppUpScalingTypeFSR2={mode}", text, flags=re.M)
     new = re.sub(r"^AppUpScalingTypeFSR1=[1-9]\d*\s*$", "AppUpScalingTypeFSR1=0", new, flags=re.M)
     if new != text:
         with open(ini, "w", encoding="utf-8") as f:
@@ -1226,7 +1232,7 @@ def bridge_install(appid, install_path, game_name="", args=None, settings=None, 
                 name=game_name or game.get("name", ""), updated=int(time.time()), error="",
                 bridge_fsr2_enabled=fsr2_on)
     save_game(appid, game)
-    log(f"міст FSR2→FSR4 → {target}" + (" (у грі ввімкнено FSR 2 «Якість»)" if fsr2_on else ""))
+    log(f"міст FSR2→FSR4 → {target}" + (" (у грі поставлено FSR 2 «Продуктивність»)" if fsr2_on else ""))
     return game
 
 
