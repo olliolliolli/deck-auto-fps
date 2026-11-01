@@ -543,8 +543,11 @@ class REEngineAdapter:
         if self.fsr4_bridge():
             # З FSR 4 роздільність — найдешевший важіль: спершу «Якість» → «Баланс» →
             # «Продуктивність» за повних налаштувань, і лише потім — графіка (на «Продуктивності»).
-            res_steps = [dict(cur, **{RE_FSR2_KEY: m}) for m in (1, 2, 3)]
-            cur = dict(cur, **{RE_FSR2_KEY: 3})
+            # режими FSR, що не опускають рендер нижче ~520p (інакше навіть FSR 4 «мило»)
+            out_h = int((self.device or {}).get("res", [0, 1200])[1])
+            modes = [m for m, ratio in ((1, 1.5), (2, 1.7), (3, 2.0)) if out_h / ratio >= 520] or [1]
+            res_steps = [dict(cur, **{RE_FSR2_KEY: m}) for m in modes]
+            cur = dict(cur, **{RE_FSR2_KEY: modes[-1]})
             rest = self._settings_steps(cur)
             return [{k: str(v) for k, v in st.items()} for st in res_steps + rest[1:]]
         return [{k: str(v) for k, v in st.items()} for st in self._settings_steps(cur)]
@@ -667,6 +670,11 @@ def run(appid, args, device=None, log=print):
         return
 
     device = device or C.detect_device()
+    # роздільність гри, вибрана в AutoFPS (Steam «Game resolution»): графіка підбирається під неї
+    res = C.load_json(os.path.join(C.CFG_DIR, "resolution.json"), {}).get(str(appid))
+    if res and re.match(r"^\d+x\d+$", res):
+        w, h = (int(x) for x in res.split("x"))
+        device = dict(device, res=[w, h], res_override=True)
     tune = C.load_json(C.TUNE_FILE, {})
     key = f"{appid}:{device['id']}"
     entry = tune.setdefault(key, {"level": device["start_level"]})
@@ -763,19 +771,22 @@ def run(appid, args, device=None, log=print):
             entry.pop(k, None)
         entry["target"] = target
 
-    scale = lowres_scale(device) if getattr(adapter, "lowres_supported", True) else None
+    scale = lowres_scale(device) if getattr(adapter, "lowres_supported", True) \
+        and not device.get("res_override") else None
     track = entry.get("track", "native")
     ladder = adapter.ladder(entry["original"], scale if track == "lowres" else None)
     # Стартова сходинка задана для 12-сходинкової драбини Unreal. У коротших (RE Engine — 4–8)
     # вона означала б «усе на мінімум» — масштабуємо пропорційно (один раз, до першого заміру).
     # Драбина змінилась (напр. увімкнено міст FSR 4 — з'явились кроки роздільності): підбір заново
-    sig = f"{len(ladder)}:{RE_FSR2_KEY in ladder[0]}:hh2"
+    sig = f"{len(ladder)}:{RE_FSR2_KEY in ladder[0]}:hh2:{device.get('res')}"
     if entry.get("ladder_sig") != sig and (entry.get("ladder_sig") or RE_FSR2_KEY in ladder[0]):
         for k in ("history", "failed", "converged", "ineffective", "last", "start_scaled"):
             entry.pop(k, None)
     entry["ladder_sig"] = sig
     if RE_FSR2_KEY in ladder[0] and not entry.get("start_scaled") and not entry.get("history"):
-        entry["level"] = 2                    # старт: «Продуктивність» за повних налаштувань
+        # старт: найнижчий дозволений режим FSR за повних (портативних) налаштувань
+        modes_n = sum(1 for st in ladder if all(st.get(k) == ladder[0].get(k) for k in ladder[0] if k != RE_FSR2_KEY))
+        entry["level"] = max(0, modes_n - 1)
         entry.pop("last", None)
         entry["start_scaled"] = True
     if not entry.get("start_scaled") and not entry.get("history"):

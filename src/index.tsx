@@ -74,6 +74,7 @@ type Status = {
     tiers: number[];
     max_hz: number;
     quality_target: number;
+    res: [number, number];
   };
   settings: Settings;
   appid: string | null;
@@ -100,6 +101,14 @@ const collectDiagnostics = callable<
   [],
   { ok: boolean; path?: string; size?: number; error?: string }
 >("collect_diagnostics");
+const setGameResolution = callable<[appid: number, res: string], boolean>("set_game_resolution");
+declare const SteamClient: any;
+// роздільності 16:10 для екрана 1920×1200 (Legion Go S)
+const RES_16_10 = [
+  { w: 1920, h: 1200, label: "Full HD+ 1920×1200 (рідна)" },
+  { w: 1440, h: 900, label: "900p 1440×900" },
+  { w: 1280, h: 800, label: "800p 1280×800" },
+];
 const setGameEnabled = callable<[appid: number, enabled: boolean], boolean>("set_game_enabled");
 const restoreOriginal = callable<[], boolean>("restore_original");
 
@@ -275,11 +284,28 @@ const GameLaunchSection = memo(function GameLaunchSection() {
       });
   };
 
+  const [nativeH, setNativeH] = useState(0);
+  const [res, setRes] = useState<string | null>(null);
+  useEffect(() => {
+    getStatus().then((s) => setNativeH(s.device.res?.[1] ?? 0)).catch(() => setNativeH(0));
+  }, []);
+  const loadRes = (id: number) => {
+    setRes(null);
+    try {
+      Promise.resolve(SteamClient.Apps.GetResolutionOverrideForApp(id))
+        .then((r: string) => { if (lastSelected === id || lastSelected === null) setRes(r || "Default"); })
+        .catch(() => setRes("Default"));
+    } catch {
+      setRes("Default");
+    }
+  };
+
   useEffect(() => {
     if (appid !== null) {
       loadOptions(appid);
       setOpti(null);
       reloadOpti(appid);
+      loadRes(appid);
     }
   }, [appid]);
 
@@ -500,6 +526,31 @@ const GameLaunchSection = memo(function GameLaunchSection() {
           <Field
             label="AutoFPS не змінюватиме параметри цієї гри"
             description="Два плагіни, що керують запуском однієї гри, ламають її старт. Вимкни Decky Launch Options для цієї гри, і кнопка з'явиться"
+          />
+        </PanelSectionRow>
+      )}
+      {appid !== null && nativeH >= 1080 && res !== null && (
+        <PanelSectionRow>
+          <DropdownItem
+            label="Роздільна здатність гри"
+            description="Гра рендерить у вибраній роздільності, екран масштабує сам. AutoFPS підбере графіку під неї (з наступного запуску)"
+            rgOptions={RES_16_10.map((r) => ({ data: r.h >= nativeH ? "Default" : `${r.w}x${r.h}`, label: r.label }))}
+            selectedOption={/^\d+x\d+$/.test(res) && RES_16_10.some((r) => `${r.w}x${r.h}` === res && r.h < nativeH) ? res : "Default"}
+            onChange={async (o: { data: string }) => {
+              try {
+                SteamClient.Apps.SetAppResolutionOverride(appid, o.data);
+                await setGameResolution(appid, o.data);
+                setRes(o.data);
+                toaster.toast({
+                  title: "AutoFPS",
+                  body: o.data === "Default"
+                    ? "Гра працюватиме в рідній роздільності"
+                    : `Роздільність гри: ${o.data.replace("x", "×")}. Графіка підбереться заново з наступного запуску`,
+                });
+              } catch (e) {
+                toaster.toast({ title: "AutoFPS", body: `Steam не змінив роздільність: ${String(e)}` });
+              }
+            }}
           />
         </PanelSectionRow>
       )}

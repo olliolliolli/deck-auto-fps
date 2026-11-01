@@ -1113,6 +1113,27 @@ class Plugin:
                         decky.logger.warning(f"bridge version: {e}")
         return True
 
+    async def set_game_resolution(self, appid, res):
+        """Вибрана в AutoFPS роздільність гри (Steam ставить її сам; тут — для підбору графіки)."""
+        a = str(appid)
+        path = os.path.join(CFG_DIR, "resolution.json")
+        data = _load_json(path, {})
+        if res and res not in ("Default", "Native"):
+            data[a] = res
+        else:
+            data.pop(a, None)
+        _save_json(path, data)
+        # нова роздільність — графіку й рівень FPS підбираємо заново
+        tune = _load_json(TUNE_FILE, {})
+        for k in list(tune):
+            if k.startswith(f"{a}:"):
+                for f in ("history", "failed", "converged", "ineffective", "last", "start_scaled", "ladder_sig"):
+                    tune[k].pop(f, None)
+        _save_json(TUNE_FILE, tune)
+        self.games.pop(a, None)
+        _save_json(GAMES_FILE, self.games)
+        return True
+
     async def start_tuning(self):
         """Кнопка «Почати підбір»: гравець уже в грі — короткий розігрів і замір."""
         if not self.appid:
