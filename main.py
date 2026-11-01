@@ -32,7 +32,27 @@ HOME = C.HOME
 CFG_DIR, CACHE_DIR, LOG_DIR = C.CFG_DIR, C.CACHE_DIR, C.LOG_DIR
 CURRENT_FILE, SETTINGS_FILE, GAMES_FILE = C.CURRENT_FILE, C.SETTINGS_FILE, C.GAMES_FILE
 TUNE_FILE, LSFG_CONF, PROFILES_DIR = C.TUNE_FILE, C.LSFG_CONF, C.PROFILES_DIR
-APPS_FILE = os.path.join(CFG_DIR, "apps.json")  # {appid: {"enabled": bool, "seen": ts}}
+APPS_FILE = os.path.join(CFG_DIR, "apps.json")
+LAUNCHER = os.path.join(HOME, ".local", "bin", "autofps-launch")
+LAUNCH_OPTION = "~/.local/bin/autofps-launch %command%"
+
+
+def install_launcher():
+    """Стабільний лаунчер у домашній теці (не залежить від назви теки плагіна і прав).
+    Якщо плагін видалять — гра все одно запуститься як звичайно."""
+    real = os.path.join(_PLUGIN_DIR, "bin", "autofps")
+    text = (
+        "#!/bin/bash\n"
+        "# AutoFPS launcher (створено плагіном AutoFPS)\n"
+        f'REAL={json.dumps(real)}\n'
+        'if [ -f "$REAL" ]; then exec bash "$REAL" "$@"; fi\n'
+        'exec "$@"\n'
+    )
+    os.makedirs(os.path.dirname(LAUNCHER), exist_ok=True)
+    if _read(LAUNCHER) != text.strip():
+        with open(LAUNCHER, "w", encoding="utf-8") as f:
+            f.write(text)
+    os.chmod(LAUNCHER, 0o755)  # {appid: {"enabled": bool, "seen": ts}}
 
 _read, _load_json, _save_json = C.read_text, C.load_json, C.save_json
 percentile, detect_device = C.percentile, C.detect_device
@@ -122,17 +142,14 @@ def write_lsfg(settings, multiplier):
     lines = ["version = 2", "", "[global]"]
     if dll:
         lines.append(f"dll = {json.dumps(dll)}")
+    # лише ключі, які однаково звуться в усіх версіях v2; решта — типові значення
     lines += [
-        "allow_fp16 = true",
         "",
-        "[[profile]]  # керується AutoFPS",
+        "[[profile]]",
         f'name = "{LSFG_PROFILE}"',
-        'pacing_mode = "vsync"',
         f"multiplier = {int(max(1, multiplier))}",
         f"flow_scale = {flow:.2f}",
         f"performance_mode = {'true' if settings['fg_performance_mode'] else 'false'}",
-        "override_present_mode = true",
-        "preserve_swapchain_image_count = false",
     ]
     text = "\n".join(lines) + "\n"
     os.makedirs(CFG_DIR, exist_ok=True)
@@ -200,15 +217,21 @@ def _decky_plugins():
 
 
 def _find_dll():
-    """Lossless.dll: з конфіга Decky LSFG-VK або з бібліотек Steam."""
+    """lsfg-vk.dll (lsfg-vk v2 бере його з бета-гілки «lsfg-vk» Lossless Scaling).
+    Старий Lossless.dll для v2 НЕ підходить — його ніколи не прописуємо."""
     dll = _lsfg_dll_path()
-    if dll and os.path.isfile(dll):
+    if dll and os.path.basename(dll).lower() == "lsfg-vk.dll" and os.path.isfile(dll):
         return dll
     for lib in _steam_libraries():
-        cand = os.path.join(lib, "common", "Lossless Scaling", "Lossless.dll")
+        cand = os.path.join(lib, "common", "Lossless Scaling", "lsfg-vk.dll")
         if os.path.isfile(cand):
             return cand
     return ""
+
+
+def _has_old_lossless():
+    return any(os.path.isfile(os.path.join(lib, "common", "Lossless Scaling", "Lossless.dll"))
+               for lib in _steam_libraries())
 
 
 def lsfg_status():
@@ -223,10 +246,14 @@ def lsfg_status():
     dll = _find_dll()
 
     if has_lsfg and dll:
-        hint, ready = "lsfg-vk встановлено, Lossless Scaling знайдено — генерація кадрів готова", True
+        hint, ready = "lsfg-vk встановлено, lsfg-vk.dll знайдено — генерація кадрів готова", True
+    elif has_lsfg and _has_old_lossless():
+        hint, ready = ("lsfg-vk встановлено, але Lossless Scaling не на потрібній гілці. Steam → "
+                       "Lossless Scaling → Властивості → Бета-версії → вибери «lsfg-vk» і дочекайся "
+                       "оновлення (або зроби це кнопкою в Decky LSFG-VK)"), False
     elif has_lsfg:
-        hint, ready = ("lsfg-vk встановлено, але не знайдено Lossless.dll. Встанови Lossless Scaling "
-                       "у Steam (потрібна купівля), потім у Decky LSFG-VK перевір шлях до DLL"), False
+        hint, ready = ("lsfg-vk встановлено, але не знайдено lsfg-vk.dll. Встанови Lossless Scaling "
+                       "у Steam (потрібна купівля) і переключи на бета-гілку «lsfg-vk»"), False
     elif lsfg_plugin:
         hint, ready = (f"Плагін «{lsfg_plugin}» є, але сам lsfg-vk не встановлено. "
                        "Відкрий його в Decky і натисни «Install lsfg-vk»"), False
@@ -325,6 +352,11 @@ class Plugin:
         self.last_appid = None
         self.events = []
         self.loop = asyncio.get_event_loop()
+        self.last_crash_t = int(time.time())
+        try:
+            install_launcher()
+        except Exception as e:  # noqa: BLE001
+            decky.logger.error(f"launcher install failed: {e}")
         write_lsfg(self.settings, 1)
         decky.logger.info(f"AutoFPS started on {self.device['label']}")
         self.task = asyncio.get_event_loop().create_task(self._loop())
@@ -355,6 +387,7 @@ class Plugin:
         self.last_apply = 0.0
         self.tuning = False       # цей запуск — крок автопідбору графіки
         self.warned_no_data = False
+        self.cur_info = {}
         self.message = "Гра не запущена через AutoFPS"
 
     def _restore_display(self):
@@ -378,6 +411,31 @@ class Plugin:
                 loop.create_task(emit("autofps_toast", title, body))
             except Exception as e:  # noqa: BLE001
                 decky.logger.warning(f"emit failed: {e}")
+
+    def _report_crash(self):
+        crash = _load_json(os.path.join(CACHE_DIR, "last_crash.json"), None)
+        if not crash or int(crash.get("t", 0)) <= self.last_crash_t:
+            return
+        self.last_crash_t = int(crash["t"])
+        nxt = {"nolsfg": "без генерації кадрів",
+               "safe": "без втручання AutoFPS (безпечний режим)"}.get(crash.get("to"), "")
+        self._notify("AutoFPS: гра закрилась одразу",
+                     f"Гра працювала {crash.get('dur')} с (код {crash.get('rc')}). "
+                     + (f"Наступний запуск — {nxt}. " if nxt else "")
+                     + "Збери діагностику й надішли Claude")
+
+    def _mode_report(self, cur):
+        mode = cur.get("mode", "full")
+        parts = []
+        if mode == "nolsfg":
+            parts.append("Режим без генерації кадрів (минулого разу гра впала на старті)")
+        elif mode == "safe":
+            parts.append("Безпечний режим: AutoFPS нічого не змінює (гра падала на старті)")
+        elif cur.get("lsfg") == 0 and self.settings["fg_mode"] != "off":
+            parts.append("Генерація кадрів недоступна — деталі в меню плагіна")
+        if cur.get("mangohud") == 0 and mode != "safe":
+            parts.append("MangoHud недоступний — FPS не вимірюється")
+        return parts
 
     def _graphics_report(self):
         """Що зроблено з графікою гри на цьому запуску (пише bin/autotune.py)."""
@@ -419,7 +477,8 @@ class Plugin:
         h = float(self.settings["headroom"])
         native = max([t for t in tiers if p10 >= t * h], default=tiers[0])
         fg = self.settings["fg_mode"]
-        if fg == "off" or not self._lsfg_cached()["ready"]:
+        session_lsfg = getattr(self, "cur_info", {}).get("lsfg", 1)
+        if fg == "off" or not self._lsfg_cached()["ready"] or not session_lsfg:
             return native, 1
         mults = [2, 3] if self.settings["fg_allow_3x"] else [2]
         best = (native, 1)
@@ -550,6 +609,7 @@ class Plugin:
 
         if not cur:
             if self.appid is not None:
+                self._report_crash()
                 self._restore_display()
                 self._reset_game_state()
                 self.reader.reset()
@@ -563,13 +623,16 @@ class Plugin:
             self.game_started = float(cur.get("started", now))
             self.phase, self.phase_t = "warmup", now
             self.last_appid = self.appid
+            self.cur_info = cur
             self._mark_app(self.appid, seen=int(now))
             self.tuning = self._tuning_active(self._tune_entry())
             self.message = "Розігрів (завантаження, шейдери)…"
             if self.settings["enabled"]:
                 nxt = ("заміряю FPS після розігріву (~20–40 с)" if self.settings["mode"] == "auto"
                        else f"фіксовано {self.settings['mode']} FPS")
-                self._notify("AutoFPS підключено", f"{self._graphics_report()}\nДалі: {nxt}")
+                extra = self._mode_report(cur)
+                body = "\n".join([self._graphics_report(), *extra, f"Далі: {nxt}"])
+                self._notify("AutoFPS підключено", body)
 
         if not self.settings["enabled"]:
             if self.phase != "disabled":
@@ -622,7 +685,7 @@ class Plugin:
                 if len(fps) < 10:
                     self.message = ("Немає даних FPS. Перевірте параметр запуску "
                                     "та що MangoHud встановлений")
-                    if not self.warned_no_data:
+                    if not self.warned_no_data and self.cur_info.get("mangohud", 1):
                         self.warned_no_data = True
                         self._notify("AutoFPS: немає даних FPS",
                                      "MangoHud не пише лог — FPS не підбирається. "
@@ -688,7 +751,7 @@ class Plugin:
             "lsfg": self._lsfg_cached(),
             "tune": self._tune_status(),
             "events": list(reversed(getattr(self, "events", []))),
-            "launch_option": f"bash {HOME}/homebrew/plugins/AutoFPS/bin/autofps %command%",
+            "launch_option": LAUNCH_OPTION,
         }
 
     def _lsfg_cached(self):
@@ -766,6 +829,11 @@ class Plugin:
     async def set_game_enabled(self, appid, enabled):
         """Фронтенд повідомляє, що змінив параметри запуску гри."""
         self._mark_app(appid, enabled=enabled)
+        if enabled:  # нове увімкнення — знову повний режим
+            try:
+                os.remove(os.path.join(CFG_DIR, f"mode_{appid}"))
+            except OSError:
+                pass
         return True
 
     async def list_games(self):
@@ -893,6 +961,13 @@ class Plugin:
                     found = True
         if not found:
             add("  (не знайдено; Steam може записати зміни у файл пізніше)")
+
+        sec("Режими запуску й падіння")
+        for fn in sorted(glob.glob(os.path.join(CFG_DIR, "mode_*"))):
+            add(f"  {os.path.basename(fn)}: {_read(fn)}")
+        add("last_crash.json: " + (_read(os.path.join(CACHE_DIR, "last_crash.json")) or "(немає)"))
+        add(f"launcher: {LAUNCHER} → " + ("є" if os.path.isfile(LAUNCHER) else "НЕМАЄ")
+            + f", plugin dir: {_PLUGIN_DIR}")
 
         sec("wrapper.log (останні 80 рядків)")
         add(tail(os.path.join(CACHE_DIR, "wrapper.log"), 80))

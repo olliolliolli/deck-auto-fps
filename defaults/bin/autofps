@@ -1,43 +1,116 @@
 #!/bin/bash
 # AutoFPS — обгортка запуску гри.
-# Параметр запуску в Steam:  bash ~/homebrew/plugins/AutoFPS/bin/autofps %command%
+# Параметр запуску в Steam:  ~/.local/bin/autofps-launch %command%
+# (лаунчер створює плагін; він викликає цей файл, а якщо плагін видалено — просто гру)
 #
 # 1) автоматично налаштовує графіку гри (самонавчання між запусками)
 # 2) вмикає невидимий лог MangoHud, з якого плагін бере FPS
 # 3) підключає фрейм-генерацію lsfg-vk з керованим плагіном профілем
+#
+# Головне правило: гра має запуститися ЗА БУДЬ-ЯКИХ умов. Тому:
+#  - конфіг lsfg-vk перевіряється перед запуском (lsfg-vk-cli validate);
+#  - якщо гра впала в перші секунди, наступний запуск іде в безпечнішому режимі:
+#      full → nolsfg (без генерації кадрів) → safe (без MangoHud, lsfg і змін графіки);
+#  - кожен крок пишеться в ~/.cache/autofps/wrapper.log.
 
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 CACHE="$HOME/.cache/autofps"
 CFG="$HOME/.config/autofps"
-mkdir -p "$CACHE/logs" "$CFG"
+LOG="$CACHE/wrapper.log"
+mkdir -p "$CACHE/logs" "$CFG" 2>/dev/null
+
+log() { echo "[$(date '+%F %T')] $*" >>"$LOG" 2>/dev/null; }
+
+# лог не росте безмежно
+if [ -f "$LOG" ] && [ "$(wc -c <"$LOG" 2>/dev/null || echo 0)" -gt 300000 ]; then
+  tail -n 400 "$LOG" >"$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
+fi
 
 APPID="${SteamAppId:-${SteamGameId:-0}}"
+FAST_EXIT="${AUTOFPS_FAST_EXIT:-20}"   # гра, що закрилась швидше — вважається такою, що впала на старті
 
-# старі логи (>2 днів) прибираємо
+log "=== Запуск гри appid=$APPID"
+log "команда: $(printf '%q ' "$@" | cut -c1-700)"
+
+# --- режим для цієї гри (понижується після падінь на старті)
+MODE_FILE="$CFG/mode_$APPID"
+MODE="$(cat "$MODE_FILE" 2>/dev/null)"
+case "$MODE" in full|nolsfg|safe) ;; *) MODE=full ;; esac
+log "режим: $MODE"
+
 find "$CACHE/logs" -name '*.csv' -mtime +2 -delete 2>/dev/null
 
-# автопідбір графіки гри (Unreal/Unity) або ручний профіль, якщо він є.
-# Гра ще не запущена — тож її файли налаштувань можна безпечно редагувати.
-timeout 15 python3 "$DIR/autotune.py" "$APPID" "$@" >>"$CACHE/wrapper.log" 2>&1 || true
+# --- автопідбір графіки (не в безпечному режимі: зміни конфігів теж можуть бути причиною)
+if [ "$MODE" != "safe" ] && [ -f "$DIR/autotune.py" ]; then
+  timeout 15 python3 "$DIR/autotune.py" "$APPID" "$@" >>"$LOG" 2>&1 \
+    || log "autotune завершився з помилкою (ігнорую)"
+fi
 
-# PID лишається тим самим після exec — по ньому плагін бачить, що гра жива
-printf '{"appid":"%s","pid":%d,"started":%d}\n' "$APPID" "$$" "$(date +%s)" \
-  > "$CACHE/current.json"
+# --- MangoHud: невидимий лог FPS кожні 250 мс
+USE_MANGO=0
+if [ "$MODE" != "safe" ]; then
+  if command -v mangohud >/dev/null 2>&1; then
+    USE_MANGO=1
+    export MANGOHUD=1
+    export MANGOHUD_CONFIG="autostart_log=1,log_interval=250,log_duration=0,output_folder=$CACHE/logs,alpha=0.0,background_alpha=0.0"
+  else
+    log "mangohud не знайдено — FPS не вимірюватиметься"
+  fi
+fi
 
-# MangoHud: лог кожні 250 мс, оверлей прозорий (no_display ламає лог)
-export MANGOHUD=1
-export MANGOHUD_CONFIG="autostart_log=1,log_interval=250,log_duration=0,output_folder=$CACHE/logs,alpha=0.0,background_alpha=0.0,font_size=1"
-
-# lsfg-vk v2 (ставить Decky LSFG-VK): наш окремий конфіг і профіль "autofps".
-# multiplier=1 у профілі = без генерації; плагін змінює його на льоту.
-if [ -f "$CFG/lsfg-vk.toml" ]; then
-  export LSFGVK_CONFIG="$CFG/lsfg-vk.toml"
+# --- lsfg-vk v2: лише з перевіреним конфігом
+USE_LSFG=0
+LSFG_CONF="$CFG/lsfg-vk.toml"
+if [ "$MODE" = "full" ] && [ -f "$LSFG_CONF" ]; then
+  CLI="$HOME/.local/bin/lsfg-vk-cli"
+  if [ -x "$CLI" ]; then
+    if OUT="$(timeout 10 "$CLI" validate --config "$LSFG_CONF" --print 2>&1)"; then
+      case "$OUT" in
+        *"The DLL file does not exist"*|*"DLL override: (none)"*)
+          log "lsfg-vk.dll не знайдено (Lossless Scaling має бути на бета-гілці lsfg-vk) — генерацію кадрів вимкнено" ;;
+        *) USE_LSFG=1 ;;
+      esac
+    else
+      log "конфіг lsfg-vk не пройшов перевірку — генерацію кадрів вимкнено: $(echo "$OUT" | tr '\n' ' ' | cut -c1-400)"
+    fi
+  else
+    log "lsfg-vk-cli не знайдено — генерацію кадрів не вмикаю (встанови lsfg-vk у Decky LSFG-VK)"
+  fi
+fi
+if [ "$USE_LSFG" = 1 ]; then
+  export LSFGVK_CONFIG="$LSFG_CONF"
   export LSFGVK_PROFILE="autofps"
-fi
-
-if command -v mangohud >/dev/null 2>&1; then
-  exec mangohud "$@"
 else
-  echo "AutoFPS: mangohud не знайдено, FPS не вимірюватиметься" >>"$CACHE/wrapper.log"
-  exec "$@"
+  # не даємо чужим налаштуванням lsfg-vk увімкнутись поверх наших
+  export DISABLE_LSFGVK=1
 fi
+log "mangohud=$USE_MANGO lsfg=$USE_LSFG"
+
+printf '{"appid":"%s","pid":%d,"started":%d,"mode":"%s","mangohud":%d,"lsfg":%d}\n' \
+  "$APPID" "$$" "$(date +%s)" "$MODE" "$USE_MANGO" "$USE_LSFG" >"$CACHE/current.json"
+
+# --- запуск (дочірнім процесом, щоб знати, чи гра не впала одразу)
+START=$(date +%s)
+if [ "$USE_MANGO" = 1 ]; then
+  mangohud "$@"
+else
+  "$@"
+fi
+RC=$?
+DUR=$(( $(date +%s) - START ))
+log "гра завершилась через ${DUR} с, код $RC"
+
+if [ "$DUR" -lt "$FAST_EXIT" ]; then
+  case "$MODE" in
+    full)   NEXT=nolsfg ;;
+    nolsfg) NEXT=safe ;;
+    *)      NEXT=safe ;;
+  esac
+  if [ "$NEXT" != "$MODE" ]; then
+    echo "$NEXT" >"$MODE_FILE"
+    log "гра закрилась за ${DUR} с — наступний запуск у режимі $NEXT"
+  fi
+  printf '{"appid":"%s","t":%d,"from":"%s","to":"%s","dur":%d,"rc":%d}\n' \
+    "$APPID" "$(date +%s)" "$MODE" "$NEXT" "$DUR" "$RC" >"$CACHE/last_crash.json"
+fi
+exit $RC

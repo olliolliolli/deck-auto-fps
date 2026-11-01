@@ -3,17 +3,24 @@
 
 declare const SteamClient: any;
 
-export const WRAPPER = "bash ~/homebrew/plugins/AutoFPS/bin/autofps";
+export const WRAPPER = "~/.local/bin/autofps-launch";
 const CMD = "%command%";
-const WRAPPER_RE = /(?:bash\s+)?\S*AutoFPS\/bin\/autofps\s*/g;
+// нова форма (~/.local/bin/autofps-launch) і стара (bash …/AutoFPS/bin/autofps)
+const WRAPPER_RE = /(?:bash\s+)?\S*(?:autofps-launch|AutoFPS\/bin\/autofps)\s*/g;
 
 export function hasWrapper(options: string): boolean {
-  return /AutoFPS\/bin\/autofps/.test(options);
+  return /autofps-launch|AutoFPS\/bin\/autofps/.test(options);
 }
 
 /** Вставляє обгортку перед %command%; змінні середовища та інші обгортки лишаються. */
+/** Стара форма (bash …/AutoFPS/bin/autofps) — потребує оновлення. */
+export function isOldWrapper(options: string): boolean {
+  return hasWrapper(options) && !/autofps-launch/.test(options);
+}
+
+/** Вставляє лаунчер перед %command%; змінні середовища та інші обгортки лишаються. */
 export function addWrapper(options: string): string {
-  const t = options.trim();
+  const t = isOldWrapper(options) ? removeWrapper(options) : options.trim();
   if (hasWrapper(t)) return t;
   const i = t.indexOf(CMD);
   if (i >= 0) return `${t.slice(0, i)}${WRAPPER} ${t.slice(i)}`.trim();

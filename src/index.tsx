@@ -23,6 +23,7 @@ import {
   addWrapper,
   copyText,
   hasWrapper,
+  isOldWrapper,
   readLaunchOptions,
   removeWrapper,
   writeLaunchOptions,
@@ -199,10 +200,15 @@ const GameLaunchSection = memo(function GameLaunchSection() {
   // якщо список змінився (з'явилась ✓), список створюється наново з правильним вибором
   const optsKey = useMemo(() => opts.map((o) => o.label).join("|").length + ":" + opts.length, [opts]);
   const enabled = options !== null && hasWrapper(options);
+  const outdated = options !== null && isOldWrapper(options);
 
   let statusLabel = "Читаю параметри запуску…";
   if (options !== null) {
-    statusLabel = enabled ? "✓ AutoFPS увімкнено" : "AutoFPS не увімкнено";
+    statusLabel = outdated
+      ? "⚠ Старий параметр запуску — натисни «Оновити»"
+      : enabled
+        ? "✓ AutoFPS увімкнено"
+        : "AutoFPS не увімкнено";
     if (readError) statusLabel = "⚠ Steam не віддав параметри запуску";
   }
   const seenText = game?.seen
@@ -215,7 +221,8 @@ const GameLaunchSection = memo(function GameLaunchSection() {
     try {
       // перечитуємо саме цю гру безпосередньо перед зміною
       const current = await readLaunchOptions(appid);
-      const turnOn = !hasWrapper(current);
+      // стара форма — оновлюємо на новий лаунчер, а не вимикаємо
+      const turnOn = !hasWrapper(current) || isOldWrapper(current);
       const next = turnOn ? addWrapper(current) : removeWrapper(current);
       const ok = await writeLaunchOptions(appid, next);
       if (ok) await setGameEnabled(appid, turnOn);
@@ -257,7 +264,11 @@ const GameLaunchSection = memo(function GameLaunchSection() {
       {appid !== null && options !== null && (
         <PanelSectionRow>
           <ButtonItem layout="below" disabled={busy} onClick={toggle}>
-            {enabled ? "Вимкнути AutoFPS у цій грі" : "Увімкнути AutoFPS у цій грі"}
+            {outdated
+              ? "Оновити параметр запуску"
+              : enabled
+                ? "Вимкнути AutoFPS у цій грі"
+                : "Увімкнути AutoFPS у цій грі"}
           </ButtonItem>
         </PanelSectionRow>
       )}
