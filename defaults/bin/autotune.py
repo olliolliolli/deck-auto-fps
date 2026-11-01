@@ -446,6 +446,7 @@ RE_KEYS = [  # порядок: що дає найбільше FPS за найм�
     "AppAmbientOcclusion", "AppSSRefrection", "AppContactShadow", "AppSSSSSetting",
     "AppParticleLighting", "AppMeshQuality", "AppTessellation", "AppLensFrare", "AppBloom",
 ]
+RE_FSR2_KEY = "AppUpScalingTypeFSR2"   # 1 «Якість», 2 «Баланс», 3 «Продуктивність» (з мостом — FSR 4)
 RE_TO_ZERO = {"AppRayTraceOnOff", "AppStrandHair", "AppSSRefrection", "AppContactShadow"}
 RE_LABELS = {"AppShadowQuality": "тіні", "AppVolumeLightQuality": "об'ємне світло",
              "AppAmbientOcclusion": "AO", "AppMeshQuality": "моделі", "AppStrandHair": "волосся",
@@ -458,10 +459,16 @@ class REEngineAdapter:
 
     def __init__(self, install, compat, device):
         self.install, self.compat, self.device = install, compat, device
+        self.appid = ""
 
     @staticmethod
     def detect(install):
         return bool(glob.glob(os.path.join(install, "re_chunk_000.pak*")))
+
+    def fsr4_bridge(self):
+        """У грі стоїть наш міст FSR2→FSR4 — тоді першим знижуємо роздільність (режим FSR 2)."""
+        g = C.load_json(os.path.join(C.CFG_DIR, "optiscaler_games", f"{self.appid}.json"), {})
+        return bool(g.get("enabled") and g.get("method") == "bridge")
 
     def _inis(self, default):
         out = []
@@ -501,6 +508,17 @@ class REEngineAdapter:
 
     def ladder(self, original, lowres=None):
         cur = self._ceiling(original)
+        if self.fsr4_bridge():
+            # З FSR 4 роздільність — найдешевший важіль: спершу «Якість» → «Баланс» →
+            # «Продуктивність» за повних налаштувань, і лише потім — графіка (на «Продуктивності»).
+            res_steps = [dict(cur, **{RE_FSR2_KEY: m}) for m in (1, 2, 3)]
+            cur = dict(cur, **{RE_FSR2_KEY: 3})
+            rest = self._settings_steps(cur)
+            return [{k: str(v) for k, v in st.items()} for st in res_steps + rest[1:]]
+        return [{k: str(v) for k, v in st.items()} for st in self._settings_steps(cur)]
+
+    def _settings_steps(self, cur):
+        cur = dict(cur)
         ladder = [dict(cur)]
         keys = [k for k in RE_KEYS if k in cur]
         for _ in range(14):
@@ -514,13 +532,13 @@ class REEngineAdapter:
             if not changed:
                 break
             ladder.append(dict(cur))
-        return [{k: str(v) for k, v in step.items()} for step in ladder]
+        return ladder
 
     def write(self, cfg, values):
         backup_once(cfg)
         with open(cfg, encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
-        new = patch_ini(lines, {self.SECTION: {k: v for k, v in values.items() if k in RE_KEYS}})
+        new = patch_ini(lines, {self.SECTION: {k: v for k, v in values.items() if k in RE_KEYS or k == RE_FSR2_KEY}})
         with open(cfg, "w", encoding="utf-8") as f:
             f.writelines(new)
 
@@ -531,7 +549,11 @@ class REEngineAdapter:
         return dict(values)
 
     def describe(self, values):
-        parts = [f"{RE_LABELS[k]} {values[k]}" for k in RE_LABELS if k in values]
+        parts = []
+        if RE_FSR2_KEY in values:
+            parts.append("FSR 4 «" + {"1": "Якість", "2": "Баланс", "3": "Продуктивність", "4": "Ультра"}.get(
+                str(values[RE_FSR2_KEY]), "?") + "»")
+        parts += [f"{RE_LABELS[k]} {values[k]}" for k in RE_LABELS if k in values]
         return ", ".join(parts) or "налаштування RE Engine"
 
 
@@ -626,6 +648,7 @@ def run(appid, args, device=None, log=print):
     for A in ADAPTERS:
         if entry.get("engine") in (None, "unknown", A.engine) and A.detect(install):
             adapter = A(install, compat, device)
+            adapter.appid = appid
             break
     if not adapter:
         entry["engine"] = "unknown"
@@ -710,6 +733,16 @@ def run(appid, args, device=None, log=print):
     ladder = adapter.ladder(entry["original"], scale if track == "lowres" else None)
     # Стартова сходинка задана для 12-сходинкової драбини Unreal. У коротших (RE Engine — 4–8)
     # вона означала б «усе на мінімум» — масштабуємо пропорційно (один раз, до першого заміру).
+    # Драбина змінилась (напр. увімкнено міст FSR 4 — з'явились кроки роздільності): підбір заново
+    sig = f"{len(ladder)}:{RE_FSR2_KEY in ladder[0]}"
+    if entry.get("ladder_sig") != sig and (entry.get("ladder_sig") or RE_FSR2_KEY in ladder[0]):
+        for k in ("history", "failed", "converged", "ineffective", "last", "start_scaled"):
+            entry.pop(k, None)
+    entry["ladder_sig"] = sig
+    if RE_FSR2_KEY in ladder[0] and not entry.get("start_scaled") and not entry.get("history"):
+        entry["level"] = 2                    # старт: «Продуктивність» за повних налаштувань
+        entry.pop("last", None)
+        entry["start_scaled"] = True
     if not entry.get("start_scaled") and not entry.get("history"):
         entry["level"] = min(len(ladder) - 1,
                              int(round(device["start_level"] * (len(ladder) - 1) / 11.0)))
