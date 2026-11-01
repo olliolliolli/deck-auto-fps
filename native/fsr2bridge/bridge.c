@@ -150,28 +150,38 @@ typedef struct {
 } desc_ent;
 #define DESC_CAP (1u << 21)
 static desc_ent *g_desc;
-static SRWLOCK g_desc_lock = SRWLOCK_INIT;
 
-static void desc_put_locked(size_t k, const desc_ent *v)
+/* таблиця розбита на смуги з окремими блокуваннями: рушій створює й копіює дескриптори з
+   багатьох потоків одночасно, одне спільне блокування давало підвисання */
+#define DESC_STRIPES 128u
+#define DESC_SUB (DESC_CAP / DESC_STRIPES)
+static SRWLOCK g_dstripe[DESC_STRIPES];
+
+static void desc_put(size_t k, const desc_ent *v)
 {
-    uint32_t i = mix(k, DESC_CAP);
-    for (uint32_t n = 0; n < 4096; n++, i = (i + 1) & (DESC_CAP - 1)) {
-        if (g_desc[i].key == 0 || g_desc[i].key == k) {
-            g_desc[i] = *v;
-            g_desc[i].key = k;
-            return;
-        }
+    uint64_t x = (uint64_t)k; x ^= x >> 33; x *= 0xff51afd7ed558ccdULL; x ^= x >> 33;
+    uint32_t st = (uint32_t)x & (DESC_STRIPES - 1), i = (uint32_t)(x >> 7) & (DESC_SUB - 1);
+    desc_ent *b = g_desc + (size_t)st * DESC_SUB;
+    AcquireSRWLockExclusive(&g_dstripe[st]);
+    for (uint32_t n = 0; n < 1024; n++, i = (i + 1) & (DESC_SUB - 1)) {
+        if (b[i].key == 0 || b[i].key == k) { b[i] = *v; b[i].key = k; break; }
     }
+    ReleaseSRWLockExclusive(&g_dstripe[st]);
 }
 
-static int desc_get_locked(size_t k, desc_ent *out)
+static int desc_get(size_t k, desc_ent *out)
 {
-    uint32_t i = mix(k, DESC_CAP);
-    for (uint32_t n = 0; n < 4096; n++, i = (i + 1) & (DESC_CAP - 1)) {
-        if (g_desc[i].key == k) { *out = g_desc[i]; return 1; }
-        if (g_desc[i].key == 0) return 0;
+    uint64_t x = (uint64_t)k; x ^= x >> 33; x *= 0xff51afd7ed558ccdULL; x ^= x >> 33;
+    uint32_t st = (uint32_t)x & (DESC_STRIPES - 1), i = (uint32_t)(x >> 7) & (DESC_SUB - 1);
+    desc_ent *b = g_desc + (size_t)st * DESC_SUB;
+    int ok = 0;
+    AcquireSRWLockShared(&g_dstripe[st]);
+    for (uint32_t n = 0; n < 1024; n++, i = (i + 1) & (DESC_SUB - 1)) {
+        if (b[i].key == k) { *out = b[i]; ok = 1; break; }
+        if (b[i].key == 0) break;
     }
-    return 0;
+    ReleaseSRWLockShared(&g_dstripe[st]);
+    return ok;
 }
 
 /* купи дескрипторів */
@@ -403,7 +413,7 @@ static void STDMETHODCALLTYPE h_CreateSRV(ID3D12Device *dev, ID3D12Resource *res
     desc_ent e = {0};
     e.kind = D_SRV; e.res = res;
     if (d) { e.fmt = (uint16_t)d->Format; e.dim = (uint16_t)d->ViewDimension; }
-    AcquireSRWLockExclusive(&g_desc_lock); desc_put_locked(h.ptr, &e); ReleaseSRWLockExclusive(&g_desc_lock);
+    desc_put(h.ptr, &e);
 }
 
 static void STDMETHODCALLTYPE h_CreateUAV(ID3D12Device *dev, ID3D12Resource *res, ID3D12Resource *ctr, const D3D12_UNORDERED_ACCESS_VIEW_DESC *d, D3D12_CPU_DESCRIPTOR_HANDLE h)
@@ -412,7 +422,7 @@ static void STDMETHODCALLTYPE h_CreateUAV(ID3D12Device *dev, ID3D12Resource *res
     desc_ent e = {0};
     e.kind = D_UAV; e.res = res;
     if (d) { e.fmt = (uint16_t)d->Format; e.dim = (uint16_t)d->ViewDimension; }
-    AcquireSRWLockExclusive(&g_desc_lock); desc_put_locked(h.ptr, &e); ReleaseSRWLockExclusive(&g_desc_lock);
+    desc_put(h.ptr, &e);
 }
 
 static void STDMETHODCALLTYPE h_CreateCBV(ID3D12Device *dev, const D3D12_CONSTANT_BUFFER_VIEW_DESC *d, D3D12_CPU_DESCRIPTOR_HANDLE h)
@@ -421,15 +431,15 @@ static void STDMETHODCALLTYPE h_CreateCBV(ID3D12Device *dev, const D3D12_CONSTAN
     desc_ent e = {0};
     e.kind = D_CBV;
     if (d) { e.va = d->BufferLocation; e.size = d->SizeInBytes; }
-    AcquireSRWLockExclusive(&g_desc_lock); desc_put_locked(h.ptr, &e); ReleaseSRWLockExclusive(&g_desc_lock);
+    desc_put(h.ptr, &e);
 }
 
 static void copy_range_locked(size_t dst, size_t src, UINT n, UINT inc)
 {
     for (UINT i = 0; i < n; i++) {
         desc_ent e;
-        if (desc_get_locked(src + (size_t)i * inc, &e)) desc_put_locked(dst + (size_t)i * inc, &e);
-        else { desc_ent z = {0}; desc_put_locked(dst + (size_t)i * inc, &z); }
+        if (desc_get(src + (size_t)i * inc, &e)) desc_put(dst + (size_t)i * inc, &e);
+        else { desc_ent z = {0}; desc_put(dst + (size_t)i * inc, &z); }
     }
 }
 
@@ -437,9 +447,7 @@ static void STDMETHODCALLTYPE h_CopyDescriptorsSimple(ID3D12Device *dev, UINT n,
 {
     o_CopyDescriptorsSimple(dev, n, dst, src, type);
     if (type != D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) return;
-    AcquireSRWLockExclusive(&g_desc_lock);
     copy_range_locked(dst.ptr, src.ptr, n, g_inc[type]);
-    ReleaseSRWLockExclusive(&g_desc_lock);
 }
 
 static void STDMETHODCALLTYPE h_CopyDescriptors(ID3D12Device *dev, UINT nd, const D3D12_CPU_DESCRIPTOR_HANDLE *ds, const UINT *dsz,
@@ -448,7 +456,6 @@ static void STDMETHODCALLTYPE h_CopyDescriptors(ID3D12Device *dev, UINT nd, cons
     o_CopyDescriptors(dev, nd, ds, dsz, ns, ss, ssz, type);
     if (type != D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) return;
     UINT inc = g_inc[type];
-    AcquireSRWLockExclusive(&g_desc_lock);
     UINT di = 0, doff = 0, si = 0, soff = 0;
     while (di < nd && si < ns) {
         UINT dn = dsz ? dsz[di] : 1, sn = ssz ? ssz[si] : 1;
@@ -456,7 +463,6 @@ static void STDMETHODCALLTYPE h_CopyDescriptors(ID3D12Device *dev, UINT nd, cons
         if (++doff >= dn) { di++; doff = 0; }
         if (++soff >= sn) { si++; soff = 0; }
     }
-    ReleaseSRWLockExclusive(&g_desc_lock);
 }
 
 static HRESULT STDMETHODCALLTYPE h_Map(ID3D12Resource *res, UINT sub, const D3D12_RANGE *rr, void **pp)
@@ -556,9 +562,7 @@ static void dump_dispatch(cl_state *st, const char *name, UINT x, UINT y, UINT z
             LOG("    range %u: %s x%u base=%u space=%u off=%u", r, rg->type < 4 ? rt[rg->type] : "?", rg->num, rg->reg, rg->space, start);
             for (uint32_t j = 0; j < cnt; j++) {
                 desc_ent e; int ok;
-                AcquireSRWLockShared(&g_desc_lock);
-                ok = desc_get_locked(cpu + (size_t)(start + j) * inc, &e);
-                ReleaseSRWLockShared(&g_desc_lock);
+                ok = desc_get(cpu + (size_t)(start + j) * inc, &e);
                 char regn = rg->type == 0 ? 't' : rg->type == 1 ? 'u' : 'b';
                 if (!ok || e.kind == D_NONE) { LOG("      %c%u: (порожньо/невідомо)", regn, rg->reg + j); continue; }
                 if (e.kind == D_CBV) {
@@ -810,9 +814,7 @@ static ID3D12Resource *table_res(cl_state *st, uint32_t param, uint32_t reg_inde
     uint32_t start = pi->r[0].offset == D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND ? 0 : pi->r[0].offset;
     desc_ent e;
     int ok;
-    AcquireSRWLockShared(&g_desc_lock);
-    ok = desc_get_locked(cpu + (size_t)(start + reg_index) * inc, &e);
-    ReleaseSRWLockShared(&g_desc_lock);
+    ok = desc_get(cpu + (size_t)(start + reg_index) * inc, &e);
     if (!ok || e.kind != want_kind) return NULL;
     return (ID3D12Resource *)e.res;
 }
@@ -845,9 +847,7 @@ static int table_cbv(cl_state *st, uint32_t param, uint32_t reg_index, uint32_t 
     size_t cpu; uint32_t inc;
     if (!gpu_to_cpu(st->tables[param], &cpu, &inc)) return 0;
     desc_ent e; int ok;
-    AcquireSRWLockShared(&g_desc_lock);
-    ok = desc_get_locked(cpu + (size_t)reg_index * inc, &e);
-    ReleaseSRWLockShared(&g_desc_lock);
+    ok = desc_get(cpu + (size_t)reg_index * inc, &e);
     if (!ok || e.kind != D_CBV) return 0;
     const uint8_t *p = va_to_cpu(e.va, n * 4);
     if (!p) return 0;
@@ -1129,14 +1129,23 @@ static void STDMETHODCALLTYPE h_Dispatch(ID3D12GraphicsCommandList *cl, UINT x, 
         if (!F->depth) F->depth = find_depth(&st);
         if (ok) { memcpy(F->cb, cb, sizeof(cb)); F->have_cb = 1; }
         int skip = g_cfg.skip_accumulate && g_ffx_state == 1 && ok && F->color && F->mv && F->depth;
+        if (skip) {   /* ті самі перевірки, що й на кроці RCAS — інакше вийде кадр без зображення */
+            D3D12_RESOURCE_DESC dc, dz;
+            ID3D12Resource_GetDesc(F->color, &dc); ID3D12Resource_GetDesc(F->depth, &dz);
+            if (dc.Width != dz.Width || dc.Height != dz.Height) skip = 0;
+        }
         F->accumulate_skipped = skip;
         ReleaseSRWLockExclusive(&g_fr_lock);
         if (skip) return;
         break;
     }
-    case 0xc7e4d3dc11696abfULL:   /* крок 10: RCAS → тут FSR 4 */
+    case 0xc7e4d3dc11696abfULL: { /* крок 10: RCAS → тут FSR 4 */
         if (bridge_rcas(cl, &st)) return;
+        int skipped;
+        AcquireSRWLockExclusive(&g_fr_lock); skipped = fr_get(cl)->accumulate_skipped; ReleaseSRWLockExclusive(&g_fr_lock);
+        if (skipped) return;   /* накопичення FSR 2 пропущено — рідний RCAS дав би чорний кадр; лишаємо попередній */
         break;
+    }
     default:
         break;
     }
