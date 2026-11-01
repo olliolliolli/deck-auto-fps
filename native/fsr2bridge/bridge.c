@@ -738,8 +738,19 @@ typedef struct {
     int have_cb;
     int accumulate_skipped;
 } frame_state;
-static frame_state g_fr;            /* FSR 2 рендериться одним командним списком за кадр */
+/* стан FSR 2 — окремо для кожного командного списку: рушій записує кілька кадрів паралельно */
+#define FR_CAP 64
+static frame_state g_frs[FR_CAP];
 static SRWLOCK g_fr_lock = SRWLOCK_INIT;
+static frame_state *fr_get(void *cl)   /* під g_fr_lock (exclusive) */
+{
+    for (int i = 0; i < FR_CAP; i++) if (g_frs[i].cl == cl) return &g_frs[i];
+    for (int i = 0; i < FR_CAP; i++) if (!g_frs[i].cl) { g_frs[i].cl = cl; return &g_frs[i]; }
+    static int rr; rr = (rr + 1) % FR_CAP;
+    memset(&g_frs[rr], 0, sizeof(frame_state)); g_frs[rr].cl = cl;
+    return &g_frs[rr];
+}
+static volatile LONG g_why[8];
 
 static ID3D12Resource *table_res(cl_state *st, uint32_t param, uint32_t reg_index, int want_kind)
 {
@@ -871,7 +882,7 @@ static void STDMETHODCALLTYPE h_SetGraphicsRootDescriptorTable(ID3D12GraphicsCom
 static int bridge_rcas(ID3D12GraphicsCommandList *cl, cl_state *st)
 {
     frame_state fr;
-    AcquireSRWLockShared(&g_fr_lock); fr = g_fr; ReleaseSRWLockShared(&g_fr_lock);
+    AcquireSRWLockExclusive(&g_fr_lock); fr = *fr_get(cl); ReleaseSRWLockExclusive(&g_fr_lock);
     ID3D12Resource *out = table_res(st, 2, 0, D_UAV);
     ID3D12Resource *depth = g_cfg.depth_conv ? fr.depth_conv : fr.depth;
     const char *why = NULL;
@@ -882,7 +893,9 @@ static int bridge_rcas(ID3D12GraphicsCommandList *cl, cl_state *st)
     else if (!fr.have_cb) why = "немає констант FSR 2";
     else if (!out) why = "немає виходу";
     if (why) {
-        if (InterlockedIncrement(&g_fallback) <= 5) LOG("міст: пропуск кадру (%s) — рідний FSR 2", why);
+        InterlockedIncrement(&g_fallback);
+        int wi = !fr.color ? 1 : !depth ? 2 : !fr.mv ? 3 : !fr.have_cb ? 4 : !out ? 5 : 0;
+        if (InterlockedIncrement(&g_why[wi]) <= 3) LOG("міст: пропуск кадру (%s) — рідний FSR 2", why);
         return 0;
     }
     uint32_t rw = fr.cb[0], rh = fr.cb[1], dw = fr.cb[2], dh = fr.cb[3];
@@ -928,8 +941,14 @@ static int bridge_rcas(ID3D12GraphicsCommandList *cl, cl_state *st)
     static uint32_t last_frame_index;
     dd.reset = fr.cb[7] < last_frame_index;   /* лічильник кадрів FSR 2 скинувся — монтажна склейка */
     last_frame_index = fr.cb[7];
-    dd.cameraNear = g_cfg.cam_near;
-    dd.cameraFar = g_cfg.cam_far;
+    /* FFX: при оберненій глибині near > far; для нескінченної оберненої near = FLT_MAX */
+    if (g_cfg.flags & FFX_UPSCALE_ENABLE_DEPTH_INVERTED) {
+        dd.cameraFar = g_cfg.cam_near;
+        dd.cameraNear = (g_cfg.flags & FFX_UPSCALE_ENABLE_DEPTH_INFINITE) ? 3.402823466e+38f : g_cfg.cam_far;
+    } else {
+        dd.cameraNear = g_cfg.cam_near;
+        dd.cameraFar = (g_cfg.flags & FFX_UPSCALE_ENABLE_DEPTH_INFINITE) ? 3.402823466e+38f : g_cfg.cam_far;
+    }
     dd.cameraFovAngleVertical = (f[29] > 0.01f && f[29] < 10.f) ? 2.0f * atanf(f[29]) : 1.0f;
     dd.viewSpaceToMetersFactor = 1.0f;
 
@@ -960,7 +979,8 @@ static int bridge_rcas(ID3D12GraphicsCommandList *cl, cl_state *st)
     DWORD t = GetTickCount();
     if (t - g_last_stat > 30000) {
         g_last_stat = t;
-        LOG("міст: кадрів через FFX %ld, з рідним FSR 2 %ld", g_bridged, g_fallback);
+        LOG("міст: кадрів через FFX %ld, з рідним FSR 2 %ld (колір %ld, глибина %ld, вектори %ld, константи %ld, вихід %ld)",
+            g_bridged, g_fallback, g_why[1], g_why[2], g_why[3], g_why[4], g_why[5]);
     }
     return 1;
 }
@@ -1000,36 +1020,36 @@ static void STDMETHODCALLTYPE h_Dispatch(ID3D12GraphicsCommandList *cl, UINT x, 
     switch (h) {
     case 0x77501c64360b3290ULL:   /* крок 1: глибина (t2), маска (u0) — початок кадру FSR 2 */
         AcquireSRWLockExclusive(&g_fr_lock);
-        memset(&g_fr, 0, sizeof(g_fr));
-        g_fr.cl = cl;
-        g_fr.depth = table_find(&st, 1, DXGI_FORMAT_R32G8X24_TYPELESS, 0, 0, D_SRV);
-        if (!g_fr.depth) g_fr.depth = table_find(&st, 1, DXGI_FORMAT_R32_TYPELESS, 0, 0, D_SRV);
-        if (!g_fr.depth) g_fr.depth = table_find(&st, 1, DXGI_FORMAT_D32_FLOAT, 0, 0, D_SRV);
-        g_fr.reactive = table_res(&st, 2, 0, D_UAV);
+        { frame_state *F = fr_get(cl); memset(F, 0, sizeof(*F)); F->cl = cl; }
+        fr_get(cl)->depth = table_find(&st, 1, DXGI_FORMAT_R32G8X24_TYPELESS, 0, 0, D_SRV);
+        if (!fr_get(cl)->depth) fr_get(cl)->depth = table_find(&st, 1, DXGI_FORMAT_R32_TYPELESS, 0, 0, D_SRV);
+        if (!fr_get(cl)->depth) fr_get(cl)->depth = table_find(&st, 1, DXGI_FORMAT_D32_FLOAT, 0, 0, D_SRV);
+        fr_get(cl)->reactive = table_res(&st, 2, 0, D_UAV);
         ReleaseSRWLockExclusive(&g_fr_lock);
         break;
     case 0xfacf8f57b36f482fULL:   /* крок 2: вектори руху для FSR (u0) */
         AcquireSRWLockExclusive(&g_fr_lock);
-        if (g_fr.cl == cl) g_fr.mv = table_res(&st, 2, 0, D_UAV);
+        fr_get(cl)->mv = table_res(&st, 2, 0, D_UAV);
         ReleaseSRWLockExclusive(&g_fr_lock);
         break;
     case 0x373b42588c9e5f23ULL:   /* крок 3: перетворена глибина (u0, R32_FLOAT) */
         AcquireSRWLockExclusive(&g_fr_lock);
-        if (g_fr.cl == cl) g_fr.depth_conv = table_res(&st, 2, 0, D_UAV);
+        fr_get(cl)->depth_conv = table_res(&st, 2, 0, D_UAV);
         ReleaseSRWLockExclusive(&g_fr_lock);
         break;
     case 0x6c5793de6ada1e41ULL:   /* крок 4: колір кадру в рендер-роздільності (t0) */
         AcquireSRWLockExclusive(&g_fr_lock);
-        if (g_fr.cl == cl) g_fr.color = table_find(&st, 1, DXGI_FORMAT_R11G11B10_FLOAT, 0, 0, D_SRV);
+        fr_get(cl)->color = table_find(&st, 1, DXGI_FORMAT_R11G11B10_FLOAT, 0, 0, D_SRV);
         ReleaseSRWLockExclusive(&g_fr_lock);
         break;
     case 0xc669a9db25ea4759ULL: { /* крок 9: накопичення — константи FSR 2 (b0) */
         uint32_t cb[64];
         int ok = table_cbv(&st, 0, 0, cb, 64);
         AcquireSRWLockExclusive(&g_fr_lock);
-        if (g_fr.cl == cl && ok) { memcpy(g_fr.cb, cb, sizeof(cb)); g_fr.have_cb = 1; }
-        int skip = g_cfg.skip_accumulate && g_ffx_state == 1 && g_fr.cl == cl && ok && g_fr.color && g_fr.mv;
-        g_fr.accumulate_skipped = skip;
+        frame_state *F = fr_get(cl);
+        if (ok) { memcpy(F->cb, cb, sizeof(cb)); F->have_cb = 1; }
+        int skip = g_cfg.skip_accumulate && g_ffx_state == 1 && ok && F->color && F->mv && F->depth;
+        F->accumulate_skipped = skip;
         ReleaseSRWLockExclusive(&g_fr_lock);
         if (skip) return;
         break;
