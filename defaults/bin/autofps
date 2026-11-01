@@ -50,14 +50,26 @@ TUNING="$(cat "$CACHE/tuning_now" 2>/dev/null)"
 
 # --- OptiScaler («DLSS» для AMD): перевірити файли в грі (після оновлення гри/OptiScaler
 #     перевстановлюється сам) і сказати Wine брати підмінну бібліотеку з теки гри
-OPTI_DLL=""; OPTI_FG=0
+OPTI_DLL=""; OPTI_FG=0; OPTI_METHOD=""
 if [ "$MODE" != "safe" ] && [ -f "$DIR/optiscaler.py" ]; then
   OPTI_OUT="$(timeout 120 python3 "$DIR/optiscaler.py" ensure "$APPID" "$@" 2>>"$LOG")"
   OPTI_DLL="$(echo "$OPTI_OUT" | sed -n 's/^DLL=//p')"
   OPTI_FG="$(echo "$OPTI_OUT" | sed -n 's/^FG=//p')"
+  OPTI_METHOD="$(echo "$OPTI_OUT" | sed -n 's/^METHOD=//p')"
+  # додаткові змінні (напр. FSR_WATERMARK=1 — напис AMD про модель FSR 4); лише безпечні імена
+  while IFS= read -r kv; do
+    case "$kv" in
+      FSR_WATERMARK=*) export "$kv"; log "env: $kv" ;;
+    esac
+  done < <(echo "$OPTI_OUT" | sed -n 's/^ENV=//p')
 fi
 if [ -n "$OPTI_DLL" ]; then
   export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:+$WINEDLLOVERRIDES;}${OPTI_DLL}=n,b"
+fi
+if [ "$OPTI_METHOD" = "direct" ]; then
+  export SteamDeck=0
+  log "FSR 4 «один файл» у вбудований FSR 3.1 гри${OPTI_DLL:+ (override ${OPTI_DLL}=n,b)}"
+elif [ -n "$OPTI_DLL" ]; then
   export SteamDeck=0   # деякі ігри на «Steam Deck» ховають DLSS/FSR
   log "OptiScaler увімкнено: ${OPTI_DLL}=n,b (власна генерація кадрів: $OPTI_FG)"
 fi
@@ -129,8 +141,8 @@ else
 fi
 log "mangohud=$USE_MANGO lsfg=$USE_LSFG (v${LSFG_VER:-?}, ×$WANT, режим FG: $FG_MODE)"
 
-printf '{"appid":"%s","pid":%d,"started":%d,"mode":"%s","mangohud":%d,"lsfg":%d,"fg":%d,"fg_want":%d,"opti":"%s","opti_fg":%d}\n' \
-  "$APPID" "$$" "$(date +%s)" "$MODE" "$USE_MANGO" "$USE_LSFG" "$WANT" "$FG_WANT" "$OPTI_DLL" "${OPTI_FG:-0}" >"$CACHE/current.json"
+printf '{"appid":"%s","pid":%d,"started":%d,"mode":"%s","mangohud":%d,"lsfg":%d,"fg":%d,"fg_want":%d,"opti":"%s","opti_fg":%d,"opti_method":"%s"}\n' \
+  "$APPID" "$$" "$(date +%s)" "$MODE" "$USE_MANGO" "$USE_LSFG" "$WANT" "$FG_WANT" "$OPTI_DLL" "${OPTI_FG:-0}" "$OPTI_METHOD" >"$CACHE/current.json"
 
 # --- запуск (дочірнім процесом, щоб знати, чи гра не впала одразу)
 START=$(date +%s)

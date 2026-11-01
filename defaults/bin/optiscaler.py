@@ -74,6 +74,34 @@ FSR4_VARIANTS = {
                         "ini": {}},
 }
 
+# ---- «Один файл» (як у Deck Wizard): гра сама має FSR 3.1 (Capcom: MH Wilds, RE Requiem,
+# Dragon's Dogma 2, Pragmata… і багато інших) → кладемо поруч бібліотеку драйвера FSR 4
+# amdxcffx64.dll, і вбудований у гру FSR 3.1 стає FSR 4. OptiScaler і REFramework не потрібні.
+FFX_DLLS = ["amd_fidelityfx_dx12.dll", "amd_fidelityfx_upscaler_dx12.dll",
+            "amd_fidelityfx_loader_dx12.dll"]
+DIRECT_VARIANTS = {
+    # саме той «один файл»: збірка Valve для не-RDNA4, працює з вбудованим amdxc64 Proton
+    "valve": {"label": "FSR 4.1.1 · один файл (Valve)", "files": ["amdxcffx64_valve_411"],
+              "override": ""},
+    # якщо вбудований amdxc64 Proton старий — власна прокладка amdxc64 поруч
+    "valve_shim": {"label": "FSR 4.1.1 · файл Valve + amdxc64",
+                   "files": ["amdxcffx64_valve_411", "amdxc64_rdna2"], "override": "amdxc64"},
+    "official": {"label": "FSR 4.1.1 · один файл (AMD)", "files": ["amdxcffx64_official_411"],
+                 "override": ""},
+    "official_shim": {"label": "FSR 4.1.1 · файл AMD + amdxc64",
+                      "files": ["amdxcffx64_official_411", "amdxc64_rdna2"], "override": "amdxc64"},
+}
+DIRECT_MARKER = "AUTOFPS_FSR4.json"
+
+
+def direct_chain(gpu):
+    """Порядок спроб «одного файлу» під відеокарту; після них — OptiScaler."""
+    if gpu.get("arch") == "rdna4":
+        return ["official"]
+    if gpu.get("arch") == "rdna2":
+        return ["valve", "valve_shim"]
+    return ["valve", "valve_shim", "official_shim"]   # RDNA3 / 3.5 (Legion Go S на Z1E)
+
 PROXY_NAMES = ["dxgi.dll", "winmm.dll", "version.dll", "dbghelp.dll", "d3d12.dll",
                "wininet.dll", "winhttp.dll", "OptiScaler.asi"]
 # оригінальні DLL гри, які ми підміняємо — зберігаємо як *.b
@@ -478,6 +506,35 @@ def find_target(appid, install, game_name="", args=None):
         return install
     best = max(exes, key=lambda e: _exe_score(e, install, game_name))
     return os.path.dirname(best)
+
+
+def find_ffx(install, max_depth=5):
+    """Теки гри з власним FSR 3.1+ (бібліотеки FidelityFX API). Порожньо — у гри FSR 3.1 немає."""
+    out = []
+    if not install or not os.path.isdir(install):
+        return out
+    base = install.rstrip("/").count("/")
+    for root, dirs, files in os.walk(install):
+        if root.count("/") - base >= max_depth:
+            dirs[:] = []
+        low = {f.lower() for f in files}
+        if any(n in low for n in FFX_DLLS):
+            out.append(root)
+    return sorted(out, key=lambda p: (p.count("/"), p))
+
+
+def choose_method(appid, install, settings, gpu):
+    """'direct' — «один файл» у вбудований FSR 3.1 гри; 'optiscaler' — підміна DLSS."""
+    forced = (settings or {}).get("opti_method", "auto")
+    if forced in ("direct", "optiscaler"):
+        return forced
+    if gpu.get("vendor") not in ("amd", "unknown"):
+        return "optiscaler"
+    if (settings or {}).get("opti_upscaler", "auto") not in ("auto", "fsr4"):
+        return "optiscaler"            # FSR 3.1 / XeSS / FSR 4.0 — це вміє лише OptiScaler
+    if (settings or {}).get("opti_fg"):
+        return "optiscaler"            # генерація кадрів OptiScaler
+    return "direct" if find_ffx(install) else "optiscaler"
 
 
 # ------------------------------------------------------------------ ini
@@ -921,15 +978,172 @@ def _remove_files(game):
             shutil.move(b, dest)
 
 
+# ------------------------------------------------------------------ «один файл» FSR 4
+
+class DirectExhausted(Exception):
+    """Усі варіанти «одного файлу» перепробувано — переходимо на OptiScaler."""
+
+
+def _our_shas():
+    return {a["sha256"] for a in ASSETS.values()}
+
+
+def direct_remove(game):
+    """Прибрати amdxcffx64/amdxc64, які поклали ми, і повернути файли гри (якщо були)."""
+    install = game.get("install") or ""
+    ours = _our_shas()
+    for rel in game.get("direct_files", []):
+        p = os.path.join(install, rel)
+        try:
+            if os.path.isfile(p) and sha256(p) in ours:
+                os.remove(p)
+        except OSError:
+            pass
+    for rel in game.get("direct_backups", []):
+        p = os.path.join(install, rel)
+        if os.path.isfile(p + ".autofps.b") and not os.path.exists(p):
+            shutil.move(p + ".autofps.b", p)
+    m = os.path.join(game.get("target") or install, DIRECT_MARKER)
+    if os.path.isfile(m):
+        os.remove(m)
+    game.update(direct_files=[], direct_backups=[])
+
+
+def direct_install(appid, install_path, game_name="", args=None, settings=None, log=print,
+                   reset=False):
+    """Кладе бібліотеку драйвера FSR 4 поруч з FSR 3.1 гри й поруч з її .exe."""
+    settings = settings or C.load_json(C.SETTINGS_FILE, {})
+    appid = str(appid)
+    if not install_path or not os.path.isdir(install_path):
+        raise RuntimeError("не знайдено теку гри")
+    ac = has_anticheat(install_path)
+    if ac:
+        raise RuntimeError(f"у грі є античит ({ac}) — зміна файлів гри може призвести до бану, "
+                           "тому FSR 4 тут не вмикається")
+    ffx = find_ffx(install_path)
+    if not ffx:
+        raise RuntimeError("у грі немає власного FSR 3.1 — «один файл» тут не спрацює")
+    gpu = effective_gpu(settings)
+    game = load_game(appid)
+    if reset:
+        for k in ("direct_tried", "direct_variant", "direct_confirmed", "direct_runs",
+                  "direct_exhausted", "check", "disabled_reason"):
+            game.pop(k, None)
+    # попереднє встановлення (OptiScaler або інший варіант) — прибрати
+    if game.get("installed") and game.get("method", "optiscaler") == "optiscaler":
+        _remove_files(game)
+        game.update(installed=False, files=[], backups=[], ref="", ref_tag="")
+    if game.get("direct_files"):
+        direct_remove(game)
+    chain = direct_chain(gpu)
+    tried = game.get("direct_tried", [])
+    cur = game.get("direct_variant")
+    variant = cur if cur in chain and cur not in tried else \
+        next((v for v in chain if v not in tried), None)
+    if variant is None:
+        game["direct_exhausted"] = True
+        save_game(appid, game)
+        raise DirectExhausted("жоден варіант «одного файлу» не спрацював")
+    v = DIRECT_VARIANTS[variant]
+    paths = {k: fetch_asset(k, log) for k in v["files"]}
+    exe_dir = find_target(appid, install_path, game_name, args)
+    dirs = []
+    for d in [exe_dir] + ffx:
+        if d not in dirs:
+            dirs.append(d)
+    for d in dirs:
+        if not os.access(d, os.W_OK):
+            raise RuntimeError(f"немає прав на запис у теку гри: {d}")
+    ours = _our_shas()
+    placed, backups = [], []
+    for d in dirs:
+        for k, src in paths.items():
+            name = ASSETS[k]["file"]
+            dst = os.path.join(d, name)
+            rel = os.path.relpath(dst, install_path)
+            if os.path.isfile(dst) and sha256(dst) not in ours \
+                    and not os.path.exists(dst + ".autofps.b"):
+                shutil.move(dst, dst + ".autofps.b")     # власний файл гри — зберегти
+                backups.append(rel)
+            shutil.copy2(src, dst)
+            placed.append(rel)
+    with open(os.path.join(exe_dir, DIRECT_MARKER), "w", encoding="utf-8") as f:
+        json.dump({"appid": appid, "variant": variant, "files": placed}, f, indent=2)
+    game.update(installed=True, enabled=True, method="direct", direct_variant=variant,
+                direct_files=sorted(set(placed)),
+                direct_backups=sorted(set(backups) | set(game.get("direct_backups", []))),
+                override=v["override"], install=install_path, target=exe_dir,
+                engine=detect_engine(install_path), upscaler="fsr4", upscaler_label=v["label"],
+                fsr4_variant="direct-" + variant, gpu=gpu["name"], opti_fg=False,
+                ffx_dirs=[os.path.relpath(d, install_path) for d in ffx],
+                name=game_name or game.get("name", ""), updated=int(time.time()), error="")
+    save_game(appid, game)
+    where = ", ".join(os.path.relpath(d, install_path).replace(".", "корінь гри", 1)
+                      if d == install_path else os.path.relpath(d, install_path) for d in dirs)
+    log(f"FSR 4 «один файл» ({v['label']}) → {where}")
+    return game
+
+
+def enable(appid, install_path, game_name="", args=None, settings=None, log=print, reset=True):
+    """Одна кнопка: вибирає спосіб сам. Гра з FSR 3.1 → «один файл»; інакше OptiScaler."""
+    settings = settings or C.load_json(C.SETTINGS_FILE, {})
+    appid = str(appid)
+    gpu = effective_gpu(settings)
+    method = choose_method(appid, install_path, settings, gpu)
+    if method == "direct":
+        try:
+            return direct_install(appid, install_path, game_name, args, settings, log, reset)
+        except DirectExhausted:
+            log("«один файл» не спрацював — ставлю OptiScaler")
+    game = load_game(appid)
+    if game.get("direct_files"):
+        direct_remove(game)
+        game.update(installed=False)
+        save_game(appid, game)
+    if not installed_tag():
+        download_latest(log)
+    g = install(appid, install_path, game_name, args, settings, log, reset=reset)
+    g["method"] = "optiscaler"
+    save_game(appid, g)
+    return g
+
+
+def direct_feedback(appid, ok, log=print):
+    """Відповідь користувача: чи був у кутку напис FSR 4. Ні → наступний варіант."""
+    appid = str(appid)
+    game = load_game(appid)
+    if game.get("method") != "direct":
+        return game
+    if ok:
+        game.update(direct_confirmed=True,
+                    check={"t": int(time.time()), "status": "ok", "title": "✓ FSR 4 працює",
+                           "message": f"Підтверджено: {game.get('upscaler_label', 'FSR 4')}"})
+        save_game(appid, game)
+        return game
+    game["direct_tried"] = sorted(set(game.get("direct_tried", [])) |
+                                  ({game["direct_variant"]} if game.get("direct_variant") else set()))
+    game.pop("direct_variant", None)
+    game["direct_runs"] = 0
+    save_game(appid, game)
+    try:
+        return direct_install(appid, game.get("install"), game.get("name", ""), None, None, log)
+    except DirectExhausted:
+        return enable(appid, game.get("install"), game.get("name", ""), None,
+                      dict(C.load_json(C.SETTINGS_FILE, {}), opti_method="optiscaler"), log,
+                      reset=False)
+
+
 def uninstall(appid, log=print):
     appid = str(appid)
     game = load_game(appid)
     if not game:
         return {}
+    if game.get("direct_files"):
+        direct_remove(game)
     _remove_files(game)
     game.update(installed=False, enabled=False, files=[], backups=[], updated=int(time.time()))
     save_game(appid, game)
-    log(f"OptiScaler прибрано з {game.get('target')}, оригінальні файли повернуто")
+    log(f"FSR 4 / OptiScaler прибрано з {game.get('target')}, оригінальні файли повернуто")
     return game
 
 
@@ -941,6 +1155,8 @@ def ensure(appid, args, settings=None, log=print):
     if not game.get("enabled"):
         return None, False
     settings = settings or C.load_json(C.SETTINGS_FILE, {})
+    if game.get("method") == "direct":
+        return direct_ensure(appid, game, args, settings, log)
     target = game.get("target", "")
     missing = not os.path.isfile(os.path.join(target, game.get("dll", "dxgi.dll"))) or \
         not os.path.isfile(os.path.join(target, MARKER)) or \
@@ -956,6 +1172,8 @@ def ensure(appid, args, settings=None, log=print):
             "нова версія OptiScaler" if outdated else "змінено налаштування"
         log(f"OptiScaler: перевстановлюю — {why}")
         try:
+            if not installed_tag():
+                download_latest(log)        # перехід з «одного файлу» на OptiScaler
             game = install(appid, game.get("install"), game.get("name", ""), args, settings, log)
         except Exception as e:  # noqa: BLE001
             game["error"] = str(e)
@@ -967,6 +1185,48 @@ def ensure(appid, args, settings=None, log=print):
     if game.get("ref") and stem:
         stem = f"{stem},{REF_OVERRIDE}"     # обидві бібліотеки — з теки гри
     return stem, bool(game.get("opti_fg"))
+
+
+WATERMARK_RUNS = 3     # скільки запусків показувати напис AMD «FSR 4», поки не підтверджено
+
+
+def direct_ensure(appid, game, args, settings, log=print):
+    """«Один файл»: файли на місці (після оновлення гри Steam міг їх стерти)?"""
+    install = game.get("install") or ""
+    missing = not game.get("direct_files") or any(
+        not os.path.isfile(os.path.join(install, rel)) for rel in game.get("direct_files", []))
+    gpu = effective_gpu(settings)
+    stale = game.get("direct_variant") not in direct_chain(gpu)
+    if missing or stale:
+        why = ("попередній варіант не спрацював — пробую наступний" if not game.get("direct_variant")
+               else "файли зникли (оновлення гри?)" if missing else "змінилась відеокарта")
+        log(f"FSR 4: перевстановлюю «один файл» — {why}")
+        try:
+            game = direct_install(appid, install, game.get("name", ""), args, settings, log)
+        except DirectExhausted:
+            game = load_game(appid)
+            game.update(method="optiscaler", installed=False)
+            save_game(appid, game)
+            return ensure(appid, args, settings, log)
+        except Exception as e:  # noqa: BLE001
+            game["error"] = str(e)
+            save_game(appid, game)
+            log(f"FSR 4: не вдалося — {e}; гра запуститься без нього")
+            return None, False
+    return (game.get("override") or None), False
+
+
+def launch_extras(appid):
+    """Що ще треба обгортці: спосіб і змінні середовища для цього запуску."""
+    game = load_game(str(appid))
+    if not game.get("enabled"):
+        return "", {}
+    method = game.get("method") or "optiscaler"
+    env = {}
+    if method == "direct" and not game.get("direct_confirmed") \
+            and int(game.get("direct_runs", 0)) < WATERMARK_RUNS:
+        env["FSR_WATERMARK"] = "1"     # бібліотека AMD сама пише в кутку, яка модель FSR 4 працює
+    return method, env
 
 
 # ------------------------------------------------------------------ самоперевірка
@@ -1020,6 +1280,8 @@ def analyze(appid, started, duration, crashed=False, log=print):
     game = load_game(appid)
     if not game.get("enabled"):
         return None
+    if game.get("method") == "direct":
+        return analyze_direct(appid, game, duration, crashed, log)
     info = parse_log(_read_log(game.get("target"), started))
     dll = game.get("dll", "dxgi.dll")
     res = {"t": int(time.time()), "duration": int(duration), "dll": dll, **info}
@@ -1086,15 +1348,63 @@ def analyze(appid, started, duration, crashed=False, log=print):
     return res
 
 
+def analyze_direct(appid, game, duration, crashed, log=print):
+    """«Один файл» не пише журналу — перевіряємо падіння і просимо глянути на напис AMD."""
+    v = game.get("direct_variant")
+    res = {"t": int(time.time()), "duration": int(duration), "method": "direct", "variant": v}
+    if crashed or duration < CRASH_SECONDS:
+        if v:
+            game["direct_tried"] = sorted(set(game.get("direct_tried", [])) | {v})
+        else:
+            v = (game.get("direct_tried") or ["valve"])[-1]
+        game.pop("direct_variant", None)
+        game["direct_runs"] = 0
+        nxt = next((x for x in direct_chain(effective_gpu(C.load_json(C.SETTINGS_FILE, {}))) if x not in game["direct_tried"]), None)
+        res.update(status="crash", title="FSR 4: гра закрилась одразу",
+                   message=(f"Гра закрилась через {int(duration)} с з «{DIRECT_VARIANTS[v]['label']}». "
+                            + (f"Наступного разу спробую «{DIRECT_VARIANTS[nxt]['label']}»" if nxt
+                               else "Варіанти «одного файлу» вичерпано — наступного разу буде OptiScaler")))
+        if not nxt:
+            direct_remove(game)
+            game.update(method="optiscaler", installed=False, direct_exhausted=True)
+        game["check"] = res
+        save_game(appid, game)
+        log(f"самоперевірка {appid}: {res['message']}")
+        return res
+    game["direct_runs"] = int(game.get("direct_runs", 0)) + 1
+    if game.get("direct_confirmed"):
+        res.update(status="ok", title="✓ FSR 4 працює",
+                   message=f"{game.get('upscaler_label')} — вибери FSR у налаштуваннях графіки гри")
+        game["check"] = res
+        save_game(appid, game)
+        return None                     # підтверджено раніше — без зайвих сповіщень
+    if duration < MIN_RUN_FOR_VERDICT:
+        res.update(status="short", title="FSR 4: замало часу для перевірки",
+                   message="Пограй хоча б хвилину з увімкненим FSR у налаштуваннях гри")
+    else:
+        res.update(status="verify", title="FSR 4: чи був напис у кутку?",
+                   message=("Якщо в грі з увімкненим FSR у кутку був напис AMD «FSR 4» — натисни "
+                            "в AutoFPS «Напис був ✓», і він зникне. Не було — «Не було», і я "
+                            "спробую інший варіант"))
+    game["check"] = res
+    save_game(appid, game)
+    log(f"самоперевірка {appid}: {res['status']}")
+    return res
+
+
 def main():
     if len(sys.argv) >= 3 and sys.argv[1] == "ensure":
         try:
             stem, fg = ensure(sys.argv[2], sys.argv[3:], log=lambda m: print(m, file=sys.stderr))
+            method, env = launch_extras(sys.argv[2])
         except Exception as e:  # noqa: BLE001
             print(f"OptiScaler error: {e!r}", file=sys.stderr)
-            stem, fg = None, False
+            stem, fg, method, env = None, False, "", {}
         print(f"DLL={stem or ''}")
         print(f"FG={1 if fg else 0}")
+        print(f"METHOD={method if (stem or method == 'direct') else ''}")
+        for k, val in env.items():
+            print(f"ENV={k}={val}")
 
 
 if __name__ == "__main__":

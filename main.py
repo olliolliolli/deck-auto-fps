@@ -75,6 +75,7 @@ DEFAULT_SETTINGS = {
     "quality_target": "auto",  # базовий FPS, під який підбирається графіка
     "respect_manual_graphics": False,  # True — ручні зміни в меню гри зупиняють підбір
     "opti_upscaler": "auto",   # auto (FSR 4.1) | fsr4 | fsr40 | fsr31 | xess — чим замінювати DLSS
+    "opti_method": "auto",     # auto (гра з FSR 3.1 → «один файл» FSR 4) | direct | optiscaler
     "opti_gpu_arch": "auto",   # auto | rdna2 | rdna3 | rdna4 — якщо автовизначення помилилось
     "opti_fg": False,          # генерація кадрів OptiScaler (тоді lsfg-vk у цій грі вимикається)
 }
@@ -520,7 +521,7 @@ class Plugin:
 
     def _opti_selfcheck(self, now):
         """Після виходу з гри: перевірити журнал OptiScaler і, якщо треба, змінити назву DLL."""
-        if not self.cur_info.get("opti"):
+        if not (self.cur_info.get("opti") or self.cur_info.get("opti_method") == "direct"):
             return
         crash = _load_json(os.path.join(CACHE_DIR, "last_crash.json"), None) or {}
         crashed = (str(crash.get("appid")) == str(self.appid)
@@ -557,7 +558,12 @@ class Plugin:
             parts.append("Генерацію кадрів не ввімкнено: lsfg-vk не пройшов перевірку — деталі в меню")
         elif int(cur.get("fg", 0) or 0) >= 2:
             parts.append(f"Генерація кадрів ×{cur.get('fg')} увімкнена")
-        if cur.get("opti"):
+        if cur.get("opti_method") == "direct":
+            g = O.load_game(self.appid)
+            parts.append("FSR 4 → " + (g.get("upscaler_label") or "один файл") +
+                         ": у налаштуваннях гри вибери FSR"
+                         + ("" if g.get("direct_confirmed") else " — у кутку має з'явитися напис AMD «FSR 4»"))
+        elif cur.get("opti"):
             parts.append("DLSS → " + (O.load_game(self.appid).get("upscaler_label") or "FSR") +
                          " (OptiScaler): у налаштуваннях гри вибери DLSS")
         if cur.get("mangohud") == 0 and mode != "safe":
@@ -1119,7 +1125,15 @@ class Plugin:
             install = g.get("install") or info.get("install", "")
             prof = O.GAME_PROFILES.get(a, {})
             engine = O.detect_engine(install) if install and os.path.isdir(install) else "generic"
+            has_dir = bool(install and os.path.isdir(install))
+            ffx = O.find_ffx(install) if has_dir else []
             res["game"] = {
+                "method": g.get("method", "optiscaler") if g.get("enabled") else "",
+                "planned": O.choose_method(a, install, self.settings, gpu) if has_dir else "",
+                "native_fsr31": bool(ffx),
+                "direct_variant": g.get("direct_variant", ""),
+                "direct_confirmed": bool(g.get("direct_confirmed")),
+                "direct_tried": g.get("direct_tried", []),
                 "enabled": bool(g.get("enabled")), "tag": g.get("tag"), "dll": g.get("dll"),
                 "upscaler": g.get("upscaler_label"), "error": g.get("error", ""),
                 "target": (g.get("target", "") or "").replace(install, "").lstrip("/") or "корінь гри",
@@ -1154,20 +1168,28 @@ class Plugin:
         info = self._installed_games().get(a)
         if not info or not info.get("install"):
             raise RuntimeError("гру не знайдено серед встановлених")
-        if not O.installed_tag():
-            O.download_latest(decky.logger.info)
-        return O.install(a, info["install"], info["name"], settings=self.settings,
-                         log=decky.logger.info, reset=True)
+        return O.enable(a, info["install"], info["name"], settings=self.settings,
+                        log=decky.logger.info, reset=True)
 
     async def opti_enable(self, appid):
         try:
             g = await self._blocking(self._opti_enable_sync, appid)
             return {"ok": True, "upscaler": g.get("upscaler_label"), "dll": g.get("dll"),
-                    "tag": g.get("tag"), "ref": g.get("ref", "")}
+                    "tag": g.get("tag"), "ref": g.get("ref", ""),
+                    "method": g.get("method", "optiscaler")}
         except O.NeedPdPlugin as e:
             return {"ok": False, "need_pd": True, "error": str(e)}
         except Exception as e:  # noqa: BLE001
             decky.logger.error(f"OptiScaler enable failed: {e}")
+            return {"ok": False, "error": str(e)}
+
+    async def opti_direct_feedback(self, appid, ok):
+        """«Напис FSR 4 був / не було» після гри з «одним файлом»."""
+        try:
+            g = await self._blocking(O.direct_feedback, str(appid), bool(ok), decky.logger.info)
+            return {"ok": True, "method": g.get("method", ""), "upscaler": g.get("upscaler_label", "")}
+        except Exception as e:  # noqa: BLE001
+            decky.logger.error(f"FSR4 feedback failed: {e}")
             return {"ok": False, "error": str(e)}
 
     async def opti_pd_scan(self):

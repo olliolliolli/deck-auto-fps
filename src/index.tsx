@@ -47,6 +47,7 @@ type Settings = {
   quality_target: string;
   respect_manual_graphics: boolean;
   opti_upscaler: string;
+  opti_method: string;
   opti_gpu_arch: string;
   opti_fg: boolean;
 };
@@ -160,6 +161,12 @@ type OptiGame = {
   ref: string;
   ref_tag: string;
   pd: PdStatus | null;
+  method: string; // "" | "direct" | "optiscaler"
+  planned: string; // що вибере кнопка: "direct" («один файл») | "optiscaler"
+  native_fsr31: boolean;
+  direct_variant: string;
+  direct_confirmed: boolean;
+  direct_tried: string[];
 };
 type PdStatus = { present: boolean; verified: boolean; name: string; url: string; error?: string };
 type OptiStatus = {
@@ -185,6 +192,7 @@ type OptiResult = {
   tag?: string;
   ref?: string;
   need_pd?: boolean;
+  method?: string;
 };
 
 const optiStatus = callable<[appid?: number], OptiStatus>("opti_status");
@@ -192,6 +200,7 @@ const optiCheck = callable<[], OptiStatus>("opti_check");
 const optiUpdate = callable<[], OptiResult>("opti_update");
 const optiEnable = callable<[appid: number], OptiResult>("opti_enable");
 const optiDisable = callable<[appid: number], OptiResult>("opti_disable");
+const optiDirectFeedback = callable<[appid: number, ok: boolean], OptiResult>("opti_direct_feedback");
 const optiPdScan = callable<[], PdStatus>("opti_pd_scan");
 const optiPdImport = callable<[path: string], PdStatus>("opti_pd_import");
 
@@ -312,7 +321,14 @@ const GameLaunchSection = memo(function GameLaunchSection() {
           await setGameEnabled(appid, true);
         }
         const r = await optiEnable(appid);
-        if (r.need_pd) {
+        if (r.ok && r.method === "direct") {
+          toaster.toast({
+            title: "AutoFPS · FSR 4 увімкнено",
+            body:
+              `${game?.name ?? appid}: ${r.upscaler}. Запусти гру й вибери FSR у налаштуваннях графіки — ` +
+              "у кутку з'явиться напис AMD «FSR 4»",
+          });
+        } else if (r.need_pd) {
           toaster.toast({ title: "AutoFPS · потрібен ще один файл", body: r.error ?? "" });
         } else if (!r.ok) {
           throw new Error(r.error);
@@ -329,7 +345,7 @@ const GameLaunchSection = memo(function GameLaunchSection() {
         setOptiBusy("Прибираю з гри…");
         const r = await optiDisable(appid);
         if (!r.ok) throw new Error(r.error);
-        toaster.toast({ title: "AutoFPS", body: "OptiScaler прибрано, оригінальні файли гри повернуто" });
+        toaster.toast({ title: "AutoFPS", body: "FSR 4 / OptiScaler прибрано, оригінальні файли гри повернуто" });
       }
     } catch (e) {
       toaster.toast({ title: "AutoFPS · DLSS", body: `Не вдалося: ${e instanceof Error ? e.message : String(e)}` });
@@ -356,6 +372,15 @@ const GameLaunchSection = memo(function GameLaunchSection() {
     } else if (!og.found) {
       optiLabel = "DLSS: теку гри не знайдено";
       optiBlocked = !og.enabled;
+    } else if (og.enabled && og.method === "direct") {
+      optiLabel = `⚡ FSR 4 у вбудований FSR 3.1 гри (${og.upscaler ?? "один файл"})`;
+      const chk = og.direct_confirmed
+        ? "\n✓ Підтверджено: напис FSR 4 був"
+        : og.check
+          ? `\nОстання перевірка: ${og.check.title}. ${og.check.message}`
+          : "\nУ грі вибери FSR у налаштуваннях графіки — у кутку з'явиться напис AMD «FSR 4»";
+      optiDesc = "Без OptiScaler: поруч з FSR 3.1 гри лежить бібліотека драйвера FSR 4 (amdxcffx64.dll)" +
+        chk + (og.error ? `\n⚠ ${og.error}` : "");
     } else if (og.enabled && og.ref) {
       optiLabel = `⚡ ${og.upscaler ?? "FSR"} через REFramework (OptiScaler ${og.tag ?? ""})`;
       const chk = og.check
@@ -374,6 +399,10 @@ const GameLaunchSection = memo(function GameLaunchSection() {
     } else if (og.disabled_reason) {
       optiLabel = "DLSS вимкнено самоперевіркою";
       optiDesc = `${og.disabled_reason}. Можна спробувати ще раз — перебір почнеться спочатку`;
+    } else if (og.planned === "direct") {
+      optiLabel = "FSR 4 вимкнено · у гри є свій FSR 3.1";
+      optiDesc = `${og.engine}: досить одного файлу — AutoFPS покладе бібліотеку FSR 4 ` +
+        "(amdxcffx64.dll) поруч з FSR 3.1 гри, і вбудований FSR стане FSR 4. OptiScaler не потрібен";
     } else if (og.ref === "pd" && og.pd && !og.pd.present) {
       optiLabel = `FSR 4 для цієї гри: бракує ${og.pd.name}`;
       optiDesc =
@@ -465,12 +494,51 @@ const GameLaunchSection = memo(function GameLaunchSection() {
               <ButtonItem layout="below" disabled={!!optiBusy} onClick={toggleOpti}>
                 {optiBusy ||
                   (og.enabled
-                    ? og.ref ? "Вимкнути FSR у цій грі" : "Вимкнути DLSS у цій грі"
-                    : og.ref ? "⚡ Увімкнути FSR 4 у цій грі" : "⚡ Увімкнути DLSS у цій грі")}
+                    ? og.ref || og.method === "direct" ? "Вимкнути FSR 4 у цій грі" : "Вимкнути DLSS у цій грі"
+                    : og.ref || og.planned === "direct" ? "⚡ Увімкнути FSR 4 у цій грі" : "⚡ Увімкнути DLSS у цій грі")}
               </ButtonItem>
             </PanelSectionRow>
           )}
-          {og.ref === "pd" && og.pd && !og.pd.present && !og.enabled && (
+          {og.enabled && og.method === "direct" && !og.direct_confirmed && (
+            <>
+              <PanelSectionRow>
+                <ButtonItem
+                  layout="below"
+                  disabled={!!optiBusy}
+                  onClick={async () => {
+                    const r = await optiDirectFeedback(appid, true);
+                    toaster.toast({ title: "AutoFPS", body: r.ok ? "Чудово! Напис більше не показуватиметься" : `Помилка: ${r.error}` });
+                    reloadOpti(appid);
+                  }}
+                >
+                  Напис «FSR 4» був ✓
+                </ButtonItem>
+              </PanelSectionRow>
+              <PanelSectionRow>
+                <ButtonItem
+                  layout="below"
+                  disabled={!!optiBusy}
+                  onClick={async () => {
+                    setOptiBusy("Пробую інший варіант…");
+                    const r = await optiDirectFeedback(appid, false);
+                    toaster.toast({
+                      title: "AutoFPS · FSR 4",
+                      body: !r.ok
+                        ? `Не вдалося: ${r.error}`
+                        : r.method === "direct"
+                          ? `Наступний варіант: ${r.upscaler}. Запусти гру ще раз`
+                          : `«Один файл» не спрацював — поставлено OptiScaler (${r.upscaler}). У грі вибери FSR або DLSS`,
+                    });
+                    setOptiBusy("");
+                    reloadOpti(appid);
+                  }}
+                >
+                  {optiBusy || "Напису не було — спробувати інший варіант"}
+                </ButtonItem>
+              </PanelSectionRow>
+            </>
+          )}
+          {og.ref === "pd" && og.pd && !og.pd.present && !og.enabled && og.planned !== "direct" && (
             <>
               <PanelSectionRow>
                 <ButtonItem
@@ -620,6 +688,18 @@ function OptiSection({
             await update("opti_upscaler", o.data);
             setSt(await optiStatus());
           }}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <DropdownItem
+          label="Спосіб для ігор з власним FSR 3.1"
+          description="«Один файл» (як у Deck Wizard): поруч з FSR 3.1 гри кладеться amdxcffx64.dll — вбудований FSR стає FSR 4, без OptiScaler. Capcom: MH Wilds, RE Requiem, Dragon's Dogma 2. У RE4 Remake / RE2 / RE3 / RE7 / RE8 FSR 3.1 немає — там лише REFramework + OptiScaler"
+          rgOptions={[
+            { data: "auto", label: "Авто: «один файл», якщо гра має FSR 3.1" },
+            { data: "optiscaler", label: "Завжди OptiScaler" },
+          ]}
+          selectedOption={settings.opti_method === "optiscaler" ? "optiscaler" : "auto"}
+          onChange={(o: { data: string }) => update("opti_method", o.data)}
         />
       </PanelSectionRow>
       <PanelSectionRow>
