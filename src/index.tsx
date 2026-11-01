@@ -323,7 +323,12 @@ const GameLaunchSection = memo(function GameLaunchSection() {
           await setGameEnabled(appid, true);
         }
         const r = await optiEnable(appid);
-        if (r.ok && r.method === "direct") {
+        if (r.ok && r.method === "bridge") {
+          toaster.toast({
+            title: "AutoFPS · FSR 4 увімкнено",
+            body: `${game?.name ?? appid}: міст FSR2→FSR4. У грі вибери FSR 2 (будь-який режим) — працюватиме FSR 4, інтерфейс чіткий`,
+          });
+        } else if (r.ok && r.method === "direct") {
           toaster.toast({
             title: "AutoFPS · FSR 4 увімкнено",
             body:
@@ -374,6 +379,17 @@ const GameLaunchSection = memo(function GameLaunchSection() {
     } else if (!og.found) {
       optiLabel = "DLSS: теку гри не знайдено";
       optiBlocked = !og.enabled;
+    } else if (og.enabled && og.method === "bridge") {
+      optiLabel = "⚡ FSR 4 через міст AutoFPS (інтерфейс чіткий)";
+      const chk = og.check
+        ? `\nОстання перевірка: ${og.check.title}. ${og.check.message}`
+        : "\nУ грі вибери FSR 2 (будь-який режим) — замість нього працюватиме FSR 4. Режим «Продуктивність» дає найбільше FPS";
+      optiDesc = "Без REFramework: міст підміняє FSR 2 гри на FSR 4 до того, як гра малює інтерфейс" +
+        chk + (og.error ? `\n⚠ ${og.error}` : "");
+    } else if (og.planned === "bridge" && !og.enabled) {
+      optiLabel = "FSR 4 вимкнено · доступний міст AutoFPS";
+      optiDesc = "Для цієї гри є власний міст FSR2→FSR4: чіткий інтерфейс, без REFramework і Nexus. " +
+        "Натисни кнопку нижче, потім у грі вибери FSR 2";
     } else if (og.enabled && og.method === "direct") {
       optiLabel = `⚡ FSR 4 у вбудований FSR 3.1 гри (${og.upscaler ?? "один файл"})`;
       const chk = og.direct_confirmed
@@ -496,8 +512,8 @@ const GameLaunchSection = memo(function GameLaunchSection() {
               <ButtonItem layout="below" disabled={!!optiBusy} onClick={toggleOpti}>
                 {optiBusy ||
                   (og.enabled
-                    ? og.ref || og.method === "direct" ? "Вимкнути FSR 4 у цій грі" : "Вимкнути DLSS у цій грі"
-                    : og.ref || og.planned === "direct" ? "⚡ Увімкнути FSR 4 у цій грі" : "⚡ Увімкнути DLSS у цій грі")}
+                    ? og.ref || og.method === "direct" || og.method === "bridge" ? "Вимкнути FSR 4 у цій грі" : "Вимкнути DLSS у цій грі"
+                    : og.ref || og.planned === "direct" || og.planned === "bridge" ? "⚡ Увімкнути FSR 4 у цій грі" : "⚡ Увімкнути DLSS у цій грі")}
               </ButtonItem>
             </PanelSectionRow>
           )}
@@ -540,7 +556,7 @@ const GameLaunchSection = memo(function GameLaunchSection() {
               </PanelSectionRow>
             </>
           )}
-          {og.ref === "pd" && og.pd && !og.pd.present && !og.enabled && og.planned !== "direct" && (
+          {og.ref === "pd" && og.pd && !og.pd.present && !og.enabled && og.planned !== "direct" && og.planned !== "bridge" && (
             <>
               <PanelSectionRow>
                 <ButtonItem

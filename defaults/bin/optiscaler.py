@@ -140,7 +140,8 @@ ENGINE_PROFILES = {
 GAME_PROFILES = {
     # Capcom RE Engine без вбудованого DLSS: REFramework (гілка pd-upscaler, збірка під гру)
     # + PureDark UpscalerBasePlugin (PDPerfPlugin.dll) + OptiScaler. Вікі OptiScaler.
-    "2050650": {"ref": "pd", "ref_asset": "RE4.zip", "name": "Resident Evil 4 (2023)"},
+    # RE4: власний міст FSR2→FSR4 (інтерфейс чіткий); REFramework — запасний шлях
+    "2050650": {"bridge": "re4", "ref": "pd", "ref_asset": "RE4.zip", "name": "Resident Evil 4 (2023)"},
     "883710": {"ref": "pd", "ref_asset": "RE2.zip", "name": "Resident Evil 2"},
     "952060": {"ref": "pd", "ref_asset": "RE3.zip", "name": "Resident Evil 3"},
     "418370": {"ref": "pd", "ref_asset": "RE7.zip", "name": "Resident Evil 7"},
@@ -538,6 +539,8 @@ def choose_method(appid, install, settings, gpu):
         return forced
     if gpu.get("vendor") not in ("amd", "unknown"):
         return "optiscaler"
+    if GAME_PROFILES.get(str(appid), {}).get("bridge") and bridge_dll():
+        return "bridge"                # FSR 2 гри → FSR 4 нашим мостом
     if (settings or {}).get("opti_upscaler", "auto") not in ("auto", "fsr4"):
         return "optiscaler"            # FSR 3.1 / XeSS / FSR 4.0 — це вміє лише OptiScaler
     if (settings or {}).get("opti_fg"):
@@ -1096,12 +1099,209 @@ def direct_install(appid, install_path, game_name="", args=None, settings=None, 
     return game
 
 
+# ------------------------------------------------------------------ міст FSR2→FSR4 (RE Engine)
+
+BRIDGE_MARK = b"AutoFPS FSR2"          # рядок усередині нашої dinput8.dll
+BRIDGE_STATUS = "autofps_fsr_status.json"
+BRIDGE_INI = "autofps_fsr.ini"
+BRIDGE_INI_TEXT = """; AutoFPS: міст FSR2→FSR4. Файл перечитується під час гри.
+enable=1
+; HDR | AUTO_EXPOSURE | DEPTH_INVERTED | DEPTH_INFINITE
+flags=0x39
+depth_conv=0
+reactive=0
+skip_accumulate=1
+sharpness=0.5
+near=0.1
+far=10000
+version=4
+mv_x=1
+mv_y=1
+jitter_x=1
+jitter_y=1
+"""
+
+
+def bridge_dll():
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fsr2bridge", "dinput8.dll")
+    return p if os.path.isfile(p) else None
+
+
+def _is_ours(path):
+    try:
+        with open(path, "rb") as f:
+            return BRIDGE_MARK in f.read()
+    except OSError:
+        return False
+
+
+def bridge_remove(game):
+    target = game.get("target") or ""
+    for name in game.get("bridge_files", []):
+        p = os.path.join(target, name)
+        try:
+            if os.path.isfile(p):
+                os.remove(p)
+        except OSError:
+            pass
+    for name in game.get("bridge_backups", []):
+        p = os.path.join(target, name)
+        if os.path.isfile(p + ".autofps.b") and not os.path.exists(p):
+            shutil.move(p + ".autofps.b", p)
+    for extra in (BRIDGE_STATUS, "autofps_fsr.log"):
+        try:
+            os.remove(os.path.join(target, extra))
+        except OSError:
+            pass
+    game.update(bridge_files=[], bridge_backups=[])
+
+
+def _re_engine_enable_fsr2(install):
+    """Міст працює лише коли в грі ввімкнено FSR 2: якщо вимкнено — ставимо «Якість»."""
+    ini = os.path.join(install, "local_config.ini")
+    try:
+        text = open(ini, encoding="utf-8", errors="ignore").read()
+    except OSError:
+        return False
+    new = re.sub(r"^AppUpScalingTypeFSR2=0\s*$", "AppUpScalingTypeFSR2=1", text, flags=re.M)
+    new = re.sub(r"^AppUpScalingTypeFSR1=[1-9]\d*\s*$", "AppUpScalingTypeFSR1=0", new, flags=re.M)
+    if new != text:
+        with open(ini, "w", encoding="utf-8") as f:
+            f.write(new)
+        return True
+    return False
+
+
+def bridge_install(appid, install_path, game_name="", args=None, settings=None, log=print):
+    settings = settings or C.load_json(C.SETTINGS_FILE, {})
+    appid = str(appid)
+    if not install_path or not os.path.isdir(install_path):
+        raise RuntimeError("не знайдено теку гри")
+    src_bridge = bridge_dll()
+    if not src_bridge:
+        raise RuntimeError("у цій збірці AutoFPS немає моста FSR2→FSR4")
+    game = load_game(appid)
+    if game.get("installed") and game.get("method", "optiscaler") == "optiscaler":
+        _remove_files(game)          # REFramework / OptiScaler з минулого разу
+        game.update(installed=False, files=[], backups=[], ref="", ref_tag="")
+    if game.get("direct_files"):
+        direct_remove(game)
+    if not installed_tag():
+        download_latest(log)
+    src_dir = version_dir(installed_tag())
+    gpu = effective_gpu(settings)
+    loader = os.path.join(src_dir, "amd_fidelityfx_dx12.dll")
+    upscaler = os.path.join(src_dir, "amd_fidelityfx_upscaler_dx12.dll") if gpu.get("arch") == "rdna4" \
+        else fetch_asset("fsr40_int8", log)        # FSR 4.0.2 INT8 — працює на RDNA2/3
+    if not os.path.isfile(loader):
+        raise RuntimeError("у пакеті OptiScaler немає amd_fidelityfx_dx12.dll")
+    target = find_target(appid, install_path, game_name, args)
+    if not os.access(target, os.W_OK):
+        raise RuntimeError(f"немає прав на запис у теку гри: {target}")
+    files = {"dinput8.dll": src_bridge, "amd_fidelityfx_dx12.dll": loader,
+             "amd_fidelityfx_upscaler_dx12.dll": upscaler}
+    backups = list(game.get("bridge_backups", []))
+    ours = _our_shas() | {sha256(p) for p in files.values()}
+    for name, src in files.items():
+        dst = os.path.join(target, name)
+        if os.path.isfile(dst) and not _is_ours(dst) and sha256(dst) not in ours \
+                and not os.path.exists(dst + ".autofps.b"):
+            shutil.move(dst, dst + ".autofps.b")      # чужий файл (напр. REFramework) — зберегти
+            backups.append(name)
+        shutil.copy2(src, dst)
+    ini = os.path.join(target, BRIDGE_INI)
+    if not os.path.isfile(ini) or "AutoFPS" in C.read_text(ini)[:200]:
+        with open(ini, "w", encoding="utf-8") as f:
+            f.write(BRIDGE_INI_TEXT)
+    # ручне перевизначення з тестів більше не потрібне — його дає ensure()
+    try:
+        os.remove(os.path.join(C.CFG_DIR, f"dlloverride_{appid}"))
+    except OSError:
+        pass
+    fsr2_on = _re_engine_enable_fsr2(install_path)
+    game.update(installed=True, enabled=True, method="bridge", bridge_files=sorted(files) + [BRIDGE_INI],
+                bridge_backups=sorted(set(backups)), install=install_path, target=target,
+                engine=detect_engine(install_path), upscaler="fsr4",
+                upscaler_label="FSR 4 через міст (інтерфейс чіткий)", gpu=gpu["name"], opti_fg=False,
+                name=game_name or game.get("name", ""), updated=int(time.time()), error="",
+                bridge_fsr2_enabled=fsr2_on)
+    save_game(appid, game)
+    log(f"міст FSR2→FSR4 → {target}" + (" (у грі ввімкнено FSR 2 «Якість»)" if fsr2_on else ""))
+    return game
+
+
+def bridge_ensure(appid, game, args, settings, log=print):
+    target = game.get("target") or ""
+    dll = os.path.join(target, "dinput8.dll")
+    missing = not _is_ours(dll) or not os.path.isfile(os.path.join(target, "amd_fidelityfx_dx12.dll"))
+    newer = bridge_dll() and os.path.isfile(dll) and sha256(dll) != sha256(bridge_dll())
+    if missing or newer:
+        log("міст FSR2→FSR4: перевстановлюю — " + ("файли зникли (оновлення гри?)" if missing else "нова версія моста"))
+        try:
+            game = bridge_install(appid, game.get("install"), game.get("name", ""), args, settings, log)
+        except Exception as e:  # noqa: BLE001
+            game["error"] = str(e)
+            save_game(appid, game)
+            log(f"міст: не вдалося — {e}; гра запуститься з рідним FSR 2")
+            return None, False
+    return "dinput8", False
+
+
+def analyze_bridge(appid, game, started, duration, crashed, log=print):
+    st_path = os.path.join(game.get("target") or "", BRIDGE_STATUS)
+    st = {}
+    try:
+        if os.path.getmtime(st_path) >= started - 5:
+            st = C.load_json(st_path, {})
+    except OSError:
+        pass
+    res = {"t": int(time.time()), "duration": int(duration), "method": "bridge", **st}
+    state = st.get("state", "")
+    if crashed or duration < CRASH_SECONDS:
+        game["bridge_crashes"] = int(game.get("bridge_crashes", 0)) + 1
+        res.update(status="crash", title="FSR 4: гра закрилась одразу",
+                   message=f"Гра закрилась через {int(duration)} с з мостом FSR2→FSR4")
+        if game["bridge_crashes"] >= 2:
+            bridge_remove(game)
+            game.update(enabled=False, installed=False,
+                        disabled_reason="Гра двічі закрилась одразу з мостом — міст вимкнено")
+            res["message"] += ". Міст вимкнено, гра працює з рідним FSR 2"
+    elif state == "ok" and int(st.get("bridged", 0)) > 0:
+        game["bridge_crashes"] = 0
+        res["first_ok"] = not game.get("bridge_confirmed_once")
+        game["bridge_confirmed_once"] = True
+        res.update(status="ok", title="✓ FSR 4 працює",
+                   message=f"Міст: {st.get('version', 'FSR')} замість FSR 2, інтерфейс чіткий "
+                           f"({st.get('bridged')} кадрів)")
+    elif state == "no_fsr2_shaders":
+        res.update(status="error", title="FSR 4: міст не впізнав гру",
+                   message="Кроків FSR 2 цієї версії гри не знайдено — схоже, гру оновили. "
+                           "Працював рідний FSR 2. Надішли діагностику, щоб оновити міст")
+    elif state == "fsr2_off":
+        res.update(status="no_dlss", title="FSR 4: увімкни FSR 2 у грі",
+                   message="Міст готовий, але гра не використовує FSR 2. Налаштування графіки → "
+                           "FSR 2 (будь-який режим) — тоді замість нього працюватиме FSR 4")
+    elif state in ("ffx_failed", "no_ffx"):
+        res.update(status="error", title="FSR 4: FidelityFX не запустився",
+                   message="Бібліотека AMD FidelityFX не створила FSR 4 — працював рідний FSR 2. "
+                           "Надішли діагностику")
+    else:
+        res.update(status="short", title="FSR 4: замало часу для перевірки",
+                   message="Пограй хоча б пару хвилин з увімкненим FSR 2")
+    game["check"] = res
+    save_game(appid, game)
+    log(f"самоперевірка {appid} (міст): {res['status']}")
+    return res if res["status"] != "ok" or res.get("first_ok") else None
+
+
 def enable(appid, install_path, game_name="", args=None, settings=None, log=print, reset=True):
     """Одна кнопка: вибирає спосіб сам. Гра з FSR 3.1 → «один файл»; інакше OptiScaler."""
     settings = settings or C.load_json(C.SETTINGS_FILE, {})
     appid = str(appid)
     gpu = effective_gpu(settings)
     method = choose_method(appid, install_path, settings, gpu)
+    if method == "bridge":
+        return bridge_install(appid, install_path, game_name, args, settings, log)
     if method == "direct":
         try:
             return direct_install(appid, install_path, game_name, args, settings, log, reset)
@@ -1110,6 +1310,10 @@ def enable(appid, install_path, game_name="", args=None, settings=None, log=prin
     game = load_game(appid)
     if game.get("direct_files"):
         direct_remove(game)
+        game.update(installed=False)
+        save_game(appid, game)
+    if game.get("bridge_files"):
+        bridge_remove(game)
         game.update(installed=False)
         save_game(appid, game)
     if not installed_tag():
@@ -1152,6 +1356,8 @@ def uninstall(appid, log=print):
         return {}
     if game.get("direct_files"):
         direct_remove(game)
+    if game.get("bridge_files"):
+        bridge_remove(game)
     _remove_files(game)
     game.update(installed=False, enabled=False, files=[], backups=[], updated=int(time.time()))
     save_game(appid, game)
@@ -1169,6 +1375,8 @@ def ensure(appid, args, settings=None, log=print):
     settings = settings or C.load_json(C.SETTINGS_FILE, {})
     if game.get("method") == "direct":
         return direct_ensure(appid, game, args, settings, log)
+    if game.get("method") == "bridge":
+        return bridge_ensure(appid, game, args, settings, log)
     target = game.get("target", "")
     missing = not os.path.isfile(os.path.join(target, game.get("dll", "dxgi.dll"))) or \
         not os.path.isfile(os.path.join(target, MARKER)) or \
@@ -1296,6 +1504,8 @@ def analyze(appid, started, duration, crashed=False, log=print):
         return None
     if game.get("method") == "direct":
         return analyze_direct(appid, game, duration, crashed, log)
+    if game.get("method") == "bridge":
+        return analyze_bridge(appid, game, started, duration, crashed, log)
     info = parse_log(_read_log(game.get("target"), started))
     dll = game.get("dll", "dxgi.dll")
     res = {"t": int(time.time()), "duration": int(duration), "dll": dll, **info}
@@ -1423,7 +1633,7 @@ def main():
             stem, fg, method, env = None, False, "", {}
         print(f"DLL={stem or ''}")
         print(f"FG={1 if fg else 0}")
-        print(f"METHOD={method if (stem or method == 'direct') else ''}")
+        print(f"METHOD={method if (stem or method in ('direct', 'bridge')) else ''}")
         for k, val in env.items():
             print(f"ENV={k}={val}")
 

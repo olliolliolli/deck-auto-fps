@@ -86,6 +86,7 @@ static const known_pso g_known[] = {
     {0xc7e4d3dc11696abfULL, "fsr2-10 RCAS(display)"},
     {0x7cd9e63795fb23f6ULL, "post-1 (після FSR)"},
 };
+static volatile LONG g_known_psos;   /* скільки кроків FSR 2 гри знайдено при створенні шейдерів */
 static const char *known_name(uint64_t h)
 {
     for (size_t i = 0; i < sizeof(g_known) / sizeof(g_known[0]); i++)
@@ -300,7 +301,7 @@ static void register_pso(void *pso, const D3D12_SHADER_BYTECODE *cs)
     uint64_t h = fnv1a(cs->pShaderBytecode, cs->BytecodeLength);
     pso_put(pso, h);
     const char *nm = known_name(h);
-    if (nm) LOG("PSO %p = %s (hash %016llx)", pso, nm, (unsigned long long)h);
+    if (nm) InterlockedIncrement(&g_known_psos);
 }
 
 static HRESULT STDMETHODCALLTYPE h_CreateComputePSO(ID3D12Device *dev, const D3D12_COMPUTE_PIPELINE_STATE_DESC *d, REFIID riid, void **out)
@@ -390,8 +391,7 @@ static HRESULT STDMETHODCALLTYPE h_CreateDescriptorHeap(ID3D12Device *dev, const
             if (vis) ID3D12DescriptorHeap_GetGPUDescriptorHandleForHeapStart(h, &g);
             g_heaps[i].num = d->NumDescriptors; g_heaps[i].type = d->Type; g_heaps[i].inc = g_inc[d->Type];
             g_heaps[i].cpu = c.ptr; g_heaps[i].gpu = g.ptr; g_heaps[i].visible = vis;
-            LOG("HEAP type=%d num=%u visible=%d cpu=%llx gpu=%llx inc=%u", d->Type, d->NumDescriptors, vis,
-                (unsigned long long)c.ptr, (unsigned long long)g.ptr, g_inc[d->Type]);
+
         }
     }
     return hr;
@@ -595,7 +595,7 @@ static struct {
     int jitter_src;      /* 0 — з констант FSR 2 [10,11] */
 } g_cfg = {1, FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_AUTO_EXPOSURE |
               FFX_UPSCALE_ENABLE_DEPTH_INVERTED | FFX_UPSCALE_ENABLE_DEPTH_INFINITE,
-           0, 0, 0, 0.5f, 0.1f, 10000.0f, "4", 1.0f, 1.0f, 1.0f, 1.0f, 0};
+           0, 0, 1, 0.5f, 0.1f, 10000.0f, "4", 1.0f, 1.0f, 1.0f, 1.0f, 0};
 static FILETIME g_cfg_mtime;
 static uint32_t g_ctx_w, g_ctx_h;   /* оголошено тут, визначено нижче (FFX) */
 static volatile LONG g_cfg_changed;
@@ -644,8 +644,14 @@ static DWORD WINAPI cfg_watch_thread(void *arg)
     while (n > 0 && path[n - 1] != L'\\' && path[n - 1] != L'/') n--;
     path[n] = 0;
     wcscat(path, L"autofps_fsr.ini");
+    int warned = 0;
     for (;;) {
         Sleep(2000);
+        if (!warned && GetTickCount() - g_t0 > 120000 && g_bridged == 0) {
+            warned = 1;
+            if (g_known_psos == 0) { LOG("кроки FSR 2 цієї версії гри не знайдено (оновлення гри?) — працює рідний FSR 2"); write_status("no_fsr2_shaders"); }
+            else { LOG("FSR 2 у грі не використовується (увімкни FSR 2 у налаштуваннях графіки)"); write_status("fsr2_off"); }
+        }
         WIN32_FILE_ATTRIBUTE_DATA fa;
         if (GetFileAttributesExW(path, GetFileExInfoStandard, &fa) &&
             CompareFileTime(&fa.ftLastWriteTime, &g_cfg_mtime) != 0) {
@@ -689,7 +695,7 @@ static int ffx_load(void)
     path[n] = 0;
     wcscat(path, L"amd_fidelityfx_dx12.dll");
     HMODULE m = LoadLibraryW(path);
-    if (!m) { LOG("amd_fidelityfx_dx12.dll не знайдено поруч з грою — міст вимкнено"); return 0; }
+    if (!m) { LOG("amd_fidelityfx_dx12.dll не знайдено поруч з грою — міст вимкнено"); write_status("no_ffx"); return 0; }
     f_create = (PfnFfxCreateContext)GetProcAddress(m, "ffxCreateContext");
     f_destroy = (PfnFfxDestroyContext)GetProcAddress(m, "ffxDestroyContext");
     f_query = (PfnFfxQuery)GetProcAddress(m, "ffxQuery");
@@ -755,6 +761,7 @@ static int ffx_ensure(ID3D12Device *dev, uint32_t w, uint32_t h)
     ffxReturnCode_t rc = f_create(&g_ctx, &cd.header, NULL);
     if (rc != FFX_API_RETURN_OK) {
         LOG("FFX: ffxCreateContext = %u — міст вимкнено, лишається рідний FSR 2", rc);
+        write_status("ffx_failed");
         g_ctx = NULL; g_ffx_state = -1; return 0;
     }
     struct ffxQueryGetProviderVersion pv = {0};
@@ -881,8 +888,23 @@ static struct FfxApiResource ffx_res(ID3D12Resource *r, uint32_t state)
     return x;
 }
 
-/* статистика для журналу */
 static volatile LONG g_bridged, g_fallback;
+/* стан для плагіна AutoFPS: autofps_fsr_status.json поруч з грою */
+static void write_status(const char *state)
+{
+    wchar_t path[MAX_PATH];
+    DWORD n = GetModuleFileNameW(NULL, path, MAX_PATH);
+    while (n > 0 && path[n - 1] != L'\\' && path[n - 1] != L'/') n--;
+    path[n] = 0;
+    wcscat(path, L"autofps_fsr_status.json");
+    FILE *f = _wfopen(path, L"w");
+    if (!f) return;
+    fprintf(f, "{\"state\":\"%s\",\"version\":\"%s\",\"bridged\":%ld,\"fallback\":%ld,\"known_shaders\":%ld,\"uptime_s\":%lu}\n",
+            state, g_ffx_version, g_bridged, g_fallback, g_known_psos, (unsigned long)((GetTickCount() - g_t0) / 1000));
+    fclose(f);
+}
+
+/* статистика для журналу */
 static DWORD g_last_stat;
 static LARGE_INTEGER g_qpf, g_last_qpc;
 static int g_logged_first;
@@ -1027,12 +1049,14 @@ static int bridge_rcas(ID3D12GraphicsCommandList *cl, cl_state *st)
         LOG("міст: перший кадр через %s: %ux%u→%ux%u jitter=(%.3f,%.3f) mvScale=(%.3f,%.3f) preExp=%.3f fov=%.1f°",
             g_ffx_version, rw, rh, dw, dh, dd.jitterOffset.x, dd.jitterOffset.y, dd.motionVectorScale.x,
             dd.motionVectorScale.y, dd.preExposure, dd.cameraFovAngleVertical * 57.2958f);
+        write_status("ok");
     }
     DWORD t = GetTickCount();
     if (t - g_last_stat > 30000) {
         g_last_stat = t;
         LOG("міст: кадрів через FFX %ld, з рідним FSR 2 %ld (колір %ld, глибина %ld, вектори %ld, константи %ld, вихід %ld)",
             g_bridged, g_fallback, g_why[1], g_why[2], g_why[3], g_why[4], g_why[5]);
+        write_status("ok");
     }
     return 1;
 }
@@ -1240,7 +1264,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         g_rs = (rs_info *)VirtualAlloc(NULL, sizeof(rs_info) * RS_CAP, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         g_maps = (map_info *)VirtualAlloc(NULL, sizeof(map_info) * MAP_CAP, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         open_log();
-        LOG("AutoFPS FSR2→FSR4 міст (етап 3), збірка " __DATE__ " " __TIME__);
+        LOG("AutoFPS FSR2→FSR4 міст, збірка " __DATE__ " " __TIME__);
         load_cfg();
         QueryPerformanceFrequency(&g_qpf);
         { HANDLE w = CreateThread(NULL, 0, cfg_watch_thread, NULL, 0, NULL); if (w) CloseHandle(w); }

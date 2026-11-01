@@ -561,7 +561,9 @@ class Plugin:
             parts.append("Генерацію кадрів не ввімкнено: lsfg-vk не пройшов перевірку — деталі в меню")
         elif int(cur.get("fg", 0) or 0) >= 2:
             parts.append(f"Генерація кадрів ×{cur.get('fg')} увімкнена")
-        if cur.get("opti_method") == "direct":
+        if cur.get("opti_method") == "bridge":
+            parts.append("FSR 4 через міст (інтерфейс чіткий): у налаштуваннях гри має бути FSR 2")
+        elif cur.get("opti_method") == "direct":
             g = O.load_game(self.appid)
             parts.append("FSR 4 → " + (g.get("upscaler_label") or "один файл") +
                          ": у налаштуваннях гри вибери FSR"

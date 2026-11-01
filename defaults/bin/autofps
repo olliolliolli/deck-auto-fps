@@ -74,7 +74,9 @@ fi
 if [ -n "$OPTI_DLL" ]; then
   export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:+$WINEDLLOVERRIDES;}${OPTI_DLL}=n,b"
 fi
-if [ "$OPTI_METHOD" = "direct" ]; then
+if [ "$OPTI_METHOD" = "bridge" ]; then
+  log "FSR 4 через міст FSR2→FSR4 (dinput8 з теки гри; у грі має бути ввімкнено FSR 2)"
+elif [ "$OPTI_METHOD" = "direct" ]; then
   export SteamDeck=0
   log "FSR 4 «один файл» у вбудований FSR 3.1 гри${OPTI_DLL:+ (override ${OPTI_DLL}=n,b)}"
 elif [ -n "$OPTI_DLL" ]; then
