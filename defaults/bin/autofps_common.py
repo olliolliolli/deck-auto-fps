@@ -85,7 +85,7 @@ def detect_device():
         return {"id": "legion_go_s", "label": "Lenovo Legion Go S",
                 "min_hz": 60, "max_hz": 120, "refresh_control": False,
                 "tiers": [30, 40, 60, 120], "res": [1920, 1200],
-                "quality_target": 60, "start_level": 4}
+                "quality_target": 40, "start_level": 4}   # 60 базових FPS у важких іграх недосяжні
     return {"id": "generic", "label": f"Невідомий пристрій ({name or '?'})",
             "min_hz": 60, "max_hz": 60, "refresh_control": False,
             "tiers": [30, 40, 60], "res": [1280, 800],

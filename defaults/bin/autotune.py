@@ -234,7 +234,11 @@ class UnrealAdapter:
         return {k: vals[k] for k in UE_KEYS if k in vals}
 
     def ladder(self, original, lowres=None):
-        return ue_ladder(lowres)
+        steps = ue_ladder(lowres)
+        if (self.device or {}).get("id") in HANDHELDS:
+            for st in steps:
+                st["sg.TextureQuality"] = str(min(int(st["sg.TextureQuality"]), UE_HANDHELD_TEXTURE_MAX))
+        return steps
 
     def rank(self, values, ladder):
         """Наскільки знижено налаштування (без роздільності): номер сходинки."""
@@ -446,6 +450,19 @@ RE_KEYS = [  # порядок: що дає найбільше FPS за найм�
     "AppAmbientOcclusion", "AppSSRefrection", "AppContactShadow", "AppSSSSSetting",
     "AppParticleLighting", "AppMeshQuality", "AppTessellation", "AppLensFrare", "AppBloom",
 ]
+# ---- Портативна політика: те, чого не видно на 7–8" екрані, але що з'їдає GPU/відеопам'ять,
+# вимикаємо одразу (як «оптимальні» пресети NVIDIA), а не чекаємо, поки FPS впаде.
+HANDHELDS = {"deck_lcd", "deck_oled", "legion_go_s"}
+# RE Engine: трасування, волосся-пасма, SSR, контактні тіні — непомітні на малому екрані
+RE_HANDHELD_OFF = ["AppRayTraceOnOff", "AppStrandHair", "AppSSRefrection", "AppContactShadow"]
+# Текстури — за бюджетом відеопам'яті (індекс у меню гри; RE4: 0 — Low 0.25 ГБ … 10 — High 8 ГБ).
+# Спільна пам'ять портативки ділиться з системою: великі текстури не видно на екрані,
+# зате вони переповнюють пам'ять — звідси підвисання. Legion Go S: ~1–2 ГБ, Steam Deck: ~0.5 ГБ.
+RE_TEXTURE_KEY = "AppTextureQuality"
+RE_TEXTURE_BUDGET = {"legion_go_s": 4, "deck_lcd": 2, "deck_oled": 2}
+# Unreal: текстури не вище «High» (3 — Epic/Cinematic вже не помітні на портативці)
+UE_HANDHELD_TEXTURE_MAX = 2
+
 RE_FSR2_KEY = "AppUpScalingTypeFSR2"   # 1 «Якість», 2 «Баланс», 3 «Продуктивність» (з мостом — FSR 4)
 RE_TO_ZERO = {"AppRayTraceOnOff", "AppStrandHair", "AppSSRefrection", "AppContactShadow"}
 RE_LABELS = {"AppShadowQuality": "тіні", "AppVolumeLightQuality": "об'ємне світло",
@@ -495,7 +512,22 @@ class REEngineAdapter:
             for k, v in self.read(d).items():
                 if k in ceil:
                     ceil[k] = max(ceil[k], int(v))
+        dev = (self.device or {}).get("id")
+        if dev in HANDHELDS:
+            for k in RE_HANDHELD_OFF:
+                if k in ceil:
+                    ceil[k] = 0
+            budget = RE_TEXTURE_BUDGET.get(dev)
+            cur_tex = self._texture()
+            if budget is not None and cur_tex is not None:
+                ceil[RE_TEXTURE_KEY] = min(cur_tex, budget)
         return ceil
+
+    def _texture(self):
+        cfg = self.locate()
+        vals = read_ini_section(cfg, self.SECTION) if cfg else {}
+        v = vals.get(RE_TEXTURE_KEY, "")
+        return int(v) if v.lstrip("-").isdigit() else None
 
     lowres_supported = False   # роздільність RE Engine не з'ясована — не чіпаємо
     ceiling_from_user = True   # вище за те, що ставив користувач (чи гра за замовч.), не йдемо
@@ -520,7 +552,7 @@ class REEngineAdapter:
     def _settings_steps(self, cur):
         cur = dict(cur)
         ladder = [dict(cur)]
-        keys = [k for k in RE_KEYS if k in cur]
+        keys = [k for k in RE_KEYS if k in cur and k != RE_TEXTURE_KEY]
         for _ in range(14):
             changed = 0
             for k in keys:
@@ -538,7 +570,8 @@ class REEngineAdapter:
         backup_once(cfg)
         with open(cfg, encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
-        new = patch_ini(lines, {self.SECTION: {k: v for k, v in values.items() if k in RE_KEYS or k == RE_FSR2_KEY}})
+        new = patch_ini(lines, {self.SECTION: {k: v for k, v in values.items()
+                                               if k in RE_KEYS or k in (RE_FSR2_KEY, RE_TEXTURE_KEY)}})
         with open(cfg, "w", encoding="utf-8") as f:
             f.writelines(new)
 
@@ -554,6 +587,8 @@ class REEngineAdapter:
             parts.append("FSR 4 «" + {"1": "Якість", "2": "Баланс", "3": "Продуктивність", "4": "Ультра"}.get(
                 str(values[RE_FSR2_KEY]), "?") + "»")
         parts += [f"{RE_LABELS[k]} {values[k]}" for k in RE_LABELS if k in values]
+        if RE_TEXTURE_KEY in values:
+            parts.append(f"текстури {values[RE_TEXTURE_KEY]}")
         return ", ".join(parts) or "налаштування RE Engine"
 
 
@@ -734,7 +769,7 @@ def run(appid, args, device=None, log=print):
     # Стартова сходинка задана для 12-сходинкової драбини Unreal. У коротших (RE Engine — 4–8)
     # вона означала б «усе на мінімум» — масштабуємо пропорційно (один раз, до першого заміру).
     # Драбина змінилась (напр. увімкнено міст FSR 4 — з'явились кроки роздільності): підбір заново
-    sig = f"{len(ladder)}:{RE_FSR2_KEY in ladder[0]}"
+    sig = f"{len(ladder)}:{RE_FSR2_KEY in ladder[0]}:hh2"
     if entry.get("ladder_sig") != sig and (entry.get("ladder_sig") or RE_FSR2_KEY in ladder[0]):
         for k in ("history", "failed", "converged", "ineffective", "last", "start_scaled"):
             entry.pop(k, None)
