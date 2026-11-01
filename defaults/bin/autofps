@@ -48,6 +48,20 @@ if [ "$MODE" != "safe" ] && [ -f "$DIR/autotune.py" ]; then
 fi
 TUNING="$(cat "$CACHE/tuning_now" 2>/dev/null)"
 
+# --- OptiScaler («DLSS» для AMD): перевірити файли в грі (після оновлення гри/OptiScaler
+#     перевстановлюється сам) і сказати Wine брати підмінну бібліотеку з теки гри
+OPTI_DLL=""; OPTI_FG=0
+if [ "$MODE" != "safe" ] && [ -f "$DIR/optiscaler.py" ]; then
+  OPTI_OUT="$(timeout 120 python3 "$DIR/optiscaler.py" ensure "$APPID" "$@" 2>>"$LOG")"
+  OPTI_DLL="$(echo "$OPTI_OUT" | sed -n 's/^DLL=//p')"
+  OPTI_FG="$(echo "$OPTI_OUT" | sed -n 's/^FG=//p')"
+fi
+if [ -n "$OPTI_DLL" ]; then
+  export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:+$WINEDLLOVERRIDES;}${OPTI_DLL}=n,b"
+  export SteamDeck=0   # деякі ігри на «Steam Deck» ховають DLSS/FSR
+  log "OptiScaler увімкнено: ${OPTI_DLL}=n,b (власна генерація кадрів: $OPTI_FG)"
+fi
+
 # --- MangoHud: невидимий лог FPS кожні 250 мс
 USE_MANGO=0
 if [ "$MODE" != "safe" ]; then
@@ -67,7 +81,9 @@ FG_SAVED="$(cat "$CFG/fg_$APPID" 2>/dev/null)"
 LSFG_VER="$(cat "$CFG/lsfg_version" 2>/dev/null)"
 LSFG_CONF="$CFG/lsfg-vk.toml"
 WANT=0
-if [ "$MODE" = "full" ] && [ "$FG_MODE" != "off" ] && [ "$TUNING" != "1" ]; then
+if [ "$OPTI_FG" = "1" ]; then
+  log "генерацію кадрів робить OptiScaler — lsfg-vk у цій грі не вмикаю"
+elif [ "$MODE" = "full" ] && [ "$FG_MODE" != "off" ] && [ "$TUNING" != "1" ]; then
   case "$FG_SAVED" in 2|3|4) WANT="$FG_SAVED" ;; esac
   [ "$WANT" = 0 ] && [ "$FG_MODE" = "always" ] && WANT=2
 fi
@@ -113,8 +129,8 @@ else
 fi
 log "mangohud=$USE_MANGO lsfg=$USE_LSFG (v${LSFG_VER:-?}, ×$WANT, режим FG: $FG_MODE)"
 
-printf '{"appid":"%s","pid":%d,"started":%d,"mode":"%s","mangohud":%d,"lsfg":%d,"fg":%d,"fg_want":%d}\n' \
-  "$APPID" "$$" "$(date +%s)" "$MODE" "$USE_MANGO" "$USE_LSFG" "$WANT" "$FG_WANT" >"$CACHE/current.json"
+printf '{"appid":"%s","pid":%d,"started":%d,"mode":"%s","mangohud":%d,"lsfg":%d,"fg":%d,"fg_want":%d,"opti":"%s","opti_fg":%d}\n' \
+  "$APPID" "$$" "$(date +%s)" "$MODE" "$USE_MANGO" "$USE_LSFG" "$WANT" "$FG_WANT" "$OPTI_DLL" "${OPTI_FG:-0}" >"$CACHE/current.json"
 
 # --- запуск (дочірнім процесом, щоб знати, чи гра не впала одразу)
 START=$(date +%s)

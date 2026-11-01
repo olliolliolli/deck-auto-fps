@@ -45,6 +45,8 @@ type Settings = {
   autotune: boolean;
   quality_target: string;
   respect_manual_graphics: boolean;
+  opti_upscaler: string;
+  opti_fg: boolean;
 };
 
 type Tune = {
@@ -129,7 +131,40 @@ function runningAppId(): number | null {
   return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
-type Game = { appid: number; name: string; enabled: boolean; seen: number };
+type Game = { appid: number; name: string; enabled: boolean; seen: number; opti: boolean };
+
+type OptiGame = {
+  enabled: boolean;
+  tag: string | null;
+  dll: string | null;
+  upscaler: string | null;
+  error: string;
+  target: string;
+  engine: string;
+  unsupported: string;
+  anticheat: string;
+  found: boolean;
+};
+type OptiStatus = {
+  gpu: { vendor: string; arch: string; name: string };
+  installed: string | null;
+  latest: string | null;
+  latest_name: string | null;
+  published: string;
+  update: boolean;
+  check_error: string;
+  checked_at: number;
+  extractor: string;
+  upscaler_auto: string;
+  game: OptiGame | null;
+};
+type OptiResult = { ok: boolean; error?: string; upscaler?: string; dll?: string; tag?: string };
+
+const optiStatus = callable<[appid?: number], OptiStatus>("opti_status");
+const optiCheck = callable<[], OptiStatus>("opti_check");
+const optiUpdate = callable<[], OptiResult>("opti_update");
+const optiEnable = callable<[appid: number], OptiResult>("opti_enable");
+const optiDisable = callable<[appid: number], OptiResult>("opti_disable");
 
 // Номер запиту: відповідь для попередньо вибраної гри не перезапише нову
 let readSeq = 0;
@@ -149,6 +184,17 @@ const GameLaunchSection = memo(function GameLaunchSection() {
   const [options, setOptions] = useState<string | null>(null);
   const [readError, setReadError] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [opti, setOpti] = useState<OptiStatus | null>(null);
+  const [optiBusy, setOptiBusy] = useState("");
+
+  const reloadOpti = (id: number | null) => {
+    if (id === null) return;
+    optiStatus(id)
+      .then((st) => {
+        if (lastSelected === id || lastSelected === null) setOpti(st);
+      })
+      .catch(() => setOpti(null));
+  };
 
   const reloadGames = () =>
     listGames()
@@ -183,7 +229,11 @@ const GameLaunchSection = memo(function GameLaunchSection() {
   };
 
   useEffect(() => {
-    if (appid !== null) loadOptions(appid);
+    if (appid !== null) {
+      loadOptions(appid);
+      setOpti(null);
+      reloadOpti(appid);
+    }
   }, [appid]);
 
   const game = games.find((g) => g.appid === appid);
@@ -191,7 +241,7 @@ const GameLaunchSection = memo(function GameLaunchSection() {
   const opts = useMemo(() => {
     const list = games.map((g) => ({
       data: g.appid,
-      label: `${g.appid === running ? "▶ " : ""}${g.enabled ? "✓ " : ""}${g.name}`,
+      label: `${g.appid === running ? "▶ " : ""}${g.enabled ? "✓ " : ""}${g.opti ? "⚡" : ""}${g.name}`,
     }));
     if (running !== null && !games.some((g) => g.appid === running)) {
       list.unshift({ data: running, label: `▶ Поточна гра (${running})` });
@@ -218,6 +268,67 @@ const GameLaunchSection = memo(function GameLaunchSection() {
   const seenText = game?.seen
     ? `Останній запуск з AutoFPS: ${new Date(game.seen * 1000).toLocaleString()}`
     : "З AutoFPS ще не запускалася";
+
+  // Одна кнопка: підключити AutoFPS до гри (якщо ще ні) + завантажити й поставити OptiScaler
+  const toggleOpti = async () => {
+    if (appid === null || !opti?.game) return;
+    const turnOn = !opti.game.enabled;
+    try {
+      if (turnOn) {
+        setOptiBusy(opti.installed ? "Встановлюю в гру…" : "Завантажую OptiScaler…");
+        const current = await readLaunchOptions(appid);
+        if (!hasWrapper(current) || isOldWrapper(current)) {
+          const ok = await writeLaunchOptions(appid, addWrapper(current));
+          if (!ok) throw new Error("Steam не зберіг параметри запуску");
+          await setGameEnabled(appid, true);
+        }
+        const r = await optiEnable(appid);
+        if (!r.ok) throw new Error(r.error);
+        toaster.toast({
+          title: "AutoFPS · DLSS увімкнено",
+          body: `${game?.name ?? appid}: DLSS → ${r.upscaler}. Запусти гру й вибери DLSS у налаштуваннях графіки`,
+        });
+      } else {
+        setOptiBusy("Прибираю з гри…");
+        const r = await optiDisable(appid);
+        if (!r.ok) throw new Error(r.error);
+        toaster.toast({ title: "AutoFPS", body: "OptiScaler прибрано, оригінальні файли гри повернуто" });
+      }
+    } catch (e) {
+      toaster.toast({ title: "AutoFPS · DLSS", body: `Не вдалося: ${e instanceof Error ? e.message : String(e)}` });
+    }
+    setOptiBusy("");
+    await reloadGames();
+    loadOptions(appid);
+    reloadOpti(appid);
+  };
+
+  const og = opti?.game;
+  let optiLabel = "DLSS (OptiScaler)";
+  let optiDesc = "";
+  let optiBlocked = false;
+  if (og) {
+    if (og.unsupported) {
+      optiLabel = "DLSS: недоступно для цієї гри";
+      optiDesc = og.unsupported;
+      optiBlocked = !og.enabled;
+    } else if (og.anticheat && !og.enabled) {
+      optiLabel = "DLSS: вимкнено через античит";
+      optiDesc = `У грі є ${og.anticheat}. Підміна бібліотек в онлайн-іграх може призвести до бану`;
+      optiBlocked = true;
+    } else if (!og.found) {
+      optiLabel = "DLSS: теку гри не знайдено";
+      optiBlocked = !og.enabled;
+    } else if (og.enabled) {
+      optiLabel = `⚡ DLSS → ${og.upscaler ?? "FSR"} (OptiScaler ${og.tag ?? ""})`;
+      optiDesc = `${og.engine}: ${og.target}, ${og.dll}. У грі вибери DLSS у налаштуваннях графіки` +
+        (og.error ? `\n⚠ ${og.error}` : "");
+    } else {
+      optiLabel = "DLSS вимкнено";
+      optiDesc = `${og.engine} → буде ${opti?.upscaler_auto ?? "FSR 3.1"} замість DLSS. ` +
+        (opti?.installed ? `OptiScaler ${opti.installed}` : "OptiScaler завантажиться автоматично");
+    }
+  }
 
   const toggle = async () => {
     if (appid === null) return;
@@ -250,7 +361,7 @@ const GameLaunchSection = memo(function GameLaunchSection() {
         <DropdownItem
           key={optsKey}
           label="Гра"
-          description="✓ — AutoFPS увімкнено, ▶ — зараз запущена"
+          description="✓ — AutoFPS, ⚡ — DLSS (OptiScaler), ▶ — зараз запущена"
           rgOptions={opts}
           selectedOption={appid}
           strDefaultLabel={games.length ? "Виберіть гру" : "Завантаження…"}
@@ -284,6 +395,20 @@ const GameLaunchSection = memo(function GameLaunchSection() {
           </ButtonItem>
         </PanelSectionRow>
       )}
+      {appid !== null && og && !dlo && (
+        <>
+          <PanelSectionRow>
+            <Field label={optiLabel} description={optiDesc} />
+          </PanelSectionRow>
+          {!optiBlocked && (
+            <PanelSectionRow>
+              <ButtonItem layout="below" disabled={!!optiBusy} onClick={toggleOpti}>
+                {optiBusy || (og.enabled ? "Вимкнути DLSS у цій грі" : "⚡ Увімкнути DLSS у цій грі")}
+              </ButtonItem>
+            </PanelSectionRow>
+          )}
+        </>
+      )}
       <PanelSectionRow>
         <ButtonItem
           layout="below"
@@ -303,6 +428,105 @@ const GameLaunchSection = memo(function GameLaunchSection() {
     </PanelSection>
   );
 });
+
+function OptiSection({
+  settings,
+  update,
+}: {
+  settings: Settings;
+  update: (key: keyof Settings, value: unknown) => Promise<void>;
+}) {
+  const [st, setSt] = useState<OptiStatus | null>(null);
+  const [busy, setBusy] = useState("");
+  useEffect(() => {
+    optiStatus().then(setSt).catch(() => setSt(null));
+  }, []);
+  if (!st) return null;
+
+  const upOptions = [
+    { data: "auto", label: `Авто (${st.upscaler_auto})` },
+    { data: "fsr31", label: "FSR 3.1 — швидко" },
+    { data: "xess", label: "XeSS" },
+    { data: "fsr4", label: "FSR 4 — найкраща картинка" },
+  ];
+  const fsr4slow = settings.opti_upscaler === "fsr4" && st.gpu.arch !== "rdna4";
+  let version = st.installed ? `Встановлено ${st.installed}` : "Ще не завантажено";
+  if (st.latest && st.update && st.installed) version += ` · доступна ${st.latest}`;
+  if (st.latest && !st.update && st.installed) version += " · остання версія";
+  if (st.check_error) version += ` · не вдалося перевірити оновлення`;
+
+  return (
+    <PanelSection title="DLSS (OptiScaler)">
+      {st.update && st.installed && (
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            disabled={!!busy}
+            onClick={async () => {
+              setBusy("Оновлюю…");
+              const r = await optiUpdate();
+              toaster.toast({
+                title: "AutoFPS",
+                body: r.ok ? `OptiScaler ${r.tag}: ігри оновляться при наступному запуску` : `Не вдалося: ${r.error}`,
+              });
+              setSt(await optiStatus());
+              setBusy("");
+            }}
+          >
+            {busy || `⬆ Оновити OptiScaler до ${st.latest}`}
+          </ButtonItem>
+        </PanelSectionRow>
+      )}
+      <PanelSectionRow>
+        <Field
+          label={version}
+          description={
+            `Відеокарта: ${st.gpu.name}. Справжній DLSS є лише на NVIDIA — OptiScaler підставляє ` +
+            `замість нього FSR/XeSS, а гра думає, що це DLSS.` +
+            (!st.extractor ? "\n⚠ Не знайдено 7z/bsdtar для розпакування" : "")
+          }
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <DropdownItem
+          label="Чим замінювати DLSS"
+          rgOptions={upOptions}
+          selectedOption={settings.opti_upscaler}
+          onChange={(o: { data: string }) => update("opti_upscaler", o.data)}
+        />
+      </PanelSectionRow>
+      {fsr4slow && (
+        <PanelSectionRow>
+          <Field
+            label="⚠ FSR 4 на цій відеокарті повільніший"
+            description="На RDNA2/3 FSR 4 працює через сумісний режим і з'їдає частину приросту FPS"
+          />
+        </PanelSectionRow>
+      )}
+      <PanelSectionRow>
+        <ToggleField
+          label="Генерація кадрів OptiScaler"
+          description="Замість lsfg-vk у іграх з DLSS. Разом вони не працюють — AutoFPS вимкне lsfg-vk"
+          checked={settings.opti_fg}
+          onChange={(v: boolean) => update("opti_fg", v)}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <ButtonItem
+          layout="below"
+          disabled={!!busy}
+          onClick={async () => {
+            setBusy("Перевіряю…");
+            setSt(await optiCheck());
+            setBusy("");
+          }}
+        >
+          {busy === "Перевіряю…" ? busy : "Перевірити оновлення"}
+        </ButtonItem>
+      </PanelSectionRow>
+    </PanelSection>
+  );
+}
 
 function Content() {
   const [st, setSt] = useState<Status | null>(null);
@@ -475,6 +699,8 @@ function Content() {
           </>
         )}
       </PanelSection>
+
+      <OptiSection settings={s} update={update} />
 
       <PanelSection title="Фрейм-генерація (lsfg-vk)">
         <PanelSectionRow>

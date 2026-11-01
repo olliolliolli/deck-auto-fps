@@ -26,6 +26,7 @@ for _p in (os.path.join(_PLUGIN_DIR, "bin"), os.path.join(_PLUGIN_DIR, "defaults
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 import autofps_common as C  # noqa: E402
+import optiscaler as O  # noqa: E402
 
 C.set_home(decky.DECKY_USER_HOME)
 HOME = C.HOME
@@ -73,6 +74,8 @@ DEFAULT_SETTINGS = {
     "autotune": True,          # автопідбір графіки гри (Unreal/Unity)
     "quality_target": "auto",  # базовий FPS, під який підбирається графіка
     "respect_manual_graphics": False,  # True — ручні зміни в меню гри зупиняють підбір
+    "opti_upscaler": "auto",   # auto | fsr31 | xess | fsr4 — чим OptiScaler замінює DLSS
+    "opti_fg": False,          # генерація кадрів OptiScaler (тоді lsfg-vk у цій грі вимикається)
 }
 
 
@@ -537,6 +540,9 @@ class Plugin:
             parts.append("Генерацію кадрів не ввімкнено: lsfg-vk не пройшов перевірку — деталі в меню")
         elif int(cur.get("fg", 0) or 0) >= 2:
             parts.append(f"Генерація кадрів ×{cur.get('fg')} увімкнена")
+        if cur.get("opti"):
+            parts.append("DLSS → " + (O.load_game(self.appid).get("upscaler_label") or "FSR") +
+                         " (OptiScaler): у налаштуваннях гри вибери DLSS")
         if cur.get("mangohud") == 0 and mode != "safe":
             parts.append("MangoHud недоступний — FPS не вимірюється")
         return parts
@@ -602,6 +608,8 @@ class Plugin:
         h = float(self.settings["headroom"])
         native = max([t for t in tiers if p10 >= t * h], default=tiers[0])
         fg = self.settings["fg_mode"]
+        if self.cur_info.get("opti_fg"):  # кадри генерує OptiScaler
+            return native, 1
         if fg == "off" or not self._lsfg_cached()["ready"]:
             return native, 1
         mults = [2, 3] if self.settings["fg_allow_3x"] else [2]
@@ -734,7 +742,14 @@ class Plugin:
     # ---------------- main loop
 
     async def _loop(self):
+        last_check = 0.0
         while True:
+            if time.time() - last_check > O.UPDATE_TTL and self.appid is None:
+                last_check = time.time()
+                try:
+                    await self._blocking(self._opti_check_bg, False)
+                except Exception as e:  # noqa: BLE001
+                    decky.logger.warning(f"OptiScaler check failed: {e}")
             try:
                 self._tick()
             except Exception as e:  # noqa: BLE001
@@ -1014,12 +1029,11 @@ class Plugin:
                 pass
         return True
 
-    async def list_games(self):
-        """Встановлені ігри Steam (для кнопки «Увімкнути AutoFPS у грі»)."""
-        libs = _steam_libraries()
+    def _installed_games(self):
+        """{appid: {"name", "install"}} з appmanifest усіх бібліотек Steam."""
         skip = re.compile(r"proton|steam linux runtime|steamworks common|steamvr", re.I)
         games = {}
-        for lib in libs:
+        for lib in _steam_libraries():
             try:
                 names = os.listdir(lib)
             except OSError:
@@ -1030,16 +1044,110 @@ class Plugin:
                 acf = _read(os.path.join(lib, fn))
                 appid = re.search(r'"appid"\s+"(\d+)"', acf)
                 name = re.search(r'"name"\s+"([^"]+)"', acf)
+                idir = re.search(r'"installdir"\s+"([^"]+)"', acf)
                 if appid and name and not skip.search(name.group(1)):
-                    games[appid.group(1)] = name.group(1)
+                    games[appid.group(1)] = {
+                        "name": name.group(1),
+                        "install": os.path.join(lib, "common", idir.group(1)) if idir else ""}
+        return games
+
+    async def list_games(self):
+        """Встановлені ігри Steam (для кнопки «Увімкнути AutoFPS у грі»)."""
         apps = _load_json(APPS_FILE, {})
         out = []
-        for a, n in games.items():
+        for a, g in self._installed_games().items():
             info = apps.get(a, {})
-            out.append({"appid": int(a), "name": n,
+            opti = O.load_game(a)
+            out.append({"appid": int(a), "name": g["name"],
                         "enabled": bool(info.get("enabled")),
-                        "seen": int(info.get("seen", 0))})
+                        "seen": int(info.get("seen", 0)),
+                        "opti": bool(opti.get("enabled"))})
         return sorted(out, key=lambda g: g["name"].lower())
+
+    # ---------------- OptiScaler («DLSS» для AMD)
+
+    async def _blocking(self, fn, *args):
+        return await asyncio.get_event_loop().run_in_executor(None, fn, *args)
+
+    def _opti_check_bg(self, force=False):
+        st = O.check_latest(force)
+        tag = st.get("latest_tag")
+        if tag and O.installed_tag() and O.update_available(st) and st.get("notified_tag") != tag:
+            st["notified_tag"] = tag
+            O.save_state(st)
+            self._notify("AutoFPS: оновлення OptiScaler",
+                         f"Доступна версія {tag} (зараз {O.installed_tag()}). "
+                         "Онови в меню AutoFPS → DLSS (OptiScaler)")
+        return st
+
+    async def opti_status(self, appid=None):
+        st = O.load_state()
+        tool, _ = O.extractor()
+        gpu = O.detect_gpu()
+        res = {
+            "gpu": gpu, "installed": O.installed_tag(), "latest": st.get("latest_tag"),
+            "latest_name": st.get("latest_name"), "published": st.get("latest_published", ""),
+            "update": O.update_available(st), "check_error": st.get("check_error", ""),
+            "checked_at": st.get("checked_at", 0), "extractor": tool or "",
+            "upscaler_auto": O.resolve_upscaler("auto", gpu)[1], "game": None,
+        }
+        if appid:
+            a = str(appid)
+            g = O.load_game(a)
+            info = self._installed_games().get(a, {})
+            install = g.get("install") or info.get("install", "")
+            prof = O.GAME_PROFILES.get(a, {})
+            engine = O.detect_engine(install) if install and os.path.isdir(install) else "generic"
+            res["game"] = {
+                "enabled": bool(g.get("enabled")), "tag": g.get("tag"), "dll": g.get("dll"),
+                "upscaler": g.get("upscaler_label"), "error": g.get("error", ""),
+                "target": (g.get("target", "") or "").replace(install, "").lstrip("/") or "корінь гри",
+                "engine": O.ENGINE_PROFILES[engine]["label"],
+                "unsupported": prof.get("unsupported", ""),
+                "anticheat": (O.has_anticheat(install) or "") if install and os.path.isdir(install) else "",
+                "found": bool(install and os.path.isdir(install)),
+            }
+        return res
+
+    async def opti_check(self):
+        await self._blocking(self._opti_check_bg, True)
+        return await self.opti_status()
+
+    async def opti_update(self):
+        try:
+            tag = await self._blocking(O.download_latest, decky.logger.info)
+            self._notify("AutoFPS: OptiScaler оновлено",
+                         f"Версія {tag}. Ігри з OptiScaler оновляться самі при наступному запуску")
+            return {"ok": True, "tag": tag}
+        except Exception as e:  # noqa: BLE001
+            decky.logger.error(f"OptiScaler update failed: {e}")
+            return {"ok": False, "error": str(e)}
+
+    def _opti_enable_sync(self, appid):
+        a = str(appid)
+        info = self._installed_games().get(a)
+        if not info or not info.get("install"):
+            raise RuntimeError("гру не знайдено серед встановлених")
+        if not O.installed_tag():
+            O.download_latest(decky.logger.info)
+        return O.install(a, info["install"], info["name"], settings=self.settings,
+                         log=decky.logger.info)
+
+    async def opti_enable(self, appid):
+        try:
+            g = await self._blocking(self._opti_enable_sync, appid)
+            return {"ok": True, "upscaler": g.get("upscaler_label"), "dll": g.get("dll"),
+                    "tag": g.get("tag")}
+        except Exception as e:  # noqa: BLE001
+            decky.logger.error(f"OptiScaler enable failed: {e}")
+            return {"ok": False, "error": str(e)}
+
+    async def opti_disable(self, appid):
+        try:
+            await self._blocking(O.uninstall, str(appid), decky.logger.info)
+            return {"ok": True}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)}
 
     # ---------------- діагностика
 
@@ -1139,6 +1247,14 @@ class Plugin:
                     found = True
         if not found:
             add("  (не знайдено; Steam може записати зміни у файл пізніше)")
+
+        sec("OptiScaler")
+        add({"state": O.load_state(), "gpu": O.detect_gpu(), "extractor": O.extractor()[0]})
+        for fn in sorted(glob.glob(os.path.join(O.games_dir(), "*.json"))):
+            g = _load_json(fn, {})
+            add(f"  {os.path.basename(fn)}: enabled={g.get('enabled')} tag={g.get('tag')} "
+                f"dll={g.get('dll')} engine={g.get('engine')} upscaler={g.get('upscaler')} "
+                f"target={g.get('target')} error={g.get('error', '')}")
 
         sec("Режими запуску й падіння")
         add("lsfg_version: " + (_read(LSFG_VERSION_FILE) or "?") + "  fg_mode: " + (_read(FG_MODE_FILE) or "?"))
