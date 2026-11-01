@@ -51,6 +51,7 @@ type Settings = {
   opti_method: string;
   opti_gpu_arch: string;
   opti_fg: boolean;
+  ref_sharpness: string;
 };
 
 type Tune = {
@@ -701,6 +702,19 @@ function OptiSection({
           ]}
           selectedOption={settings.opti_method === "optiscaler" ? "optiscaler" : "auto"}
           onChange={(o: { data: string }) => update("opti_method", o.data)}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <DropdownItem
+          label="Чіткість тексту в RE2/3/4/7/8, DMC5"
+          description="REFramework масштабує кадр разом з інтерфейсом, тож за низької внутрішньої роздільності текст розмитий. Вище — чіткіше, але менше FPS. Діє з наступного запуску гри"
+          rgOptions={[
+            { data: "sharp", label: "Чіткий: рендер 77%" },
+            { data: "native", label: "Найчіткіший: 100% (FSR 4 як згладжування)" },
+            { data: "auto", label: "Як вибрано в меню REFramework" },
+          ]}
+          selectedOption={settings.ref_sharpness ?? "sharp"}
+          onChange={(o: { data: string }) => update("ref_sharpness", o.data)}
         />
       </PanelSectionRow>
       <PanelSectionRow>

@@ -78,7 +78,8 @@ DEFAULT_SETTINGS = {
     "opti_upscaler": "auto",   # auto (FSR 4.1) | fsr4 | fsr40 | fsr31 | xess — чим замінювати DLSS
     "opti_method": "auto",     # auto (гра з FSR 3.1 → «один файл» FSR 4) | direct | optiscaler
     "opti_gpu_arch": "auto",   # auto | rdna2 | rdna3 | rdna4 — якщо автовизначення помилилось
-    "opti_fg": False,          # генерація кадрів OptiScaler (тоді lsfg-vk у цій грі вимикається)
+    "opti_fg": False,
+    "ref_sharpness": "sharp",  # ігри Capcom з REFramework: sharp (рендер 77%) | native (100%) | auto          # генерація кадрів OptiScaler (тоді lsfg-vk у цій грі вимикається)
 }
 
 

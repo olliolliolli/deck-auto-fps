@@ -169,7 +169,15 @@ PD_PLUGIN = "PDPerfPlugin.dll"
 PD_PLUGIN_NAME = "UpscalerBasePlugin 1.1.2"
 PD_PLUGIN_URL = "https://www.nexusmods.com/site/mods/502?tab=files"
 PD_PLUGIN_SHA256 = "2e3b10d46a587af3294ff1d02244ea410441befd1f8eaff329ff3f968d2d9a7f"  # 1.1.2
-REF_OVERRIDE = "dinput8"   # Proton має власний dinput8 — без override REFramework не завантажиться
+REF_OVERRIDE = "dinput8"
+# REFramework масштабує кадр РАЗОМ з інтерфейсом (issue praydog/REFramework#670) — текст
+# розмивається тим більше, чим нижча внутрішня роздільність. Тому для цих ігор фіксуємо
+# співвідношення масштабування OptiScaler: 1.3 ≈ рендер 77% (чіткий текст), 1.0 — FSR 4 як AA.
+REF_RATIOS = {"sharp": "1.3", "native": "1.0", "auto": None}
+
+
+def ref_ratio(settings):
+    return REF_RATIOS.get((settings or {}).get("ref_sharpness", "sharp"), "1.3")   # Proton має власний dinput8 — без override REFramework не завантажиться
 
 ANTICHEAT_MARKERS = ["EasyAntiCheat", "EasyAntiCheat_EOS", "BattlEye", "BEService",
                      "start_protected_game.exe", "vgk.sys", "EAAntiCheat"]
@@ -916,6 +924,9 @@ def install(appid, install_path, game_name="", args=None, settings=None, log=pri
             # Insert відкриває і REFramework, і OptiScaler — OptiScaler на Home (вікі)
             ov.update({"Spoofing.Dxgi": "false", "Menu.OverlayMenu": "false",
                        "Menu.ShortcutKey": "0x24"})
+            ratio = ref_ratio(settings)
+            ov.update({"UpscaleRatio.UpscaleRatioOverrideEnabled": "true" if ratio else "auto",
+                       "UpscaleRatio.UpscaleRatioOverrideValue": ratio or "auto"})
         ini_set(ini, ov)
     marker = {"appid": appid, "tag": tag, "dll": dll, "files": files, "backups": backups,
               "installed_at": int(time.time())}
@@ -928,6 +939,7 @@ def install(appid, install_path, game_name="", args=None, settings=None, log=pri
                 upscaler=upscaler, upscaler_label=up_label, opti_fg=opti_fg, gpu=gpu["name"],
                 fsr4_variant=variant or "", injector="0.10.0-pre1" if injector else tag,
                 ref=ref_kind or "", ref_tag=ref_tag or "",
+                ref_ratio=(ref_ratio(settings) or "auto") if ref_kind else "",
                 pd_verified=bool(pd and pd.get("verified")),
                 name=game_name or game.get("name", ""), updated=int(time.time()), error="")
     save_game(appid, game)
@@ -1165,8 +1177,10 @@ def ensure(appid, args, settings=None, log=print):
     gpu = effective_gpu(settings)
     want_up = game_upscaler(appid, settings, gpu)[0]
     want_var = fsr4_variant(gpu, want_up) if want_up in ("fsr4", "fsr40") else ""
-    changed = (game.get("upscaler"), game.get("opti_fg"), game.get("fsr4_variant", "")) != (
-        want_up, bool(settings.get("opti_fg", False)), want_var)
+    want_ratio = (ref_ratio(settings) or "auto") if game.get("ref") else ""
+    changed = (game.get("upscaler"), game.get("opti_fg"), game.get("fsr4_variant", ""),
+               game.get("ref_ratio", want_ratio)) != (
+        want_up, bool(settings.get("opti_fg", False)), want_var, want_ratio)
     if missing or outdated or changed:
         why = "файли зникли (оновлення гри?)" if missing else \
             "нова версія OptiScaler" if outdated else "змінено налаштування"
