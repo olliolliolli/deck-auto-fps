@@ -552,6 +552,15 @@ def run(appid, args, device=None, log=print):
     log(f"{appid}: {adapter.engine} сходинка {level + 1}/{len(ladder)} — {note}")
 
 
+def tuning_now(appid, device=None):
+    """Чи цей запуск — крок підбору графіки (тоді обгортка міряє без генерації кадрів)."""
+    device = device or C.detect_device()
+    e = C.load_json(C.TUNE_FILE, {}).get(f"{appid}:{device['id']}") or {}
+    return bool(e.get("applied_level") is not None and not e.get("converged")
+                and not e.get("ineffective") and not e.get("disabled")
+                and not e.get("user_override"))
+
+
 def main():
     if len(sys.argv) < 2:
         return
@@ -559,6 +568,12 @@ def main():
         run(sys.argv[1], sys.argv[2:])
     except Exception as e:  # гру запускаємо за будь-яких умов
         print(f"autotune error: {e!r}")
+    try:
+        os.makedirs(C.CACHE_DIR, exist_ok=True)
+        with open(os.path.join(C.CACHE_DIR, "tuning_now"), "w") as f:
+            f.write("1" if tuning_now(sys.argv[1]) else "0")
+    except Exception as e:  # noqa: BLE001
+        print(f"tuning flag error: {e!r}")
 
 
 if __name__ == "__main__":

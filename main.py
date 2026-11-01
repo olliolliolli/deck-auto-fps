@@ -122,40 +122,31 @@ def apply_display(device, fps_limit, refresh):
 
 
 # ------------------------------------------------------------ lsfg-vk
+#
+# Decky LSFG-VK у різних версіях ставить різний lsfg-vk:
+#   до 0.12  — lsfg-vk v1: VkLayer_LS_frame_generation.json, Lossless.dll,
+#              конфіг version = 1 з [[game]] exe = …, вибір через LSFG_PROCESS;
+#   0.13.x   — ранній v2: VkLayer_LSFGVK_…, Lossless.dll, version = 2, [[profile]];
+#   0.14+    — v2.0.0: те саме, але lsfg-vk.dll з бета-гілки Lossless Scaling.
+# У v2 множник має бути >= 2 (1 — невалідний конфіг), тому генерація кадрів
+# вмикається/вимикається при запуску гри, а під час гри змінюється лише множник.
 
 LSFG_PROFILE = "autofps"
+LSFG_VERSION_FILE = os.path.join(CFG_DIR, "lsfg_version")   # читає обгортка гри
+FG_MODE_FILE = os.path.join(CFG_DIR, "fg_mode")             # off | auto | always
+THEIR_CONF = os.path.join(HOME, ".config", "lsfg-vk", "conf.toml")
+LSFG_CLI = os.path.join(HOME, ".local", "bin", "lsfg-vk-cli")
 
 
 def _lsfg_dll_path():
-    """Шлях до Lossless.dll з конфіга Decky LSFG-VK (якщо там вказаний)."""
-    text = _read(os.path.join(HOME, ".config", "lsfg-vk", "conf.toml"))
-    m = re.search(r'^\s*dll\s*=\s*"([^"]+)"', text, re.M)
-    return m.group(1) if m else ""
+    """DLL з конфіга Decky LSFG-VK — саме з ним у користувача все працює."""
+    m = re.search(r'^\s*dll\s*=\s*"([^"]+)"', _read(THEIR_CONF), re.M)
+    return m.group(1) if m and os.path.isfile(m.group(1)) else ""
 
 
-def write_lsfg(settings, multiplier):
-    """Власний профіль lsfg-vk у форматі v2 (його ставить актуальний Decky LSFG-VK).
-    Обгортка гри вибирає його через LSFGVK_CONFIG + LSFGVK_PROFILE.
-    multiplier=1 — без генерації. Файл перечитується на льоту."""
-    flow = max(0.25, min(1.0, float(settings["fg_flow_scale"])))
-    dll = _find_dll()
-    lines = ["version = 2", "", "[global]"]
-    if dll:
-        lines.append(f"dll = {json.dumps(dll)}")
-    # лише ключі, які однаково звуться в усіх версіях v2; решта — типові значення
-    lines += [
-        "",
-        "[[profile]]",
-        f'name = "{LSFG_PROFILE}"',
-        f"multiplier = {int(max(1, multiplier))}",
-        f"flow_scale = {flow:.2f}",
-        f"performance_mode = {'true' if settings['fg_performance_mode'] else 'false'}",
-    ]
-    text = "\n".join(lines) + "\n"
-    os.makedirs(CFG_DIR, exist_ok=True)
-    if _read(LSFG_CONF) != text.strip():
-        with open(LSFG_CONF, "w", encoding="utf-8") as f:
-            f.write(text)
+def _their_conf_version():
+    m = re.search(r"^\s*version\s*=\s*(\d+)", _read(THEIR_CONF), re.M)
+    return int(m.group(1)) if m else None
 
 
 def _layer_dirs():
@@ -180,14 +171,29 @@ def _find_layers():
             if not fn.endswith(".json"):
                 continue
             low = fn.lower()
-            if "lsfg" in low or "mako" in low:
+            if "lsfg" in low or "mako" in low or low.startswith("vklayer_ls_"):
                 found.append(fn)
                 continue
-            # запасний варіант: ім'я шару всередині маніфесту
             text = _read(os.path.join(d, fn)).lower()
             if '"name"' in text and ("lsfg" in text or "lossless" in text):
                 found.append(fn)
     return found
+
+
+def lsfg_version(layers=None):
+    """1, 2 або None — яка версія lsfg-vk встановлена."""
+    layers = _find_layers() if layers is None else layers
+    low = [fn.lower() for fn in layers if "mako" not in fn.lower()]
+    has_v2 = any("lsfgvk" in fn for fn in low) or os.path.isfile(LSFG_CLI)
+    has_v1 = any(fn.startswith("vklayer_ls_") for fn in low) or \
+        os.path.isfile(os.path.join(HOME, ".local/lib/liblsfg-vk.so"))
+    if has_v2 and has_v1:
+        return 1 if _their_conf_version() == 1 else 2
+    if has_v2:
+        return 2
+    if has_v1 or low:
+        return 1
+    return None
 
 
 def _steam_libraries():
@@ -216,44 +222,136 @@ def _decky_plugins():
     return names
 
 
-def _find_dll():
-    """lsfg-vk.dll (lsfg-vk v2 бере його з бета-гілки «lsfg-vk» Lossless Scaling).
-    Старий Lossless.dll для v2 НЕ підходить — його ніколи не прописуємо."""
-    dll = _lsfg_dll_path()
-    if dll and os.path.basename(dll).lower() == "lsfg-vk.dll" and os.path.isfile(dll):
-        return dll
+def _dll_candidates(version):
+    """DLL у порядку пріоритету: з конфіга Decky LSFG-VK, далі з бібліотек Steam."""
+    out = []
+    their = _lsfg_dll_path()
+    if their:
+        out.append(their)
+    names = ["lsfg-vk.dll", "Lossless.dll"] if version == 2 else ["Lossless.dll"]
     for lib in _steam_libraries():
-        cand = os.path.join(lib, "common", "Lossless Scaling", "lsfg-vk.dll")
-        if os.path.isfile(cand):
-            return cand
-    return ""
+        for n in names:
+            cand = os.path.join(lib, "common", "Lossless Scaling", n)
+            if os.path.isfile(cand) and cand not in out:
+                out.append(cand)
+    return out
 
 
-def _has_old_lossless():
-    return any(os.path.isfile(os.path.join(lib, "common", "Lossless Scaling", "Lossless.dll"))
-               for lib in _steam_libraries())
+def _render_lsfg(version, dll, multiplier, settings):
+    mult = max(2, int(multiplier))  # 1 у v2 — помилка конфіга
+    flow = max(0.25, min(1.0, float(settings["fg_flow_scale"])))
+    perf = "true" if settings["fg_performance_mode"] else "false"
+    if version == 1:
+        lines = ["version = 1", "", "[global]"]
+        if dll:
+            lines.append(f"dll = {json.dumps(dll)}")
+        lines += ["", "[[game]]", f'exe = "{LSFG_PROFILE}"', f"multiplier = {mult}",
+                  f"flow_scale = {flow:.2f}", f"performance_mode = {perf}"]
+    else:
+        lines = ["version = 2", "", "[global]"]
+        if dll:
+            lines.append(f"dll = {json.dumps(dll)}")
+        lines += ["", "[[profile]]", f'name = "{LSFG_PROFILE}"', f"multiplier = {mult}",
+                  f"flow_scale = {flow:.2f}", f"performance_mode = {perf}"]
+    return "\n".join(lines) + "\n"
 
 
-def lsfg_status():
+def _cli_validate(text):
+    """(ok, повідомлення) від lsfg-vk-cli validate — так само перевіряє Decky LSFG-VK."""
+    if not os.access(LSFG_CLI, os.X_OK):
+        return None, "lsfg-vk-cli не знайдено"
+    tmp = LSFG_CONF + ".check"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        r = subprocess.run([LSFG_CLI, "validate", "--config", tmp, "--print"],
+                           env=_clean_env(), capture_output=True, text=True, timeout=10)
+        out = (r.stdout + r.stderr).strip()
+        if r.returncode != 0:
+            return False, out or f"код {r.returncode}"
+        if "The DLL file does not exist" in out or "DLL override: (none)" in out:
+            return False, out
+        return True, out
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+_LSFG_STATE = {"t": 0.0, "state": None}
+
+
+def lsfg_setup(settings, force=False):
+    """Визначає версію lsfg-vk і робочий DLL (кеш 60 с). Результат:
+    {"version", "dll", "valid", "detail"}. valid=None — перевірити нема чим (v1)."""
+    now = time.time()
+    if not force and _LSFG_STATE["state"] and now - _LSFG_STATE["t"] < 60:
+        return _LSFG_STATE["state"]
+    version = lsfg_version()
+    state = {"version": version, "dll": "", "valid": None, "detail": ""}
+    if version == 2 and os.access(LSFG_CLI, os.X_OK):
+        tried = []
+        for dll in _dll_candidates(2) + [""]:
+            ok, msg = _cli_validate(_render_lsfg(2, dll, 2, settings))
+            tried.append(f"{dll or '(автопошук)'}: {'OK' if ok else msg[:160]}")
+            if ok:
+                state.update(dll=dll, valid=True)
+                break
+        else:
+            state["valid"] = False
+        state["detail"] = " | ".join(tried)
+    elif version:
+        cands = _dll_candidates(version)
+        state["dll"] = cands[0] if cands else ""
+        state["valid"] = bool(cands) if version == 1 else None
+    _LSFG_STATE.update(t=now, state=state)
+    return state
+
+
+def write_lsfg(settings, multiplier):
+    """Наш конфіг lsfg-vk у форматі встановленої версії. Множник >= 2.
+    Обгортка гри вмикає його лише коли генерація кадрів потрібна в цій сесії."""
+    st = lsfg_setup(settings)
+    version = st["version"] or 2
+    text = _render_lsfg(version, st["dll"], multiplier, settings)
+    os.makedirs(CFG_DIR, exist_ok=True)
+    if _read(LSFG_CONF) != text.strip():
+        with open(LSFG_CONF, "w", encoding="utf-8") as f:
+            f.write(text)
+    ver = str(st["version"] or "")
+    if _read(LSFG_VERSION_FILE) != ver:
+        with open(LSFG_VERSION_FILE, "w", encoding="utf-8") as f:
+            f.write(ver)
+
+
+def lsfg_status(settings=None):
     """Детальна перевірка фрейм-генерації: що знайдено і що зробити."""
+    settings = settings or DEFAULT_SETTINGS
     layers = _find_layers()
-    has_lsfg = any("mako" not in fn.lower() for fn in layers)
     has_mako = any("mako" in fn.lower() for fn in layers) or \
         os.path.exists(os.path.join(HOME, ".local/bin/mako-launch"))
     plugins = _decky_plugins()
     lsfg_plugin = next((p for p in plugins if "lsfg" in p.lower()), None)
     mako_plugin = next((p for p in plugins if "mako" in p.lower()), None)
-    dll = _find_dll()
+    st = lsfg_setup(settings)
+    ver = st["version"]
 
-    if has_lsfg and dll:
-        hint, ready = "lsfg-vk встановлено, lsfg-vk.dll знайдено — генерація кадрів готова", True
-    elif has_lsfg and _has_old_lossless():
-        hint, ready = ("lsfg-vk встановлено, але Lossless Scaling не на потрібній гілці. Steam → "
-                       "Lossless Scaling → Властивості → Бета-версії → вибери «lsfg-vk» і дочекайся "
-                       "оновлення (або зроби це кнопкою в Decky LSFG-VK)"), False
-    elif has_lsfg:
-        hint, ready = ("lsfg-vk встановлено, але не знайдено lsfg-vk.dll. Встанови Lossless Scaling "
-                       "у Steam (потрібна купівля) і переключи на бета-гілку «lsfg-vk»"), False
+    if ver == 2 and st["valid"]:
+        hint, ready = f"lsfg-vk v2 готовий (DLL: {os.path.basename(st['dll']) or 'автопошук'})", True
+    elif ver == 2 and st["valid"] is None:
+        hint, ready = "lsfg-vk v2 знайдено, але без lsfg-vk-cli перевірити конфіг нема чим", False
+    elif ver == 2:
+        hint, ready = ("lsfg-vk v2 є, але жоден DLL не підійшов. Відкрий Decky LSFG-VK і перевір, "
+                       "що там усе працює (за потреби — бета-гілка «lsfg-vk» у Lossless Scaling). "
+                       "Деталі — у діагностиці"), False
+    elif ver == 1 and st["dll"]:
+        hint, ready = f"lsfg-vk v1 готовий (DLL: {os.path.basename(st['dll'])})", True
+    elif ver == 1:
+        hint, ready = ("lsfg-vk v1 є, але не знайдено Lossless.dll. Встанови Lossless Scaling у Steam "
+                       "(потрібна купівля)"), False
     elif lsfg_plugin:
         hint, ready = (f"Плагін «{lsfg_plugin}» є, але сам lsfg-vk не встановлено. "
                        "Відкрий його в Decky і натисни «Install lsfg-vk»"), False
@@ -264,8 +362,9 @@ def lsfg_status():
     else:
         hint, ready = ("lsfg-vk не знайдено. Встанови «Decky LSFG-VK» з магазину Decky і натисни "
                        "в ньому «Install lsfg-vk» (потрібен Lossless Scaling у Steam)"), False
-    return {"ready": ready, "hint": hint, "layers": layers,
-            "plugins": [p for p in (lsfg_plugin, mako_plugin) if p], "dll": dll}
+    return {"ready": ready, "hint": hint, "version": ver, "layers": layers,
+            "plugins": [p for p in (lsfg_plugin, mako_plugin) if p], "dll": st["dll"],
+            "detail": st["detail"]}
 
 
 def lsfg_installed():
@@ -357,7 +456,8 @@ class Plugin:
             install_launcher()
         except Exception as e:  # noqa: BLE001
             decky.logger.error(f"launcher install failed: {e}")
-        write_lsfg(self.settings, 1)
+        write_lsfg(self.settings, 2)
+        self._write_fg_mode()
         decky.logger.info(f"AutoFPS started on {self.device['label']}")
         self.task = asyncio.get_event_loop().create_task(self._loop())
 
@@ -388,11 +488,11 @@ class Plugin:
         self.tuning = False       # цей запуск — крок автопідбору графіки
         self.warned_no_data = False
         self.cur_info = {}
+        self.sfg = 0              # множник генерації кадрів, увімкненої обгорткою в цій сесії
         self.message = "Гра не запущена через AutoFPS"
 
     def _restore_display(self):
         try:
-            write_lsfg(self.settings, 1)
             apply_display(self.device, 0, self.device["max_hz"]
                           if self.device["refresh_control"] else None)
         except Exception:  # noqa: BLE001
@@ -431,8 +531,10 @@ class Plugin:
             parts.append("Режим без генерації кадрів (минулого разу гра впала на старті)")
         elif mode == "safe":
             parts.append("Безпечний режим: AutoFPS нічого не змінює (гра падала на старті)")
-        elif cur.get("lsfg") == 0 and self.settings["fg_mode"] != "off":
-            parts.append("Генерація кадрів недоступна — деталі в меню плагіна")
+        elif int(cur.get("fg_want", 0) or 0) >= 2 and not cur.get("lsfg"):
+            parts.append("Генерацію кадрів не ввімкнено: lsfg-vk не пройшов перевірку — деталі в меню")
+        elif int(cur.get("fg", 0) or 0) >= 2:
+            parts.append(f"Генерація кадрів ×{cur.get('fg')} увімкнена")
         if cur.get("mangohud") == 0 and mode != "safe":
             parts.append("MangoHud недоступний — FPS не вимірюється")
         return parts
@@ -466,8 +568,29 @@ class Plugin:
         refresh = best_refresh(self.device,
                                self.device["max_hz"] if self.phase == "probe" else out)
         apply_display(self.device, limit, refresh)
-        write_lsfg(self.settings, 1 if self.phase == "probe" else self.mult)
+        if self.sfg >= 2:  # генерація активна — множник змінюється на льоту (лише >= 2)
+            write_lsfg(self.settings, max(2, self.mult))
         self.last_apply = time.time()
+
+    def _write_fg_mode(self):
+        try:
+            os.makedirs(CFG_DIR, exist_ok=True)
+            with open(FG_MODE_FILE, "w", encoding="utf-8") as f:
+                f.write(str(self.settings["fg_mode"]))
+        except OSError:
+            pass
+
+    def _fg_next(self, appid, mult):
+        """Рішення про генерацію кадрів для НАСТУПНОГО запуску (читає обгортка)."""
+        path = os.path.join(CFG_DIR, f"fg_{appid}")
+        try:
+            if mult >= 2:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(str(int(mult)))
+            elif os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
 
     # ---------------- decision logic
 
@@ -477,8 +600,7 @@ class Plugin:
         h = float(self.settings["headroom"])
         native = max([t for t in tiers if p10 >= t * h], default=tiers[0])
         fg = self.settings["fg_mode"]
-        session_lsfg = getattr(self, "cur_info", {}).get("lsfg", 1)
-        if fg == "off" or not self._lsfg_cached()["ready"] or not session_lsfg:
+        if fg == "off" or not self._lsfg_cached()["ready"]:
             return native, 1
         mults = [2, 3] if self.settings["fg_allow_3x"] else [2]
         best = (native, 1)
@@ -535,14 +657,19 @@ class Plugin:
         _save_json(TUNE_FILE, tune)
         return True
 
-    def _remember(self):
-        if self.appid:
-            self.games[str(self.appid)] = {
-                "base": self.base, "mult": self.mult,
-                "native_p10": round(self.native_p10, 1),
-                "device": self.device["id"], "updated": int(time.time()),
-            }
-            _save_json(GAMES_FILE, self.games)
+    def _remember(self, base=None, mult=None):
+        """Зберігає рішення для гри. mult — множник для НАСТУПНОГО запуску."""
+        if not self.appid:
+            return
+        base = self.base if base is None else base
+        mult = self.mult if mult is None else mult
+        self.games[str(self.appid)] = {
+            "base": base, "mult": mult,
+            "native_p10": round(self.native_p10, 1),
+            "device": self.device["id"], "updated": int(time.time()),
+        }
+        _save_json(GAMES_FILE, self.games)
+        self._fg_next(self.appid, mult if self.settings["fg_mode"] != "off" else 1)
 
     def _start_probe(self, now, upgrade=False):
         self.phase, self.phase_t, self.samples = "probe", now, []
@@ -552,7 +679,7 @@ class Plugin:
             self._notify("AutoFPS: є запас", "Перевіряю, чи гра потягне вищий FPS (~20 с)")
         self._apply()
 
-    def _lock(self, base, mult, now, why, detail=""):
+    def _lock(self, base, mult, now, why, detail="", save=True):
         old_out = self._out_fps() if self.phase == "locked" else 0
         self.base, self.mult = base, mult
         self.phase, self.phase_t, self.samples = "locked", now, []
@@ -560,7 +687,8 @@ class Plugin:
         fg = f" + FG ×{mult} → {base * mult}" if mult > 1 else ""
         self.message = f"{why}: {base} FPS{fg}"
         self._apply()
-        self._remember()
+        if save:
+            self._remember()
         if base * mult != old_out:
             body = f"Ліміт {base} FPS"
             body += (f", генерація кадрів ×{mult} → {base * mult} FPS на екрані"
@@ -575,14 +703,31 @@ class Plugin:
         if not lower:
             self.message = "Гра не тримає навіть 30 FPS — знизьте графіку в грі"
             return
+        why = f"Гра не тримала {self.base} FPS (просідання до {p10:.0f})"
+        if self.sfg >= 2:
+            # генерацію в цій сесії не вимкнути — знижуємо базовий FPS, множник лишаємо
+            self._lock(lower[-1], self.mult, now, "Знизив рівень", why)
+            return
         # p10 виміряний під лімітом, тож він — нижня оцінка можливостей гри
         base, mult = self._choose(p10)
         if base >= self.base:
-            base, mult = lower[-1], self.mult
-            if mult > 1 and base * mult not in tiers:
-                mult = 1
-        self._lock(base, mult, now, "Знизив рівень",
-                   f"Гра не тримала {self.base} FPS (просідання до {p10:.0f})")
+            base, mult = lower[-1], 1
+        self._apply_decision(base, mult, now, "Знизив рівень", why, p10)
+
+    def _apply_decision(self, base, mult, now, why, detail, p10):
+        """Сесія БЕЗ генерації кадрів: зараз — лише нативний рівень,
+        а генерація (якщо потрібна) — з наступного запуску."""
+        if mult >= 2:
+            h = float(self.settings["headroom"])
+            native = max([t for t in self.device["tiers"] if p10 >= t * h] or [base])
+            self._lock(max(native, base), 1, now, why, detail, save=False)
+            self._remember(base=base, mult=mult)
+            if self.sfg == 0 and self.cur_info.get("mode", "full") == "full":
+                self._notify("AutoFPS: генерація кадрів — з наступного запуску",
+                             f"Гра тримає {base} FPS, з генерацією ×{mult} буде {base * mult} FPS. "
+                             "Перезапусти гру, щоб увімкнути")
+        else:
+            self._lock(base, 1, now, why, detail)
 
     # ---------------- main loop
 
@@ -624,12 +769,20 @@ class Plugin:
             self.phase, self.phase_t = "warmup", now
             self.last_appid = self.appid
             self.cur_info = cur
+            self.sfg = int(cur.get("fg", 0) or 0)
+            if self.sfg >= 2:
+                self.mult = self.sfg
             self._mark_app(self.appid, seen=int(now))
             self.tuning = self._tuning_active(self._tune_entry())
             self.message = "Розігрів (завантаження, шейдери)…"
             if self.settings["enabled"]:
-                nxt = ("заміряю FPS після розігріву (~20–40 с)" if self.settings["mode"] == "auto"
-                       else f"фіксовано {self.settings['mode']} FPS")
+                saved = self.games.get(self.appid) or {}
+                if self.settings["mode"] != "auto":
+                    nxt = f"фіксовано {self.settings['mode']} FPS"
+                elif saved.get("device") == self.device["id"] and not self.tuning:
+                    nxt = "застосую рівень з минулого разу після розігріву (~20 с)"
+                else:
+                    nxt = "заміряю FPS після розігріву (~20–40 с)"
                 extra = self._mode_report(cur)
                 body = "\n".join([self._graphics_report(), *extra, f"Далі: {nxt}"])
                 self._notify("AutoFPS підключено", body)
@@ -644,9 +797,8 @@ class Plugin:
             self.phase, self.phase_t = "warmup", now
 
         for fps, gpu in self.reader.read(self.game_started):
-            if self.mult > 1 and self.phase == "locked" \
-                    and self.settings["fps_counts_generated"]:
-                fps = fps / self.mult
+            if self.sfg >= 2 and self.settings["fps_counts_generated"]:
+                fps = fps / max(2, self.mult)  # MangoHud бачить і згенеровані кадри
             self.samples.append((now, fps, gpu))
 
         # фіксований рівень вибрано вручну
@@ -654,7 +806,7 @@ class Plugin:
         if mode != "auto":
             base = int(mode)
             if self.phase != "manual" or self.base != base:
-                self.base, self.mult = base, 1
+                self.base, self.mult = base, (self.sfg if self.sfg >= 2 else 1)
                 self.phase, self.message = "manual", f"Вручну: {base} FPS"
                 self._apply()
                 self._notify(f"AutoFPS: {base} FPS", "Фіксований рівень, вибраний вручну")
@@ -669,11 +821,21 @@ class Plugin:
             self.samples = []
             if now - self.phase_t >= float(self.settings["warmup_s"]):
                 saved = self.games.get(self.appid)
-                if self.tuning:
+                if saved and saved.get("device") != self.device["id"]:
+                    saved = None
+                if self.sfg >= 2:
+                    # обгортка ввімкнула генерацію за рішенням минулого запуску
+                    if saved:
+                        self.native_p10 = saved.get("native_p10", 0)
+                        self._lock(int(saved["base"]), self.sfg, now, "Збережений рівень",
+                                   f"Генерація кадрів ×{self.sfg} увімкнена при запуску")
+                    else:
+                        self._start_probe(now)
+                elif self.tuning:
                     self._start_probe(now)  # графіку змінено — міряємо заново
-                elif saved and saved.get("device") == self.device["id"]:
+                elif saved and int(saved.get("mult", 1)) == 1:
                     self.native_p10 = saved.get("native_p10", 0)
-                    self._lock(int(saved["base"]), int(saved["mult"]), now,
+                    self._lock(int(saved["base"]), 1, now,
                                "Збережений рівень", "Рівень з минулого разу")
                 else:
                     self._start_probe(now)
@@ -693,10 +855,21 @@ class Plugin:
                     self.phase_t = now
                     return
                 self.native_p10 = percentile(fps, 0.10)
-                self._record_tune(self.native_p10)
+                detail = f"Гра тримає щонайменше {self.native_p10:.0f} FPS"
                 base, mult = self._choose(self.native_p10)
-                self._lock(base, mult, now, "Підібрано",
-                           f"Гра тримає щонайменше {self.native_p10:.0f} FPS")
+                if self.sfg >= 2:
+                    # генерація вже йде: множник можна змінити на льоту (2↔3), але не вимкнути
+                    if mult < 2:
+                        mult = self.sfg
+                        base = max([t for t in self.device["tiers"]
+                                    if t * mult in self.device["tiers"]] or [base])
+                        self._lock(base, mult, now, "Підібрано", detail, save=False)
+                        self._remember(base=base, mult=1)  # наступного разу — без генерації
+                    else:
+                        self._lock(base, mult, now, "Підібрано", detail)
+                else:
+                    self._record_tune(self.native_p10)
+                    self._apply_decision(base, mult, now, "Підібрано", detail, self.native_p10)
             return
 
         if self.phase == "locked":
@@ -718,7 +891,7 @@ class Plugin:
             else:
                 self.bad_windows = 0
             if self.bad_windows >= 2:
-                if self.mult == 1:
+                if self.sfg < 2:
                     self._record_tune(p10, lower_only=True)
                 self._step_down(now, p10)
                 return
@@ -729,7 +902,7 @@ class Plugin:
                 self.idle_windows += 1
             else:
                 self.idle_windows = 0
-            if self.idle_windows >= 6 and now - self.last_probe > 180:
+            if self.idle_windows >= 6 and now - self.last_probe > 180 and self.sfg < 2:
                 self._start_probe(now, upgrade=True)
             self.samples = [s for s in self.samples if now - s[0] <= 1]
 
@@ -758,7 +931,7 @@ class Plugin:
         """Перевірка файлів раз на 10 с, а не на кожен запит інтерфейсу."""
         now = time.time()
         if now - getattr(self, "_lsfg_t", 0) > 10:
-            self._lsfg_t, self._lsfg = now, lsfg_status()
+            self._lsfg_t, self._lsfg = now, lsfg_status(self.settings)
         return self._lsfg
 
     def _tune_status(self):
@@ -804,8 +977,10 @@ class Plugin:
             return False
         self.settings[key] = value
         _save_json(SETTINGS_FILE, self.settings)
-        if key in ("fg_flow_scale", "fg_performance_mode") and self.phase == "locked":
-            write_lsfg(self.settings, self.mult)
+        if key in ("fg_flow_scale", "fg_performance_mode"):
+            write_lsfg(self.settings, max(2, self.mult))
+        if key == "fg_mode":
+            self._write_fg_mode()
         return True
 
     async def reprobe(self):
@@ -963,6 +1138,11 @@ class Plugin:
             add("  (не знайдено; Steam може записати зміни у файл пізніше)")
 
         sec("Режими запуску й падіння")
+        add("lsfg_version: " + (_read(LSFG_VERSION_FILE) or "?") + "  fg_mode: " + (_read(FG_MODE_FILE) or "?"))
+        add("перевірка DLL: " + (lsfg_setup(self.settings, force=True).get("detail") or "-"))
+        for fn in sorted(glob.glob(os.path.join(CFG_DIR, "fg_*"))):
+            if os.path.basename(fn) != "fg_mode":
+                add(f"  {os.path.basename(fn)}: ×{_read(fn)} (рішення на наступний запуск)")
         for fn in sorted(glob.glob(os.path.join(CFG_DIR, "mode_*"))):
             add(f"  {os.path.basename(fn)}: {_read(fn)}")
         add("last_crash.json: " + (_read(os.path.join(CACHE_DIR, "last_crash.json")) or "(немає)"))

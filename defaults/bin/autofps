@@ -41,10 +41,12 @@ log "режим: $MODE"
 find "$CACHE/logs" -name '*.csv' -mtime +2 -delete 2>/dev/null
 
 # --- автопідбір графіки (не в безпечному режимі: зміни конфігів теж можуть бути причиною)
+rm -f "$CACHE/tuning_now" 2>/dev/null
 if [ "$MODE" != "safe" ] && [ -f "$DIR/autotune.py" ]; then
   timeout 15 python3 "$DIR/autotune.py" "$APPID" "$@" >>"$LOG" 2>&1 \
     || log "autotune завершився з помилкою (ігнорую)"
 fi
+TUNING="$(cat "$CACHE/tuning_now" 2>/dev/null)"
 
 # --- MangoHud: невидимий лог FPS кожні 250 мс
 USE_MANGO=0
@@ -58,36 +60,61 @@ if [ "$MODE" != "safe" ]; then
   fi
 fi
 
-# --- lsfg-vk v2: лише з перевіреним конфігом
-USE_LSFG=0
+# --- генерація кадрів: вирішується ПРИ ЗАПУСКУ (у lsfg-vk v2 множник 1 — невалідний,
+#     тож вимкнути генерацію посеред гри не можна, лише змінити множник)
+FG_MODE="$(cat "$CFG/fg_mode" 2>/dev/null)"; [ -n "$FG_MODE" ] || FG_MODE=auto
+FG_SAVED="$(cat "$CFG/fg_$APPID" 2>/dev/null)"
+LSFG_VER="$(cat "$CFG/lsfg_version" 2>/dev/null)"
 LSFG_CONF="$CFG/lsfg-vk.toml"
-if [ "$MODE" = "full" ] && [ -f "$LSFG_CONF" ]; then
-  CLI="$HOME/.local/bin/lsfg-vk-cli"
-  if [ -x "$CLI" ]; then
-    if OUT="$(timeout 10 "$CLI" validate --config "$LSFG_CONF" --print 2>&1)"; then
-      case "$OUT" in
-        *"The DLL file does not exist"*|*"DLL override: (none)"*)
-          log "lsfg-vk.dll не знайдено (Lossless Scaling має бути на бета-гілці lsfg-vk) — генерацію кадрів вимкнено" ;;
-        *) USE_LSFG=1 ;;
-      esac
+WANT=0
+if [ "$MODE" = "full" ] && [ "$FG_MODE" != "off" ] && [ "$TUNING" != "1" ]; then
+  case "$FG_SAVED" in 2|3|4) WANT="$FG_SAVED" ;; esac
+  [ "$WANT" = 0 ] && [ "$FG_MODE" = "always" ] && WANT=2
+fi
+[ "$TUNING" = "1" ] && log "графіка цієї гри ще підбирається — запуск без генерації кадрів (для чесного заміру)"
+
+FG_WANT="$WANT"
+USE_LSFG=0
+if [ "$WANT" -ge 2 ] && [ -f "$LSFG_CONF" ]; then
+  sed -i "s/^multiplier = .*/multiplier = $WANT/" "$LSFG_CONF" 2>/dev/null
+  if [ "$LSFG_VER" = "2" ]; then
+    CLI="$HOME/.local/bin/lsfg-vk-cli"
+    if [ -x "$CLI" ]; then
+      if OUT="$(timeout 10 "$CLI" validate --config "$LSFG_CONF" --print 2>&1)"; then
+        case "$OUT" in
+          *"The DLL file does not exist"*|*"DLL override: (none)"*)
+            log "DLL для lsfg-vk не знайдено — генерацію кадрів вимкнено: $(echo "$OUT" | tr '\n' ' ' | cut -c1-300)" ;;
+          *) USE_LSFG=1 ;;
+        esac
+      else
+        log "конфіг lsfg-vk не пройшов перевірку — генерацію кадрів вимкнено: $(echo "$OUT" | tr '\n' ' ' | cut -c1-400)"
+      fi
     else
-      log "конфіг lsfg-vk не пройшов перевірку — генерацію кадрів вимкнено: $(echo "$OUT" | tr '\n' ' ' | cut -c1-400)"
+      log "lsfg-vk-cli не знайдено — генерацію кадрів не вмикаю"
     fi
+  elif [ "$LSFG_VER" = "1" ]; then
+    USE_LSFG=1   # у v1 немає інструмента перевірки; від падіння страхує безпечний режим
   else
-    log "lsfg-vk-cli не знайдено — генерацію кадрів не вмикаю (встанови lsfg-vk у Decky LSFG-VK)"
+    log "lsfg-vk не знайдено — генерацію кадрів не вмикаю"
   fi
 fi
-if [ "$USE_LSFG" = 1 ]; then
+
+if [ "$USE_LSFG" = 1 ] && [ "$LSFG_VER" = "2" ]; then
   export LSFGVK_CONFIG="$LSFG_CONF"
   export LSFGVK_PROFILE="autofps"
+elif [ "$USE_LSFG" = 1 ]; then
+  export LSFG_CONFIG="$LSFG_CONF"
+  export LSFG_PROCESS="autofps"
+  export ENABLE_LSFG=1
 else
   # не даємо чужим налаштуванням lsfg-vk увімкнутись поверх наших
   export DISABLE_LSFGVK=1
+  WANT=0
 fi
-log "mangohud=$USE_MANGO lsfg=$USE_LSFG"
+log "mangohud=$USE_MANGO lsfg=$USE_LSFG (v${LSFG_VER:-?}, ×$WANT, режим FG: $FG_MODE)"
 
-printf '{"appid":"%s","pid":%d,"started":%d,"mode":"%s","mangohud":%d,"lsfg":%d}\n' \
-  "$APPID" "$$" "$(date +%s)" "$MODE" "$USE_MANGO" "$USE_LSFG" >"$CACHE/current.json"
+printf '{"appid":"%s","pid":%d,"started":%d,"mode":"%s","mangohud":%d,"lsfg":%d,"fg":%d,"fg_want":%d}\n' \
+  "$APPID" "$$" "$(date +%s)" "$MODE" "$USE_MANGO" "$USE_LSFG" "$WANT" "$FG_WANT" >"$CACHE/current.json"
 
 # --- запуск (дочірнім процесом, щоб знати, чи гра не впала одразу)
 START=$(date +%s)
