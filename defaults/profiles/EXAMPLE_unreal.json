@@ -1,0 +1,56 @@
+{
+  "_comment": "Скопіюйте в ~/.config/autofps/profiles/<AppID>.json і поправте шлях. Ключі tiers — базовий FPS, від якого діє пресет.",
+  "name": "Приклад для гри на Unreal Engine 4/5",
+  "files": [
+    {
+      "path": "{compatdata}/pfx/drive_c/users/steamuser/AppData/Local/GAMENAME/Saved/Config/Windows/GameUserSettings.ini",
+      "type": "ini",
+      "tiers": {
+        "30": {
+          "ScalabilityGroups": {
+            "sg.ResolutionQuality": "100",
+            "sg.ViewDistanceQuality": "2",
+            "sg.ShadowQuality": "2",
+            "sg.PostProcessQuality": "2",
+            "sg.TextureQuality": "2",
+            "sg.EffectsQuality": "2",
+            "sg.FoliageQuality": "2"
+          }
+        },
+        "40": {
+          "ScalabilityGroups": {
+            "sg.ResolutionQuality": "85",
+            "sg.ViewDistanceQuality": "1",
+            "sg.ShadowQuality": "1",
+            "sg.PostProcessQuality": "1",
+            "sg.TextureQuality": "2",
+            "sg.EffectsQuality": "1",
+            "sg.FoliageQuality": "1"
+          }
+        },
+        "60": {
+          "ScalabilityGroups": {
+            "sg.ResolutionQuality": "70",
+            "sg.ViewDistanceQuality": "1",
+            "sg.ShadowQuality": "0",
+            "sg.PostProcessQuality": "0",
+            "sg.TextureQuality": "1",
+            "sg.EffectsQuality": "0",
+            "sg.FoliageQuality": "0"
+          }
+        },
+        "120": {
+          "ScalabilityGroups": {
+            "sg.ResolutionQuality": "60",
+            "sg.ViewDistanceQuality": "0",
+            "sg.ShadowQuality": "0",
+            "sg.PostProcessQuality": "0",
+            "sg.TextureQuality": "1",
+            "sg.EffectsQuality": "0",
+            "sg.FoliageQuality": "0"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+node_modules/
+dist/
+out/
+AutoFPS.zip
+__pycache__/
+*.pyc

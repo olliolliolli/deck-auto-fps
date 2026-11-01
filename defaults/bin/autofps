@@ -1,0 +1,42 @@
+#!/bin/bash
+# AutoFPS — обгортка запуску гри.
+# Параметр запуску в Steam:  bash ~/homebrew/plugins/AutoFPS/bin/autofps %command%
+#
+# 1) автоматично налаштовує графіку гри (самонавчання між запусками)
+# 2) вмикає невидимий лог MangoHud, з якого плагін бере FPS
+# 3) підключає фрейм-генерацію lsfg-vk з керованим плагіном профілем
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CACHE="$HOME/.cache/autofps"
+CFG="$HOME/.config/autofps"
+mkdir -p "$CACHE/logs" "$CFG"
+
+APPID="${SteamAppId:-${SteamGameId:-0}}"
+
+# старі логи (>2 днів) прибираємо
+find "$CACHE/logs" -name '*.csv' -mtime +2 -delete 2>/dev/null
+
+# автопідбір графіки гри (Unreal/Unity) або ручний профіль, якщо він є.
+# Гра ще не запущена — тож її файли налаштувань можна безпечно редагувати.
+timeout 15 python3 "$DIR/autotune.py" "$APPID" "$@" >>"$CACHE/wrapper.log" 2>&1 || true
+
+# PID лишається тим самим після exec — по ньому плагін бачить, що гра жива
+printf '{"appid":"%s","pid":%d,"started":%d}\n' "$APPID" "$$" "$(date +%s)" \
+  > "$CACHE/current.json"
+
+# MangoHud: лог кожні 250 мс, оверлей прозорий (no_display ламає лог)
+export MANGOHUD=1
+export MANGOHUD_CONFIG="autostart_log=1,log_interval=250,log_duration=0,output_folder=$CACHE/logs,alpha=0.0,background_alpha=0.0,font_size=1"
+
+# lsfg-vk: власний конфіг AutoFPS (v1 та v2 змінні). multiplier=1 = вимкнено.
+export LSFG_CONFIG="$CFG/lsfg-vk.toml"
+export LSFGVK_CONFIG="$CFG/lsfg-vk.toml"
+export LSFG_PROCESS="autofps"
+export ENABLE_LSFG=1
+
+if command -v mangohud >/dev/null 2>&1; then
+  exec mangohud "$@"
+else
+  echo "AutoFPS: mangohud не знайдено, FPS не вимірюватиметься" >>"$CACHE/wrapper.log"
+  exec "$@"
+fi

@@ -1,0 +1,11 @@
+{
+  "name": "AutoFPS",
+  "author": "you",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": ["performance", "fps", "frame generation"],
+    "description": "Автоматично підбирає стабільні 30/40/60/90/120 FPS для гри та вмикає фрейм-генерацію lsfg-vk. Steam Deck LCD/OLED і Lenovo Legion Go S.",
+    "image": ""
+  }
+}
