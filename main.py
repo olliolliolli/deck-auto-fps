@@ -1107,7 +1107,8 @@ class Plugin:
             "latest_name": st.get("latest_name"), "published": st.get("latest_published", ""),
             "update": O.update_available(st), "check_error": st.get("check_error", ""),
             "checked_at": st.get("checked_at", 0), "extractor": tool or "",
-            "upscaler_auto": O.resolve_upscaler("auto", gpu)[1],
+            "upscaler_auto": (O.game_upscaler(appid, self.settings, gpu)[1] if appid
+                              else O.resolve_upscaler("auto", gpu)[1]),
             "current": O.resolve_upscaler(self.settings.get("opti_upscaler", "auto"), gpu)[1],
             "detected_arch": O.detect_gpu().get("arch"), "game": None,
         }
@@ -1128,6 +1129,8 @@ class Plugin:
                 "check": g.get("check") or None,
                 "dll_tried": g.get("dll_tried", []), "dll_ok": g.get("dll_ok", ""),
                 "disabled_reason": g.get("disabled_reason", ""),
+                "ref": prof.get("ref", ""), "ref_tag": g.get("ref_tag", ""),
+                "pd": O.pd_status() if prof.get("ref") == "pd" else None,
                 "found": bool(install and os.path.isdir(install)),
             }
         return res
@@ -1160,10 +1163,26 @@ class Plugin:
         try:
             g = await self._blocking(self._opti_enable_sync, appid)
             return {"ok": True, "upscaler": g.get("upscaler_label"), "dll": g.get("dll"),
-                    "tag": g.get("tag")}
+                    "tag": g.get("tag"), "ref": g.get("ref", "")}
+        except O.NeedPdPlugin as e:
+            return {"ok": False, "need_pd": True, "error": str(e)}
         except Exception as e:  # noqa: BLE001
             decky.logger.error(f"OptiScaler enable failed: {e}")
             return {"ok": False, "error": str(e)}
+
+    async def opti_pd_scan(self):
+        """Пошук PDPerfPlugin.dll у Завантаженнях / на картках пам'яті."""
+        try:
+            return await self._blocking(O.find_pd_plugin)
+        except Exception as e:  # noqa: BLE001
+            return {"present": False, "error": str(e)}
+
+    async def opti_pd_import(self, path):
+        """Файл, вибраний у Decky (DLL або архів з ним)."""
+        try:
+            return await self._blocking(O.import_pd_plugin, path)
+        except Exception as e:  # noqa: BLE001
+            return {"present": False, "error": str(e)}
 
     async def opti_disable(self, appid):
         try:

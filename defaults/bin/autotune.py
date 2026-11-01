@@ -398,7 +398,95 @@ class UnityAdapter:
         return res + (f", рівень якості {q}" if q is not None else "")
 
 
-ADAPTERS = [UnrealAdapter, UnityAdapter]
+# Capcom RE Engine: local_config.ini у теці гри, секція [AppRender], цілі числа (0 = найнижче).
+# Максимуми не задокументовані, тож стеля — те, що записала сама гра (твій конфіг або
+# local_config_default.ini); вище плагін не ставить ніколи.
+RE_KEYS = [  # порядок: що дає найбільше FPS за найменшу втрату картинки
+    "AppRayTraceOnOff", "AppStrandHair", "AppShadowQuality", "AppVolumeLightQuality",
+    "AppAmbientOcclusion", "AppSSRefrection", "AppContactShadow", "AppSSSSSetting",
+    "AppParticleLighting", "AppMeshQuality", "AppTessellation", "AppLensFrare", "AppBloom",
+]
+RE_TO_ZERO = {"AppRayTraceOnOff", "AppStrandHair", "AppSSRefrection", "AppContactShadow"}
+RE_LABELS = {"AppShadowQuality": "тіні", "AppVolumeLightQuality": "об'ємне світло",
+             "AppAmbientOcclusion": "AO", "AppMeshQuality": "моделі", "AppStrandHair": "волосся",
+             "AppRayTraceOnOff": "трасування"}
+
+
+class REEngineAdapter:
+    engine = "re_engine"
+    SECTION = "AppRender"
+
+    def __init__(self, install, compat, device):
+        self.install, self.compat, self.device = install, compat, device
+
+    @staticmethod
+    def detect(install):
+        return bool(glob.glob(os.path.join(install, "re_chunk_000.pak*")))
+
+    def _inis(self, default):
+        out = []
+        for p in sorted(glob.glob(os.path.join(self.install, "*.ini"))):
+            name = os.path.basename(p).lower()
+            if ("default" in name) != default:
+                continue
+            if "[AppRender]" in C.read_text(p):
+                out.append(p)
+        return out
+
+    def locate(self):
+        cands = self._inis(default=False)
+        pref = [p for p in cands if os.path.basename(p).lower() == "local_config.ini"]
+        return (pref or cands or [None])[0]
+
+    def read(self, cfg):
+        vals = read_ini_section(cfg, self.SECTION)
+        return {k: vals[k] for k in RE_KEYS if k in vals and vals[k].lstrip("-").isdigit()}
+
+    def _ceiling(self, original):
+        ceil = {k: int(v) for k, v in original.items()}
+        for d in self._inis(default=True):
+            for k, v in self.read(d).items():
+                if k in ceil:
+                    ceil[k] = max(ceil[k], int(v))
+        return ceil
+
+    def ladder(self, original):
+        cur = self._ceiling(original)
+        ladder = [dict(cur)]
+        keys = [k for k in RE_KEYS if k in cur]
+        for _ in range(14):
+            changed = 0
+            for k in keys:
+                if cur[k] > 0:
+                    cur[k] = 0 if k in RE_TO_ZERO else cur[k] - 1
+                    changed += 1
+                    if changed == 2:     # не більше двох змін на сходинку
+                        break
+            if not changed:
+                break
+            ladder.append(dict(cur))
+        return [{k: str(v) for k, v in step.items()} for step in ladder]
+
+    def write(self, cfg, values):
+        backup_once(cfg)
+        with open(cfg, encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+        new = patch_ini(lines, {self.SECTION: {k: v for k, v in values.items() if k in RE_KEYS}})
+        with open(cfg, "w", encoding="utf-8") as f:
+            f.writelines(new)
+
+    def restore(self, cfg, original):
+        self.write(cfg, original)
+
+    def comparable(self, values):
+        return dict(values)
+
+    def describe(self, values):
+        parts = [f"{RE_LABELS[k]} {values[k]}" for k in RE_LABELS if k in values]
+        return ", ".join(parts) or "налаштування RE Engine"
+
+
+ADAPTERS = [UnrealAdapter, UnityAdapter, REEngineAdapter]
 
 
 # ------------------------------------------------------------------ decision

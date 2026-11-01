@@ -64,7 +64,7 @@ OptiScaler. Далі в грі вибери **DLSS** у налаштування
 |---|---|
 | Unreal Engine 4/5 | `<Project>/Binaries/Win64`, `dxgi.dll` |
 | RE Engine з DLSS (Monster Hunter Wilds/Rise, Dragon's Dogma 2) | корінь гри, `dxgi.dll`, `Dxgi=false`, `OverlayMenu=false`; MH Rise — `RestoreComputeSignature=true` |
-| Resident Evil 2/3/4/7/Village, DMC5 | **не підтримується**: вбудованого DLSS немає, потрібні REFramework + UpscalerBasePlugin |
+| Resident Evil 2/3/4/7/Village, DMC5 | **FSR 4 через REFramework**: AutoFPS сам завантажує збірку REFramework (pd-upscaler) саме під цю гру, ставить OptiScaler (`dxgi.dll`, `Dxgi=false`, `OverlayMenu=false`, гаряча клавіша Home), вимикає вбудований FSR гри і додає `dinput8=n,b` для Proton. Village — FSR 3.1 (FSR 4 там ламає картинку) |
 | Cyberpunk, Witcher 3, BG3, Hitman, Darktide, Vermintide 2 | тека справжньої гри, а не лаунчера |
 | Ігри з EasyAntiCheat / BattlEye | **відмова** — ризик бану |
 
@@ -94,8 +94,25 @@ OptiScaler. Далі в грі вибери **DLSS** у налаштування
 - **Після оновлення гри** (Steam стер файли) OptiScaler відновлюється автоматично при запуску.
 - **Вимкнення** прибирає всі файли OptiScaler і повертає оригінальні DLL гри.
 
+### Ігри Capcom (RE Engine)
+
+У RE2/3/4/7/Village і DMC5 немає вбудованого DLSS, тож FSR 4 працює так:
+REFramework (гілка pd-upscaler, збірка під гру) → PureDark **UpscalerBasePlugin 1.1.2**
+(`PDPerfPlugin.dll`) → OptiScaler. Усе, крім UpscalerBasePlugin, AutoFPS завантажує сам.
+UpscalerBasePlugin лежить лише на [Nexus Mods](https://www.nexusmods.com/site/mods/502?tab=files)
+за входом і не може розповсюджуватися, тож його треба завантажити один раз: режим робочого столу →
+браузер → завантажити **1.1.2** (1.2.0 не працює) → лишити в «Завантаженнях». AutoFPS знайде файл
+сам (або вибери його кнопкою «Вибрати файл»). У грі один раз: меню REFramework (Insert або L3+R3) →
+**TemporalUpscaler** → увімкнути.
+
+**Графіка RE Engine:** `local_config.ini` у теці гри, секція `[AppRender]` (0 = найнижче).
+Автопідбір знижує тіні, об'ємне світло, AO, волосся (strand hair), відображення, моделі…
+Вище за те, що записала сама гра (твій конфіг або `local_config_default.ini`), не ставить ніколи;
+роздільну здатність, згладжування й текстури не чіпає.
+
 Ідеї взято з [Decky Framegen](https://github.com/xXJSONDeruloXx/Decky-Framegen) (файли, бекапи,
-теки ігор, виправлення ini для Proton) та вікі OptiScaler.
+теки ігор, виправлення ini для Proton), [decky-optiscaler-plus](https://github.com/supercleans/decky-optiscaler-plus)
+(REFramework для ігор Capcom) та вікі OptiScaler.
 
 ## Як зрозуміти, що плагін працює
 

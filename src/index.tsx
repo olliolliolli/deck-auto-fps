@@ -13,6 +13,7 @@ import {
   addEventListener,
   callable,
   definePlugin,
+  openFilePicker,
   removeEventListener,
   toaster,
 } from "@decky/api";
@@ -156,7 +157,11 @@ type OptiGame = {
   dll_tried: string[];
   dll_ok: string;
   disabled_reason: string;
+  ref: string;
+  ref_tag: string;
+  pd: PdStatus | null;
 };
+type PdStatus = { present: boolean; verified: boolean; name: string; url: string; error?: string };
 type OptiStatus = {
   gpu: { vendor: string; arch: string; name: string; forced?: boolean };
   detected_arch: string;
@@ -172,13 +177,23 @@ type OptiStatus = {
   upscaler_auto: string;
   game: OptiGame | null;
 };
-type OptiResult = { ok: boolean; error?: string; upscaler?: string; dll?: string; tag?: string };
+type OptiResult = {
+  ok: boolean;
+  error?: string;
+  upscaler?: string;
+  dll?: string;
+  tag?: string;
+  ref?: string;
+  need_pd?: boolean;
+};
 
 const optiStatus = callable<[appid?: number], OptiStatus>("opti_status");
 const optiCheck = callable<[], OptiStatus>("opti_check");
 const optiUpdate = callable<[], OptiResult>("opti_update");
 const optiEnable = callable<[appid: number], OptiResult>("opti_enable");
 const optiDisable = callable<[appid: number], OptiResult>("opti_disable");
+const optiPdScan = callable<[], PdStatus>("opti_pd_scan");
+const optiPdImport = callable<[path: string], PdStatus>("opti_pd_import");
 
 // Номер запиту: відповідь для попередньо вибраної гри не перезапише нову
 let readSeq = 0;
@@ -297,11 +312,19 @@ const GameLaunchSection = memo(function GameLaunchSection() {
           await setGameEnabled(appid, true);
         }
         const r = await optiEnable(appid);
-        if (!r.ok) throw new Error(r.error);
-        toaster.toast({
-          title: "AutoFPS · DLSS увімкнено",
-          body: `${game?.name ?? appid}: DLSS → ${r.upscaler}. Запусти гру й вибери DLSS у налаштуваннях графіки`,
-        });
+        if (r.need_pd) {
+          toaster.toast({ title: "AutoFPS · потрібен ще один файл", body: r.error ?? "" });
+        } else if (!r.ok) {
+          throw new Error(r.error);
+        } else {
+          toaster.toast({
+            title: r.ref ? "AutoFPS · FSR увімкнено" : "AutoFPS · DLSS увімкнено",
+            body: r.ref
+              ? `${game?.name ?? appid}: ${r.upscaler} через REFramework. У грі відкрий меню REFramework ` +
+                "(Insert або L3+R3) → TemporalUpscaler → увімкни"
+              : `${game?.name ?? appid}: DLSS → ${r.upscaler}. Запусти гру й вибери DLSS у налаштуваннях графіки`,
+          });
+        }
       } else {
         setOptiBusy("Прибираю з гри…");
         const r = await optiDisable(appid);
@@ -333,6 +356,14 @@ const GameLaunchSection = memo(function GameLaunchSection() {
     } else if (!og.found) {
       optiLabel = "DLSS: теку гри не знайдено";
       optiBlocked = !og.enabled;
+    } else if (og.enabled && og.ref) {
+      optiLabel = `⚡ ${og.upscaler ?? "FSR"} через REFramework (OptiScaler ${og.tag ?? ""})`;
+      const chk = og.check
+        ? `\nОстання перевірка: ${og.check.title}. ${og.check.message}`
+        : "\nУ грі: меню REFramework (Insert або L3+R3) → TemporalUpscaler → увімкни (один раз)";
+      optiDesc = `REFramework ${og.ref_tag}${og.ref === "pd" ? " + " + (og.pd?.name ?? "PDPerfPlugin") : ""}, ` +
+        `OptiScaler ${og.dll}. Вбудований FSR гри вимкнено — масштабує REFramework` + chk +
+        (og.error ? `\n⚠ ${og.error}` : "");
     } else if (og.enabled) {
       optiLabel = `⚡ DLSS → ${og.upscaler ?? "FSR"} (OptiScaler ${og.tag ?? ""})`;
       const chk = og.check
@@ -343,8 +374,17 @@ const GameLaunchSection = memo(function GameLaunchSection() {
     } else if (og.disabled_reason) {
       optiLabel = "DLSS вимкнено самоперевіркою";
       optiDesc = `${og.disabled_reason}. Можна спробувати ще раз — перебір почнеться спочатку`;
+    } else if (og.ref === "pd" && og.pd && !og.pd.present) {
+      optiLabel = `FSR 4 для цієї гри: бракує ${og.pd.name}`;
+      optiDesc =
+        "У цій грі немає вбудованого DLSS — FSR 4 працює через REFramework і плагін PureDark. " +
+        "Усе інше AutoFPS завантажить сам, а цей файл лежить лише на Nexus Mods за входом:\n" +
+        "1. Режим робочого столу → браузер → nexusmods.com/site/mods/502 (вкладка Files)\n" +
+        `2. Завантаж ${og.pd.name} (саме 1.1.2 — 1.2.0 не працює)\n` +
+        "3. Залиш файл у «Завантаженнях» — AutoFPS знайде його сам, або вибери кнопкою нижче";
+      optiBlocked = true;
     } else {
-      optiLabel = "DLSS вимкнено";
+      optiLabel = og.ref ? "FSR (REFramework + OptiScaler) вимкнено" : "DLSS вимкнено";
       optiDesc = `${og.engine} → буде ${opti?.upscaler_auto ?? "FSR 3.1"} замість DLSS. ` +
         (opti?.installed ? `OptiScaler ${opti.installed}` : "OptiScaler завантажиться автоматично");
     }
@@ -423,9 +463,59 @@ const GameLaunchSection = memo(function GameLaunchSection() {
           {!optiBlocked && (
             <PanelSectionRow>
               <ButtonItem layout="below" disabled={!!optiBusy} onClick={toggleOpti}>
-                {optiBusy || (og.enabled ? "Вимкнути DLSS у цій грі" : "⚡ Увімкнути DLSS у цій грі")}
+                {optiBusy ||
+                  (og.enabled
+                    ? og.ref ? "Вимкнути FSR у цій грі" : "Вимкнути DLSS у цій грі"
+                    : og.ref ? "⚡ Увімкнути FSR 4 у цій грі" : "⚡ Увімкнути DLSS у цій грі")}
               </ButtonItem>
             </PanelSectionRow>
+          )}
+          {og.ref === "pd" && og.pd && !og.pd.present && !og.enabled && (
+            <>
+              <PanelSectionRow>
+                <ButtonItem
+                  layout="below"
+                  disabled={!!optiBusy}
+                  onClick={async () => {
+                    setOptiBusy("Шукаю у Завантаженнях…");
+                    const r = await optiPdScan();
+                    toaster.toast({
+                      title: "AutoFPS",
+                      body: r.present
+                        ? `Знайдено ${r.name}${r.verified ? "" : " (не 1.1.2 — може не працювати)"}. Тепер увімкни FSR 4`
+                        : "Файл не знайдено в Завантаженнях і на картках пам'яті",
+                    });
+                    setOptiBusy("");
+                    reloadOpti(appid);
+                  }}
+                >
+                  {optiBusy || "Перевірити Завантаження"}
+                </ButtonItem>
+              </PanelSectionRow>
+              <PanelSectionRow>
+                <ButtonItem
+                  layout="below"
+                  disabled={!!optiBusy}
+                  onClick={async () => {
+                    try {
+                      const chosen: any = await openFilePicker(0 as never, "/home", true, true);
+                      const path = chosen?.realpath || chosen?.path;
+                      if (!path) return;
+                      const r = await optiPdImport(path);
+                      toaster.toast({
+                        title: "AutoFPS",
+                        body: r.present ? `${r.name} додано. Тепер увімкни FSR 4` : `Не вдалося: ${r.error}`,
+                      });
+                      reloadOpti(appid);
+                    } catch {
+                      /* вибір скасовано */
+                    }
+                  }}
+                >
+                  Вибрати файл (DLL або архів)…
+                </ButtonItem>
+              </PanelSectionRow>
+            </>
           )}
         </>
       )}

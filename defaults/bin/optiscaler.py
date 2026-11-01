@@ -110,21 +110,38 @@ ENGINE_PROFILES = {
 
 # Профілі конкретних ігор (поверх профілю рушія)
 GAME_PROFILES = {
-    # Capcom RE Engine без вбудованого DLSS — потрібні REFramework + PureDark UpscalerBasePlugin
-    "2050650": {"unsupported": "RE4 (2023) не має вбудованого DLSS: потрібні REFramework "
-                               "(гілка pd-upscaler) і UpscalerBasePlugin — це не автоматизується"},
-    "883710": {"unsupported": "RE2 не має вбудованого DLSS: потрібні REFramework і UpscalerBasePlugin"},
-    "952060": {"unsupported": "RE3 не має вбудованого DLSS: потрібні REFramework і UpscalerBasePlugin"},
-    "418370": {"unsupported": "RE7 не має вбудованого DLSS: потрібні REFramework і UpscalerBasePlugin"},
-    "1196590": {"unsupported": "RE Village не має вбудованого DLSS (і FSR 4 там дає зіпсовану "
-                               "картинку): потрібні REFramework і UpscalerBasePlugin"},
-    "601150": {"unsupported": "Devil May Cry 5 не має вбудованого DLSS: потрібні REFramework і "
-                              "UpscalerBasePlugin"},
-    # Capcom RE Engine з вбудованим DLSS
+    # Capcom RE Engine без вбудованого DLSS: REFramework (гілка pd-upscaler, збірка під гру)
+    # + PureDark UpscalerBasePlugin (PDPerfPlugin.dll) + OptiScaler. Вікі OptiScaler.
+    "2050650": {"ref": "pd", "ref_asset": "RE4.zip", "name": "Resident Evil 4 (2023)"},
+    "883710": {"ref": "pd", "ref_asset": "RE2.zip", "name": "Resident Evil 2"},
+    "952060": {"ref": "pd", "ref_asset": "RE3.zip", "name": "Resident Evil 3"},
+    "418370": {"ref": "pd", "ref_asset": "RE7.zip", "name": "Resident Evil 7"},
+    # у Village FSR 4 дає зіпсовану картинку (вікі) — лише FSR 3.1 / XeSS
+    "1196590": {"ref": "pd", "ref_asset": "RE8.zip", "name": "Resident Evil Village",
+                "max_upscaler": "fsr31"},
+    "601150": {"ref": "pd", "ref_asset": "DMC5.zip", "name": "Devil May Cry 5"},
+    # Capcom з вбудованим DLSS
+    "2246340": {"ref": "nightly"},                                    # Monster Hunter Wilds
     "1446780": {"ini": {"Hooks.RestoreComputeSignature": "true"}},   # Monster Hunter Rise
-    "2246340": {},                                                    # Monster Hunter Wilds
     "2054970": {},                                                    # Dragon's Dogma 2
 }
+
+# REFramework: дві різні збірки (як у decky-optiscaler-plus)
+REF_PD_API = "https://api.github.com/repos/TheRazerMD/REFramework/releases"
+REF_PD_PAGE = "https://github.com/TheRazerMD/REFramework/releases"
+REF_NIGHTLY_API = "https://api.github.com/repos/praydog/REFramework-nightly/releases/latest"
+# вікі: нові PD-збірки зламані в DMC5 — остання робоча
+REF_PINNED = {
+    "DMC5.zip": {"url": "https://github.com/user-attachments/files/26169274/DMC5_working.zip",
+                 "sha256": "8f258480f390a3d063731805c00f58f0246be35580e600747f3c00d917ec225c",
+                 "tag": "DMC5_working (вікі)"},
+}
+# PureDark UpscalerBasePlugin: лише на Nexus Mods за входом — не завантажується автоматично
+PD_PLUGIN = "PDPerfPlugin.dll"
+PD_PLUGIN_NAME = "UpscalerBasePlugin 1.1.2"
+PD_PLUGIN_URL = "https://www.nexusmods.com/site/mods/502?tab=files"
+PD_PLUGIN_SHA256 = "2e3b10d46a587af3294ff1d02244ea410441befd1f8eaff329ff3f968d2d9a7f"  # 1.1.2
+REF_OVERRIDE = "dinput8"   # Proton має власний dinput8 — без override REFramework не завантажиться
 
 ANTICHEAT_MARKERS = ["EasyAntiCheat", "EasyAntiCheat_EOS", "BattlEye", "BEService",
                      "start_protected_game.exe", "vgk.sys", "EAAntiCheat"]
@@ -559,6 +576,176 @@ def _files_to_copy(src):
     return out
 
 
+# ------------------------------------------------------------------ REFramework (Capcom)
+
+class NeedPdPlugin(RuntimeError):
+    """Бракує PDPerfPlugin.dll — користувач має завантажити його з Nexus."""
+
+
+def pd_store():
+    return os.path.join(root_dir(), "pd", PD_PLUGIN)
+
+
+def _scan_dirs():
+    dirs = [os.path.join(C.HOME, "Downloads"), os.path.join(C.HOME, "Desktop")]
+    dirs += glob.glob("/run/media/*/*") + glob.glob("/run/media/*")
+    return [d for d in dirs if os.path.isdir(d)]
+
+
+def _walk(base, depth=3):
+    base_depth = base.rstrip("/").count("/")
+    for root, dirs, files in os.walk(base):
+        if root.count("/") - base_depth >= depth:
+            dirs[:] = []
+        yield root, files
+
+
+def _from_archive(path, dest):
+    """Дістати PDPerfPlugin.dll з архіву (zip — сам, 7z/rar — через 7z/bsdtar)."""
+    import zipfile
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as z:
+            for n in z.namelist():
+                if os.path.basename(n).lower() == PD_PLUGIN.lower():
+                    with z.open(n) as src, open(dest, "wb") as out:
+                        shutil.copyfileobj(src, out)
+                    return True
+        return False
+    tmp = dest + ".x"
+    shutil.rmtree(tmp, ignore_errors=True)
+    try:
+        extract(path, tmp)
+        found = [p for p in glob.glob(os.path.join(tmp, "**", "*"), recursive=True)
+                 if os.path.basename(p).lower() == PD_PLUGIN.lower()]
+        if found:
+            shutil.copy2(found[0], dest)
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return False
+
+
+def import_pd_plugin(path):
+    """Взяти PDPerfPlugin.dll з указаного файлу (DLL або архів) у сховище плагіна."""
+    dest = pd_store()
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    tmp = dest + ".new"
+    if os.path.basename(path).lower() == PD_PLUGIN.lower():
+        shutil.copy2(path, tmp)
+    elif not _from_archive(path, tmp):
+        raise RuntimeError(f"у {os.path.basename(path)} немає {PD_PLUGIN}")
+    os.replace(tmp, dest)
+    return pd_status()
+
+
+def find_pd_plugin():
+    """Шукає PDPerfPlugin.dll (або архів з ним) у Завантаженнях і на картках пам'яті."""
+    if os.path.isfile(pd_store()):
+        return pd_status()
+    for base in _scan_dirs():
+        for root, files in _walk(base):
+            for f in files:
+                low = f.lower()
+                p = os.path.join(root, f)
+                if low == PD_PLUGIN.lower():
+                    return import_pd_plugin(p)
+                if low.endswith((".zip", ".7z", ".rar")) and ("upscaler" in low or "pdperf" in low
+                                                                or "puredark" in low):
+                    try:
+                        return import_pd_plugin(p)
+                    except Exception:  # noqa: BLE001
+                        continue
+    return pd_status()
+
+
+def pd_status():
+    p = pd_store()
+    if not os.path.isfile(p):
+        return {"present": False, "verified": False, "name": PD_PLUGIN_NAME, "url": PD_PLUGIN_URL}
+    return {"present": True, "verified": sha256(p) == PD_PLUGIN_SHA256, "name": PD_PLUGIN_NAME,
+            "url": PD_PLUGIN_URL}
+
+
+def _release_asset(release, name):
+    for a in release.get("assets", []):
+        if a.get("name", "").lower() == name.lower():
+            d = str(a.get("digest") or "")
+            return {"url": a["browser_download_url"], "tag": release.get("tag_name", ""),
+                    "sha256": d.split(":", 1)[1] if d.startswith("sha256:") else ""}
+    return None
+
+
+def fetch_reframework(kind, asset, log=print):
+    """Завантажує REFramework (pd — збірка під гру, nightly — уніфікована). Повертає (шлях до dinput8.dll, тег)."""
+    import zipfile
+    if kind == "pd" and asset in REF_PINNED:
+        info = REF_PINNED[asset]
+    elif kind == "pd":
+        info = None
+        for rel in json.loads(http_get(REF_PD_API, timeout=30)):
+            info = _release_asset(rel, asset)
+            if info:
+                break
+        if not info:
+            raise RuntimeError(f"у релізах REFramework (pd-upscaler) немає {asset}: {REF_PD_PAGE}")
+    else:
+        info = _release_asset(json.loads(http_get(REF_NIGHTLY_API, timeout=30)), "REFramework.zip")
+        if not info:
+            raise RuntimeError("не знайдено REFramework.zip у nightly")
+    # збірка pd-upscaler своя для кожної гри — кеш окремо за грою, інакше чужа збірка = падіння
+    game_key = os.path.splitext(asset)[0] if kind == "pd" else "unified"
+    cache = os.path.join(root_dir(), "reframework", kind, game_key,
+                         re.sub(r"[^\w.-]", "_", info["tag"]))
+    dll = os.path.join(cache, "dinput8.dll")
+    if os.path.isfile(dll):
+        return dll, info["tag"]
+    os.makedirs(cache, exist_ok=True)
+    arc = os.path.join(cache, asset if kind == "pd" else "REFramework.zip")
+    log(f"завантажую REFramework {info['tag']} ({os.path.basename(arc)})")
+    http_get(info["url"], arc, timeout=300)
+    if info.get("sha256") and sha256(arc) != info["sha256"]:
+        os.remove(arc)
+        raise RuntimeError("контрольна сума REFramework не збігається — завантаження відкинуто")
+    with zipfile.ZipFile(arc) as z:
+        names = [n for n in z.namelist() if os.path.basename(n).lower() == "dinput8.dll"]
+        if not names:
+            raise RuntimeError("в архіві REFramework немає dinput8.dll")
+        with z.open(names[0]) as src, open(dll, "wb") as out:
+            shutil.copyfileobj(src, out)
+    os.remove(arc)
+    return dll, info["tag"]
+
+
+def game_upscaler(appid, settings, gpu):
+    """Апскейлер для гри з урахуванням обмежень профілю (напр. Village — без FSR 4)."""
+    key, label = resolve_upscaler(settings.get("opti_upscaler", "auto"), gpu)
+    cap = GAME_PROFILES.get(str(appid), {}).get("max_upscaler")
+    if cap and key in ("fsr4", "fsr40"):
+        key, label = resolve_upscaler(cap, gpu)
+    return key, label
+
+
+def _re_engine_disable_ingame_upscaling(install_path):
+    """Вбудований FSR гри не працює як вхід для OptiScaler (вікі): вимикаємо, масштабує REFramework."""
+    for ini in glob.glob(os.path.join(install_path, "*.ini")):
+        if "default" in os.path.basename(ini).lower():
+            continue
+        try:
+            text = open(ini, encoding="utf-8", errors="ignore").read()
+        except OSError:
+            continue
+        if "[AppRender]" not in text:
+            continue
+        new = re.sub(r"^(AppUpScalingTypeFSR[12])=\d+", r"\1=0", text, flags=re.M)
+        if new != text:
+            if not os.path.exists(ini + ".autofps-upscale.bak"):
+                shutil.copy2(ini, ini + ".autofps-upscale.bak")
+            with open(ini, "w", encoding="utf-8") as f:
+                f.write(new)
+
+
 def install(appid, install_path, game_name="", args=None, settings=None, log=print, reset=False):
     """Встановлює OptiScaler у гру. Повертає словник стану гри.
     reset=True — ручне ввімкнення: почати перебір назв DLL спочатку."""
@@ -567,6 +754,10 @@ def install(appid, install_path, game_name="", args=None, settings=None, log=pri
     prof = GAME_PROFILES.get(appid, {})
     if prof.get("unsupported"):
         raise RuntimeError(prof["unsupported"])
+    ref_kind = prof.get("ref")
+    pd = find_pd_plugin() if ref_kind == "pd" else None
+    if pd is not None and not pd["present"]:
+        raise NeedPdPlugin(f"для {prof.get('name', 'цієї гри')} потрібен {PD_PLUGIN_NAME} з Nexus Mods")
     if not install_path or not os.path.isdir(install_path):
         raise RuntimeError("не знайдено теку гри")
     ac = has_anticheat(install_path)
@@ -590,8 +781,11 @@ def install(appid, install_path, game_name="", args=None, settings=None, log=pri
         _remove_files(game)  # тека змінилась — прибрати старе
     dll = game.get("dll") or ENGINE_PROFILES[engine]["dll"]
     gpu = effective_gpu(settings)
-    upscaler, up_label = resolve_upscaler(settings.get("opti_upscaler", "auto"), gpu)
+    upscaler, up_label = game_upscaler(appid, settings, gpu)
     opti_fg = bool(settings.get("opti_fg", False))
+    ref_dll = ref_tag = None
+    if ref_kind:
+        ref_dll, ref_tag = fetch_reframework(ref_kind, prof.get("ref_asset", ""), log)
     variant = fsr4_variant(gpu, upscaler) if upscaler in ("fsr4", "fsr40") else None
     vinfo = FSR4_VARIANTS.get(variant, {})
     # усі додаткові файли — заздалегідь, щоб не лишити гру напіввстановленою
@@ -612,7 +806,7 @@ def install(appid, install_path, game_name="", args=None, settings=None, log=pri
     backups = list(game.get("backups", []))
     # 1) бекап оригінальних файлів гри (лише ті, що не наші)
     ours = set(game.get("files", []))
-    for name in ORIGINAL_BACKUPS:
+    for name in ORIGINAL_BACKUPS + (["dinput8.dll"] if ref_kind else []):
         p = os.path.join(target, name)
         if os.path.isfile(p) and name not in ours and not os.path.exists(p + ".b"):
             shutil.move(p, p + ".b")
@@ -641,11 +835,31 @@ def install(appid, install_path, game_name="", args=None, settings=None, log=pri
     if up_override:
         shutil.copy2(up_override, os.path.join(target, "amd_fidelityfx_upscaler_dx12.dll"))
         files.append("amd_fidelityfx_upscaler_dx12.dll")
+    # 3b) REFramework (+ PDPerfPlugin) поруч з exe гри
+    if ref_dll:
+        shutil.copy2(ref_dll, os.path.join(target, "dinput8.dll"))
+        files.append("dinput8.dll")
+        if ref_kind == "pd":
+            shutil.copy2(pd_store(), os.path.join(target, PD_PLUGIN))
+            files.append(PD_PLUGIN)
+            # TemporalUpscaler шукає libxess.dll поруч з PDPerfPlugin.dll (вікі, Opti v10)
+            for lib in ("libxess.dll",):
+                if not os.path.isfile(os.path.join(target, lib)):
+                    sub = glob.glob(os.path.join(target, "**", lib), recursive=True)
+                    if sub:
+                        shutil.copy2(sub[0], os.path.join(target, lib))
+                        files.append(lib)
+            _re_engine_disable_ingame_upscaling(install_path)
     # 4) налаштування
     ini = os.path.join(target, "OptiScaler.ini")
     if os.path.isfile(ini):
-        ini_set(ini, ini_overrides(engine, appid, upscaler, opti_fg, variant,
-                                   ffx_key(os.path.join(src, "OptiScaler.ini"))))
+        ov = ini_overrides(engine, appid, upscaler, opti_fg, variant,
+                           ffx_key(os.path.join(src, "OptiScaler.ini")))
+        if ref_kind:
+            # Insert відкриває і REFramework, і OptiScaler — OptiScaler на Home (вікі)
+            ov.update({"Spoofing.Dxgi": "false", "Menu.OverlayMenu": "false",
+                       "Menu.ShortcutKey": "0x24"})
+        ini_set(ini, ov)
     marker = {"appid": appid, "tag": tag, "dll": dll, "files": files, "backups": backups,
               "installed_at": int(time.time())}
     with open(os.path.join(target, MARKER), "w", encoding="utf-8") as f:
@@ -656,6 +870,8 @@ def install(appid, install_path, game_name="", args=None, settings=None, log=pri
                 dll=dll, engine=engine, files=sorted(set(files)), backups=sorted(set(backups)),
                 upscaler=upscaler, upscaler_label=up_label, opti_fg=opti_fg, gpu=gpu["name"],
                 fsr4_variant=variant or "", injector="0.10.0-pre1" if injector else tag,
+                ref=ref_kind or "", ref_tag=ref_tag or "",
+                pd_verified=bool(pd and pd.get("verified")),
                 name=game_name or game.get("name", ""), updated=int(time.time()), error="")
     save_game(appid, game)
     log(f"OptiScaler {tag} → {target} ({dll}, {ENGINE_PROFILES[engine]['label']}, {up_label})")
@@ -676,6 +892,26 @@ def _remove_files(game):
         p = os.path.join(target, name)
         if os.path.exists(p):
             os.remove(p)
+    # REFramework ставили ми (не було свого dinput8.dll) — прибрати і його слід
+    if game.get("ref") and "dinput8.dll" not in game.get("backups", []):
+        shutil.rmtree(os.path.join(target, "reframework"), ignore_errors=True)
+        for pat in ("*_fw_config.txt", "re*_framework_log.txt", "*_framework_log.txt"):
+            for f in glob.glob(os.path.join(target, pat)):
+                os.remove(f)
+    # повернути вбудоване масштабування гри (лише ці ключі, решту налаштувань не чіпаємо)
+    if game.get("ref"):
+        for bak in glob.glob(os.path.join(game.get("install") or target, "*.ini.autofps-upscale.bak")):
+            ini = bak[:-len(".autofps-upscale.bak")]
+            try:
+                old = dict(re.findall(r"^(AppUpScalingTypeFSR[12])=(\d+)", open(bak).read(), re.M))
+                text = open(ini, encoding="utf-8", errors="ignore").read()
+                for k, v in old.items():
+                    text = re.sub(rf"^{k}=\d+", f"{k}={v}", text, flags=re.M)
+                with open(ini, "w", encoding="utf-8") as f:
+                    f.write(text)
+                os.remove(bak)
+            except OSError:
+                pass
     for name in game.get("backups", []):
         b = os.path.join(target, name + ".b")
         if os.path.exists(b):
@@ -707,10 +943,11 @@ def ensure(appid, args, settings=None, log=print):
     settings = settings or C.load_json(C.SETTINGS_FILE, {})
     target = game.get("target", "")
     missing = not os.path.isfile(os.path.join(target, game.get("dll", "dxgi.dll"))) or \
-        not os.path.isfile(os.path.join(target, MARKER))
+        not os.path.isfile(os.path.join(target, MARKER)) or \
+        (game.get("ref") and not os.path.isfile(os.path.join(target, "dinput8.dll")))
     outdated = installed_tag() and game.get("tag") != installed_tag()
     gpu = effective_gpu(settings)
-    want_up = resolve_upscaler(settings.get("opti_upscaler", "auto"), gpu)[0]
+    want_up = game_upscaler(appid, settings, gpu)[0]
     want_var = fsr4_variant(gpu, want_up) if want_up in ("fsr4", "fsr40") else ""
     changed = (game.get("upscaler"), game.get("opti_fg"), game.get("fsr4_variant", "")) != (
         want_up, bool(settings.get("opti_fg", False)), want_var)
@@ -727,6 +964,8 @@ def ensure(appid, args, settings=None, log=print):
             return None, False
     dll = game.get("dll", "dxgi.dll")
     stem = None if dll.endswith(".asi") else os.path.splitext(dll)[0]
+    if game.get("ref") and stem:
+        stem = f"{stem},{REF_OVERRIDE}"     # обидві бібліотеки — з теки гри
     return stem, bool(game.get("opti_fg"))
 
 
@@ -827,6 +1066,13 @@ def analyze(appid, started, duration, crashed=False, log=print):
         title = "DLSS: помилка масштабування"
         msg = (f"OptiScaler завантажився, але не зміг створити {game.get('upscaler_label', 'FSR')}: "
                f"{info['errors'][-1][:120]}. Спробуй «FSR 4.0» або «FSR 3.1»")
+    elif game.get("ref"):
+        res["status"] = "no_dlss"
+        game["dll_ok"] = dll
+        title = "FSR: увімкни TemporalUpscaler у REFramework"
+        msg = ("OptiScaler і REFramework завантажились, але масштабування не ввімкнено. У грі відкрий "
+               "меню REFramework (Insert або L3+R3) → TemporalUpscaler → увімкни. Це потрібно "
+               "один раз — REFramework запам'ятає")
     else:
         res["status"] = "no_dlss"
         game["dll_ok"] = dll
