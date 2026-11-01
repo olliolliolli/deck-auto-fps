@@ -1,0 +1,1 @@
+FidelityFX SDK headers (ffx_api*.h, ffx_upscale.h) — Copyright (C) 2026 Advanced Micro Devices, Inc., MIT License (see header of each file).
