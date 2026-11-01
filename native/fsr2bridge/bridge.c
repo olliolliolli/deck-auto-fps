@@ -783,6 +783,14 @@ static ID3D12Resource *table_find(cl_state *st, uint32_t param, DXGI_FORMAT fmt,
     return NULL;
 }
 
+/* глибина гри: D32S8 (R32G8X24_TYPELESS) у таблиці SRV (param 1) або в «змішаній» (param 2) */
+static ID3D12Resource *find_depth(cl_state *st)
+{
+    ID3D12Resource *r = table_find(st, 1, DXGI_FORMAT_R32G8X24_TYPELESS, 0, 0, D_SRV);
+    if (!r) r = table_find(st, 2, DXGI_FORMAT_R32G8X24_TYPELESS, 0, 0, D_SRV);
+    return r;
+}
+
 static int table_cbv(cl_state *st, uint32_t param, uint32_t reg_index, uint32_t *out, uint32_t n)
 {
     rs_info *ri = rs_find(st->rs);
@@ -889,6 +897,12 @@ static int bridge_rcas(ID3D12GraphicsCommandList *cl, cl_state *st)
     if (fr.cl != cl) why = "інший командний список";
     else if (!fr.color) why = "немає кольору";
     else if (!depth) why = "немає глибини";
+    else {
+        D3D12_RESOURCE_DESC dc, dz;
+        ID3D12Resource_GetDesc(fr.color, &dc); ID3D12Resource_GetDesc(depth, &dz);
+        if (dc.Width != dz.Width || dc.Height != dz.Height) why = "глибина іншого розміру";
+    }
+    if (why) {}
     else if (!fr.mv) why = "немає векторів руху";
     else if (!fr.have_cb) why = "немає констант FSR 2";
     else if (!out) why = "немає виходу";
@@ -1021,20 +1035,20 @@ static void STDMETHODCALLTYPE h_Dispatch(ID3D12GraphicsCommandList *cl, UINT x, 
     case 0x77501c64360b3290ULL:   /* крок 1: глибина (t2), маска (u0) — початок кадру FSR 2 */
         AcquireSRWLockExclusive(&g_fr_lock);
         { frame_state *F = fr_get(cl); memset(F, 0, sizeof(*F)); F->cl = cl; }
-        fr_get(cl)->depth = table_find(&st, 1, DXGI_FORMAT_R32G8X24_TYPELESS, 0, 0, D_SRV);
-        if (!fr_get(cl)->depth) fr_get(cl)->depth = table_find(&st, 1, DXGI_FORMAT_R32_TYPELESS, 0, 0, D_SRV);
-        if (!fr_get(cl)->depth) fr_get(cl)->depth = table_find(&st, 1, DXGI_FORMAT_D32_FLOAT, 0, 0, D_SRV);
+        fr_get(cl)->depth = find_depth(&st);
         fr_get(cl)->reactive = table_res(&st, 2, 0, D_UAV);
         ReleaseSRWLockExclusive(&g_fr_lock);
         break;
     case 0xfacf8f57b36f482fULL:   /* крок 2: вектори руху для FSR (u0) */
         AcquireSRWLockExclusive(&g_fr_lock);
         fr_get(cl)->mv = table_res(&st, 2, 0, D_UAV);
+        if (!fr_get(cl)->depth) fr_get(cl)->depth = find_depth(&st);
         ReleaseSRWLockExclusive(&g_fr_lock);
         break;
     case 0x373b42588c9e5f23ULL:   /* крок 3: перетворена глибина (u0, R32_FLOAT) */
         AcquireSRWLockExclusive(&g_fr_lock);
         fr_get(cl)->depth_conv = table_res(&st, 2, 0, D_UAV);
+        if (!fr_get(cl)->depth) fr_get(cl)->depth = find_depth(&st);
         ReleaseSRWLockExclusive(&g_fr_lock);
         break;
     case 0x6c5793de6ada1e41ULL:   /* крок 4: колір кадру в рендер-роздільності (t0) */
@@ -1047,6 +1061,7 @@ static void STDMETHODCALLTYPE h_Dispatch(ID3D12GraphicsCommandList *cl, UINT x, 
         int ok = table_cbv(&st, 0, 0, cb, 64);
         AcquireSRWLockExclusive(&g_fr_lock);
         frame_state *F = fr_get(cl);
+        if (!F->depth) F->depth = find_depth(&st);
         if (ok) { memcpy(F->cb, cb, sizeof(cb)); F->have_cb = 1; }
         int skip = g_cfg.skip_accumulate && g_ffx_state == 1 && ok && F->color && F->mv && F->depth;
         F->accumulate_skipped = skip;
