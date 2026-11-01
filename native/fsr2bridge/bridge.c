@@ -230,7 +230,7 @@ static const uint8_t *va_to_cpu(uint64_t va, uint64_t need)
 }
 
 /* стан командного списку */
-typedef struct { void *cl; void *rs; void *pso; uint64_t tables[16]; ID3D12DescriptorHeap *heaps[2]; UINT nheaps; } cl_state;
+typedef struct { void *cl; void *rs; void *pso; uint64_t tables[16]; ID3D12DescriptorHeap *heaps[2]; UINT nheaps; void *grs; uint64_t gtables[16]; } cl_state;
 static __thread int t_in_ffx;   /* під час виклику FFX не записуємо стан (його ставить FFX) */
 #define CL_CAP 4096
 static cl_state g_cls[CL_CAP];
@@ -267,6 +267,8 @@ typedef void (STDMETHODCALLTYPE *PFN_SetComputeRoot32BitConstants)(ID3D12Graphic
 typedef void (STDMETHODCALLTYPE *PFN_SetComputeRootCBV)(ID3D12GraphicsCommandList *, UINT, D3D12_GPU_VIRTUAL_ADDRESS);
 typedef HRESULT (WINAPI *PFN_CreateRSDeserializer)(LPCVOID, SIZE_T, REFIID, void **);
 typedef void (STDMETHODCALLTYPE *PFN_SetDescriptorHeaps)(ID3D12GraphicsCommandList *, UINT, ID3D12DescriptorHeap *const *);
+typedef void (STDMETHODCALLTYPE *PFN_SetGraphicsRootSignature)(ID3D12GraphicsCommandList *, ID3D12RootSignature *);
+typedef void (STDMETHODCALLTYPE *PFN_SetGraphicsRootDescriptorTable)(ID3D12GraphicsCommandList *, UINT, D3D12_GPU_DESCRIPTOR_HANDLE);
 typedef void (STDMETHODCALLTYPE *PFN_Reset)(ID3D12GraphicsCommandList *, ID3D12CommandAllocator *, ID3D12PipelineState *);
 
 static PFN_CreateComputePSO o_CreateComputePSO;
@@ -289,6 +291,8 @@ static PFN_SetComputeRootCBV o_SetComputeRootCBV;
 static PFN_CreateRSDeserializer p_CreateRSDeserializer;
 static PFN_SetDescriptorHeaps o_SetDescriptorHeaps;
 static PFN_Reset o_Reset;
+static PFN_SetGraphicsRootSignature o_SetGraphicsRootSignature;
+static PFN_SetGraphicsRootDescriptorTable o_SetGraphicsRootDescriptorTable;
 
 static void register_pso(void *pso, const D3D12_SHADER_BYTECODE *cs)
 {
@@ -755,6 +759,19 @@ static ID3D12Resource *table_res(cl_state *st, uint32_t param, uint32_t reg_inde
     return (ID3D12Resource *)e.res;
 }
 
+/* перший ресурс потрібного формату в таблиці (рушій інколи переставляє слоти) */
+static ID3D12Resource *table_find(cl_state *st, uint32_t param, DXGI_FORMAT fmt, uint32_t w, uint32_t h, int want_kind)
+{
+    for (uint32_t i = 0; i < 16; i++) {
+        ID3D12Resource *r = table_res(st, param, i, want_kind);
+        if (!r) continue;
+        D3D12_RESOURCE_DESC d;
+        ID3D12Resource_GetDesc(r, &d);
+        if (d.Format == fmt && (!w || (d.Width == w && d.Height == h))) return r;
+    }
+    return NULL;
+}
+
 static int table_cbv(cl_state *st, uint32_t param, uint32_t reg_index, uint32_t *out, uint32_t n)
 {
     rs_info *ri = rs_find(st->rs);
@@ -828,6 +845,26 @@ static void restore_state(ID3D12GraphicsCommandList *cl, const cl_state *st)
         }
     }
     if (st->pso) o_SetPipelineState(cl, (ID3D12PipelineState *)st->pso);
+    if (st->grs) {
+        o_SetGraphicsRootSignature(cl, (ID3D12RootSignature *)st->grs);
+        rs_info *gi = rs_find(st->grs);
+        for (uint32_t i = 0; i < 16; i++) {
+            if (gi && (i >= gi->nparams || gi->p[i].type != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)) continue;
+            if (st->gtables[i]) { D3D12_GPU_DESCRIPTOR_HANDLE h; h.ptr = st->gtables[i]; o_SetGraphicsRootDescriptorTable(cl, i, h); }
+        }
+    }
+}
+
+static void STDMETHODCALLTYPE h_SetGraphicsRootSignature(ID3D12GraphicsCommandList *cl, ID3D12RootSignature *rs)
+{
+    if (!t_in_ffx) { AcquireSRWLockExclusive(&g_cl_lock); cl_get(cl)->grs = rs; ReleaseSRWLockExclusive(&g_cl_lock); }
+    o_SetGraphicsRootSignature(cl, rs);
+}
+
+static void STDMETHODCALLTYPE h_SetGraphicsRootDescriptorTable(ID3D12GraphicsCommandList *cl, UINT idx, D3D12_GPU_DESCRIPTOR_HANDLE h)
+{
+    if (idx < 16 && !t_in_ffx) { AcquireSRWLockExclusive(&g_cl_lock); cl_get(cl)->gtables[idx] = h.ptr; ReleaseSRWLockExclusive(&g_cl_lock); }
+    o_SetGraphicsRootDescriptorTable(cl, idx, h);
 }
 
 /* повертає 1, якщо крок замінено (оригінальний Dispatch не виконувати) */
@@ -910,6 +947,12 @@ static int bridge_rcas(ID3D12GraphicsCommandList *cl, cl_state *st)
     InterlockedIncrement(&g_bridged);
     if (!g_logged_first) {
         g_logged_first = 1;
+        ID3D12Resource *rr[5] = {fr.color, depth, fr.mv, out, fr.reactive};
+        const char *nn[5] = {"колір", "глибина", "вектори", "вихід", "маска"};
+        for (int i = 0; i < 5; i++) if (rr[i]) {
+            D3D12_RESOURCE_DESC d; ID3D12Resource_GetDesc(rr[i], &d);
+            LOG("міст: %s = %p %llux%u формат %d", nn[i], rr[i], (unsigned long long)d.Width, d.Height, d.Format);
+        }
         LOG("міст: перший кадр через %s: %ux%u→%ux%u jitter=(%.3f,%.3f) mvScale=(%.3f,%.3f) preExp=%.3f fov=%.1f°",
             g_ffx_version, rw, rh, dw, dh, dd.jitterOffset.x, dd.jitterOffset.y, dd.motionVectorScale.x,
             dd.motionVectorScale.y, dd.preExposure, dd.cameraFovAngleVertical * 57.2958f);
@@ -959,7 +1002,9 @@ static void STDMETHODCALLTYPE h_Dispatch(ID3D12GraphicsCommandList *cl, UINT x, 
         AcquireSRWLockExclusive(&g_fr_lock);
         memset(&g_fr, 0, sizeof(g_fr));
         g_fr.cl = cl;
-        g_fr.depth = table_res(&st, 1, 2, D_SRV);
+        g_fr.depth = table_find(&st, 1, DXGI_FORMAT_R32G8X24_TYPELESS, 0, 0, D_SRV);
+        if (!g_fr.depth) g_fr.depth = table_find(&st, 1, DXGI_FORMAT_R32_TYPELESS, 0, 0, D_SRV);
+        if (!g_fr.depth) g_fr.depth = table_find(&st, 1, DXGI_FORMAT_D32_FLOAT, 0, 0, D_SRV);
         g_fr.reactive = table_res(&st, 2, 0, D_UAV);
         ReleaseSRWLockExclusive(&g_fr_lock);
         break;
@@ -975,7 +1020,7 @@ static void STDMETHODCALLTYPE h_Dispatch(ID3D12GraphicsCommandList *cl, UINT x, 
         break;
     case 0x6c5793de6ada1e41ULL:   /* крок 4: колір кадру в рендер-роздільності (t0) */
         AcquireSRWLockExclusive(&g_fr_lock);
-        if (g_fr.cl == cl) g_fr.color = table_res(&st, 1, 0, D_SRV);
+        if (g_fr.cl == cl) g_fr.color = table_find(&st, 1, DXGI_FORMAT_R11G11B10_FLOAT, 0, 0, D_SRV);
         ReleaseSRWLockExclusive(&g_fr_lock);
         break;
     case 0xc669a9db25ea4759ULL: { /* крок 9: накопичення — константи FSR 2 (b0) */
@@ -1059,6 +1104,8 @@ static DWORD WINAPI init_thread(void *arg)
         hook((void *)cl->lpVtbl->SetPipelineState, (void *)h_SetPipelineState, (void **)&o_SetPipelineState, "SetPipelineState");
         hook((void *)cl->lpVtbl->SetDescriptorHeaps, (void *)h_SetDescriptorHeaps, (void **)&o_SetDescriptorHeaps, "SetDescriptorHeaps");
         hook((void *)cl->lpVtbl->Reset, (void *)h_Reset, (void **)&o_Reset, "Reset");
+        hook((void *)cl->lpVtbl->SetGraphicsRootSignature, (void *)h_SetGraphicsRootSignature, (void **)&o_SetGraphicsRootSignature, "SetGraphicsRootSignature");
+        hook((void *)cl->lpVtbl->SetGraphicsRootDescriptorTable, (void *)h_SetGraphicsRootDescriptorTable, (void **)&o_SetGraphicsRootDescriptorTable, "SetGraphicsRootDescriptorTable");
         hook((void *)cl->lpVtbl->Dispatch, (void *)h_Dispatch, (void **)&o_Dispatch, "Dispatch");
         hook((void *)cl->lpVtbl->SetComputeRootSignature, (void *)h_SetComputeRootSignature, (void **)&o_SetComputeRootSignature, "SetComputeRootSignature");
         hook((void *)cl->lpVtbl->SetComputeRootDescriptorTable, (void *)h_SetComputeRootDescriptorTable, (void **)&o_SetComputeRootDescriptorTable, "SetComputeRootDescriptorTable");
