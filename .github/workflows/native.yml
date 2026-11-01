@@ -5,6 +5,9 @@ on:
     paths: ["native/**", ".github/workflows/native.yml"]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -14,7 +17,12 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -y -q gcc-mingw-w64-x86-64
       - name: Build
         run: sh native/fsr2bridge/build.sh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: fsr2bridge
-          path: native/fsr2bridge/out/dinput8.dll
+      - name: Publish (pre-release fsr2bridge-dev)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cp native/fsr2bridge/out/dinput8.dll fsr2bridge-dinput8.dll
+          gh release view fsr2bridge-dev >/dev/null 2>&1 || \
+            gh release create fsr2bridge-dev --prerelease --title "FSR2 bridge (dev)" \
+              --notes "Тестові збірки моста FSR2→FSR4 для RE Engine. Не для звичайного використання."
+          gh release upload fsr2bridge-dev fsr2bridge-dinput8.dll --clobber
