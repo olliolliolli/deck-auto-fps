@@ -16,7 +16,7 @@ import {
   removeEventListener,
   toaster,
 } from "@decky/api";
-import { useEffect, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { FaTachometerAlt } from "react-icons/fa";
 import {
   WRAPPER,
@@ -131,10 +131,19 @@ type Game = { appid: number; name: string; enabled: boolean; seen: number };
 
 // Номер запиту: відповідь для попередньо вибраної гри не перезапише нову
 let readSeq = 0;
+// Вибір гри переживає закриття/відкриття меню
+let lastSelected: number | null = null;
 
-function GameLaunchSection() {
+// memo: меню оновлює статус щосекунди — цей розділ від цього не перемальовується,
+// інакше випадний список Steam скидає вибір на першу гру
+const GameLaunchSection = memo(function GameLaunchSection() {
   const [games, setGames] = useState<Game[]>([]);
-  const [appid, setAppid] = useState<number | null>(runningAppId());
+  const [appid, setAppidState] = useState<number | null>(lastSelected ?? runningAppId());
+  const setAppid = (id: number | null) => {
+    lastSelected = id;
+    setAppidState(id);
+  };
+  const [running] = useState<number | null>(runningAppId());
   const [options, setOptions] = useState<string | null>(null);
   const [readError, setReadError] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -149,8 +158,8 @@ function GameLaunchSection() {
 
   useEffect(() => {
     reloadGames().then((list) => {
-      if (runningAppId() === null && list.length) {
-        setAppid((cur) => (cur === null ? list[0].appid : cur));
+      if (lastSelected === null && runningAppId() === null && list.length) {
+        setAppid(list[0].appid);
       }
     });
   }, []);
@@ -175,15 +184,20 @@ function GameLaunchSection() {
     if (appid !== null) loadOptions(appid);
   }, [appid]);
 
-  const running = runningAppId();
   const game = games.find((g) => g.appid === appid);
-  const opts = games.map((g) => ({
-    data: g.appid,
-    label: `${g.appid === running ? "▶ " : ""}${g.enabled ? "✓ " : ""}${g.name}`,
-  }));
-  if (running !== null && !games.some((g) => g.appid === running)) {
-    opts.unshift({ data: running, label: `▶ Поточна гра (${running})` });
-  }
+  // стабільний масив опцій — змінюється лише коли змінився список ігор
+  const opts = useMemo(() => {
+    const list = games.map((g) => ({
+      data: g.appid,
+      label: `${g.appid === running ? "▶ " : ""}${g.enabled ? "✓ " : ""}${g.name}`,
+    }));
+    if (running !== null && !games.some((g) => g.appid === running)) {
+      list.unshift({ data: running, label: `▶ Поточна гра (${running})` });
+    }
+    return list;
+  }, [games, running]);
+  // якщо список змінився (з'явилась ✓), список створюється наново з правильним вибором
+  const optsKey = useMemo(() => opts.map((o) => o.label).join("|").length + ":" + opts.length, [opts]);
   const enabled = options !== null && hasWrapper(options);
 
   let statusLabel = "Читаю параметри запуску…";
@@ -223,12 +237,13 @@ function GameLaunchSection() {
     <PanelSection title="Підключення до гри">
       <PanelSectionRow>
         <DropdownItem
+          key={optsKey}
           label="Гра"
           description="✓ — AutoFPS увімкнено, ▶ — зараз запущена"
           rgOptions={opts}
           selectedOption={appid}
           strDefaultLabel={games.length ? "Виберіть гру" : "Завантаження…"}
-          onChange={(o: { data: number }) => setAppid(o.data)}
+          onChange={(o: { data: number }) => setAppid(Number(o.data))}
         />
       </PanelSectionRow>
       {appid !== null && (
@@ -264,7 +279,7 @@ function GameLaunchSection() {
       </PanelSectionRow>
     </PanelSection>
   );
-}
+});
 
 function Content() {
   const [st, setSt] = useState<Status | null>(null);
