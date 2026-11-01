@@ -22,8 +22,9 @@
 
 ## Встановлення
 
-1. Зберіть zip: `bash build.sh` на ПК з Node.js 18+ (або залийте папку на GitHub —
-   workflow у `.github` збере `AutoFPS.zip` сам).
+1. Завантажте `AutoFPS.zip` зі сторінки
+   [Releases → latest](https://github.com/olliolliolli/deck-auto-fps/releases/tag/latest)
+   (збирається автоматично при кожній зміні в `main`; або вручну: `bash build.sh`).
 2. Decky → ⚙ → увімкнути **Developer Mode** → Developer → **Install Plugin from Zip**.
 3. Для фрейм-генерації: купити **Lossless Scaling** у Steam і встановити плагін
    **Decky LSFG-VK** з магазину Decky → у ньому натиснути *Install lsfg-vk*.
