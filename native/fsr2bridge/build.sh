@@ -7,5 +7,5 @@ mkdir -p out
 MH=third_party/minhook
 $CC -O2 -s -shared -Wall -Wno-unused-function -o out/dinput8.dll diag.c dinput8.def \
   $MH/src/hook.c $MH/src/buffer.c $MH/src/trampoline.c $MH/src/hde/hde64.c \
-  -Ithird_party/directx -I$MH/include -static-libgcc -Wl,--enable-stdcall-fixup
+  -D__REQUIRED_RPCNDR_H_VERSION__=475 -D__REQUIRED_RPCSAL_H_VERSION__=100 -Ithird_party/directx -I$MH/include -static-libgcc -Wl,--enable-stdcall-fixup
 ls -la out/dinput8.dll
