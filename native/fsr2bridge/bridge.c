@@ -590,9 +590,15 @@ static struct {
     float sharpness;     /* 0..1, 0 — без додаткової різкості */
     float cam_near, cam_far;
     char want[32];       /* «4» — FSR 4, «3» — FSR 3.1, «auto» — найновіший */
+    float mvx, mvy;      /* масштаб векторів руху: множник до renderSize (1 = вектори в UV) */
+    float jx, jy;        /* знак/множник зсуву камери */
+    int jitter_src;      /* 0 — з констант FSR 2 [10,11] */
 } g_cfg = {1, FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_AUTO_EXPOSURE |
               FFX_UPSCALE_ENABLE_DEPTH_INVERTED | FFX_UPSCALE_ENABLE_DEPTH_INFINITE,
-           0, 0, 0, 0.3f, 0.1f, 10000.0f, "4"};
+           0, 0, 0, 0.5f, 0.1f, 10000.0f, "4", 1.0f, 1.0f, 1.0f, 1.0f, 0};
+static FILETIME g_cfg_mtime;
+static uint32_t g_ctx_w, g_ctx_h;   /* оголошено тут, визначено нижче (FFX) */
+static volatile LONG g_cfg_changed;
 
 static void load_cfg(void)
 {
@@ -601,6 +607,8 @@ static void load_cfg(void)
     while (n > 0 && path[n - 1] != L'\\' && path[n - 1] != L'/') n--;
     path[n] = 0;
     wcscat(path, L"autofps_fsr.ini");
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (GetFileAttributesExW(path, GetFileExInfoStandard, &fa)) g_cfg_mtime = fa.ftLastWriteTime;
     FILE *f = _wfopen(path, L"r");
     if (!f) { LOG("autofps_fsr.ini немає — типові налаштування"); return; }
     char line[256];
@@ -615,12 +623,41 @@ static void load_cfg(void)
         else if (!strcmp(k, "sharpness")) g_cfg.sharpness = (float)atof(v);
         else if (!strcmp(k, "near")) g_cfg.cam_near = (float)atof(v);
         else if (!strcmp(k, "far")) g_cfg.cam_far = (float)atof(v);
-        else if (!strcmp(k, "version")) { strncpy(g_cfg.want, v, sizeof(g_cfg.want) - 1); }
+        else if (!strcmp(k, "version")) { snprintf(g_cfg.want, sizeof(g_cfg.want), "%s", v); }
+        else if (!strcmp(k, "mv_x")) g_cfg.mvx = (float)atof(v);
+        else if (!strcmp(k, "mv_y")) g_cfg.mvy = (float)atof(v);
+        else if (!strcmp(k, "jitter_x")) g_cfg.jx = (float)atof(v);
+        else if (!strcmp(k, "jitter_y")) g_cfg.jy = (float)atof(v);
     }
     fclose(f);
-    LOG("налаштування: enable=%d flags=0x%x depth_conv=%d reactive=%d skip_accumulate=%d sharpness=%.2f near=%g far=%g version=%s",
+    LOG("налаштування: enable=%d flags=0x%x depth_conv=%d reactive=%d skip_accumulate=%d sharpness=%.2f near=%g far=%g version=%s mv=(%g,%g) jitter=(%g,%g)",
         g_cfg.enable, g_cfg.flags, g_cfg.depth_conv, g_cfg.reactive, g_cfg.skip_accumulate, g_cfg.sharpness,
-        g_cfg.cam_near, g_cfg.cam_far, g_cfg.want);
+        g_cfg.cam_near, g_cfg.cam_far, g_cfg.want, g_cfg.mvx, g_cfg.mvy, g_cfg.jx, g_cfg.jy);
+}
+
+/* перечитує autofps_fsr.ini, якщо файл змінився (налаштування на льоту, під час гри) */
+static DWORD WINAPI cfg_watch_thread(void *arg)
+{
+    (void)arg;
+    wchar_t path[MAX_PATH];
+    DWORD n = GetModuleFileNameW(NULL, path, MAX_PATH);
+    while (n > 0 && path[n - 1] != L'\\' && path[n - 1] != L'/') n--;
+    path[n] = 0;
+    wcscat(path, L"autofps_fsr.ini");
+    for (;;) {
+        Sleep(2000);
+        WIN32_FILE_ATTRIBUTE_DATA fa;
+        if (GetFileAttributesExW(path, GetFileExInfoStandard, &fa) &&
+            CompareFileTime(&fa.ftLastWriteTime, &g_cfg_mtime) != 0) {
+            uint32_t old_flags = g_cfg.flags;
+            char old_want[32]; memcpy(old_want, g_cfg.want, sizeof(old_want));
+            load_cfg();
+            LOG("налаштування оновлено на льоту");
+            if (old_flags != g_cfg.flags || strcmp(old_want, g_cfg.want)) g_ctx_w = 0;  /* перестворити контекст */
+            InterlockedExchange(&g_cfg_changed, 1);
+        }
+    }
+    return 0;
 }
 
 /* ------------------------------------------------------------------ FidelityFX API */
@@ -941,11 +978,11 @@ static int bridge_rcas(ID3D12GraphicsCommandList *cl, cl_state *st)
     dd.motionVectors = ffx_res(fr.mv, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     if (g_cfg.reactive && fr.reactive) dd.reactive = ffx_res(fr.reactive, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     dd.output = ffx_res(out, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
-    dd.jitterOffset.x = f[10];
-    dd.jitterOffset.y = f[11];
-    /* у константах FSR 2: масштаб векторів = scale / renderSize */
-    dd.motionVectorScale.x = f[24] * (float)rw;
-    dd.motionVectorScale.y = f[25] * (float)rh;
+    dd.jitterOffset.x = f[10] * g_cfg.jx;
+    dd.jitterOffset.y = f[11] * g_cfg.jy;
+    /* mv_x/mv_y — множник до renderSize: 1 — вектори в UV [0..1], 1/renderSize — у пікселях */
+    dd.motionVectorScale.x = g_cfg.mvx * (float)rw;
+    dd.motionVectorScale.y = g_cfg.mvy * (float)rh;
     dd.renderSize.width = rw; dd.renderSize.height = rh;
     dd.upscaleSize.width = dw; dd.upscaleSize.height = dh;
     dd.enableSharpening = g_cfg.sharpness > 0.0f;
@@ -953,7 +990,8 @@ static int bridge_rcas(ID3D12GraphicsCommandList *cl, cl_state *st)
     dd.frameTimeDelta = dt_ms;
     dd.preExposure = f[28] > 0.0f ? f[28] : 1.0f;
     static uint32_t last_frame_index;
-    dd.reset = fr.cb[7] < last_frame_index;   /* лічильник кадрів FSR 2 скинувся — монтажна склейка */
+    dd.reset = fr.cb[7] + 8 < last_frame_index;   /* лічильник кадрів FSR 2 скинувся — монтажна склейка */
+    if (InterlockedExchange(&g_cfg_changed, 0)) dd.reset = 1;
     last_frame_index = fr.cb[7];
     /* FFX: при оберненій глибині near > far; для нескінченної оберненої near = FLT_MAX */
     if (g_cfg.flags & FFX_UPSCALE_ENABLE_DEPTH_INVERTED) {
@@ -1205,6 +1243,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         LOG("AutoFPS FSR2→FSR4 міст (етап 3), збірка " __DATE__ " " __TIME__);
         load_cfg();
         QueryPerformanceFrequency(&g_qpf);
+        { HANDLE w = CreateThread(NULL, 0, cfg_watch_thread, NULL, 0, NULL); if (w) CloseHandle(w); }
         if (!g_pso || !g_desc || !g_rs || !g_maps) { LOG("немає пам'яті для таблиць"); return TRUE; }
         if (MH_Initialize() != MH_OK) { LOG("MH_Initialize помилка"); return TRUE; }
         HANDLE t = CreateThread(NULL, 0, init_thread, NULL, 0, NULL);
