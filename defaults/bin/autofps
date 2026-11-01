@@ -48,6 +48,14 @@ if [ "$MODE" != "safe" ] && [ -f "$DIR/autotune.py" ]; then
 fi
 TUNING="$(cat "$CACHE/tuning_now" 2>/dev/null)"
 
+# --- додаткові бібліотеки з теки гри для цієї гри (напр. міст FSR2→FSR4 як dinput8.dll):
+#     ~/.config/autofps/dlloverride_<appid> — назви через кому (лише літери/цифри/_)
+EXTRA_DLL="$(tr -cd 'a-zA-Z0-9_,' <"$CFG/dlloverride_$APPID" 2>/dev/null)"
+if [ -n "$EXTRA_DLL" ] && [ "$MODE" != "safe" ]; then
+  export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:+$WINEDLLOVERRIDES;}${EXTRA_DLL}=n,b"
+  log "додаткові бібліотеки гри: ${EXTRA_DLL}=n,b"
+fi
+
 # --- OptiScaler («DLSS» для AMD): перевірити файли в грі (після оновлення гри/OptiScaler
 #     перевстановлюється сам) і сказати Wine брати підмінну бібліотеку з теки гри
 OPTI_DLL=""; OPTI_FG=0; OPTI_METHOD=""
