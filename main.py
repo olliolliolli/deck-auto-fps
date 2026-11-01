@@ -1328,6 +1328,19 @@ class Plugin:
             log_tail = _read(os.path.join(g.get("target", ""), "OptiScaler.log")).splitlines()[-25:]
             if log_tail:
                 add("     OptiScaler.log (кінець):\n       " + "\n       ".join(log_tail))
+            if g.get("method") == "direct":
+                add(f"     FSR 4 «один файл»: {g.get('direct_variant')} файли={g.get('direct_files')} "
+                    f"спробувано={g.get('direct_tried', [])} підтверджено={g.get('direct_confirmed')}")
+            if g.get("ref"):
+                tgt = g.get("target", "")
+                add(f"     REFramework: {g.get('ref')} {g.get('ref_tag')} pd_verified={g.get('pd_verified')} "
+                    f"файли={sorted(os.listdir(tgt)) if os.path.isdir(tgt) else '-'}"[:1500])
+                for rlog in glob.glob(os.path.join(tgt, "*framework_log.txt"))[:1]:
+                    rt = _read(rlog).splitlines()[-40:]
+                    add(f"     {os.path.basename(rlog)} (кінець):\n       " + "\n       ".join(rt))
+                for plog in glob.glob(os.path.join(tgt, "reframework", "plugins", "*.log"))[:2]:
+                    add(f"     {os.path.basename(plog)}:\n       " +
+                        "\n       ".join(_read(plog).splitlines()[-20:]))
 
         sec("Режими запуску й падіння")
         add("lsfg_version: " + (_read(LSFG_VERSION_FILE) or "?") + "  fg_mode: " + (_read(FG_MODE_FILE) or "?"))
