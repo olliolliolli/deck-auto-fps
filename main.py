@@ -493,6 +493,7 @@ class Plugin:
         self.last_probe = 0.0
         self.last_apply = 0.0
         self.tuning = False       # цей запуск — крок автопідбору графіки
+        self.manual_measured = False  # фіксований FPS: замір для автопідбору вже зроблено
         self.warned_no_data = False
         self.cur_info = {}
         self.sfg = 0              # множник генерації кадрів, увімкненої обгорткою в цій сесії
@@ -850,6 +851,27 @@ class Plugin:
         mode = self.settings["mode"]
         if mode != "auto":
             base = int(mode)
+            # Крок автопідбору графіки при фіксованому FPS: спершу ~20 с замір без обмеження
+            # (з обмеженням не видно запасу), потім — вибраний рівень. Без цього підбір стояв.
+            if self.tuning and not self.manual_measured:
+                if self.phase not in ("warmup", "probe"):
+                    self.phase, self.phase_t = "warmup", now
+                if self.phase == "warmup":
+                    self.samples = []
+                    self.message = "Розігрів перед заміром графіки…"
+                    if now - self.phase_t >= float(self.settings["warmup_s"]):
+                        self._start_probe(now)
+                    return
+                if now - self.phase_t < float(self.settings["probe_s"]):
+                    return
+                fps = [x[1] for x in self.samples]
+                self.manual_measured = True
+                if len(fps) >= 10:
+                    p10 = percentile(fps, 0.10)
+                    self._record_tune(p10)
+                    self._notify("AutoFPS: графіку заміряно",
+                                 f"Гра тримає щонайменше {p10:.0f} FPS на цих налаштуваннях. "
+                                 f"Наступного запуску підберу графіку; зараз — фіксовано {base} FPS")
             if self.phase != "manual" or self.base != base:
                 self.base, self.mult = base, (self.sfg if self.sfg >= 2 else 1)
                 self.phase, self.message = "manual", f"Вручну: {base} FPS"

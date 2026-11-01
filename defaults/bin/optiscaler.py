@@ -1307,6 +1307,13 @@ def analyze(appid, started, duration, crashed=False, log=print):
         res["status"] = "crash"
         title = "DLSS: гра закрилась одразу"
         msg = switch(f"Гра закрилась через {int(duration)} с з OptiScaler ({dll})")
+    elif not info["loaded"] and game.get("dll_ok") == dll:
+        # з цією ж назвою OptiScaler уже працював — журнал міг просто не записатись;
+        # не перемикаємо назву через одну сесію без журналу
+        res["status"] = "unknown"
+        title = "DLSS: журнал OptiScaler не знайдено"
+        msg = (f"Цього разу OptiScaler не залишив журналу, хоча з {dll} уже працював. "
+               "Нічого не змінюю — перевірю наступного разу")
     elif not info["loaded"] and duration >= MIN_RUN_FOR_VERDICT:
         res["status"] = "not_loaded"
         title = "DLSS: OptiScaler не завантажився"

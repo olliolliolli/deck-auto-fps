@@ -689,6 +689,13 @@ def run(appid, args, device=None, log=print):
     scale = lowres_scale(device) if getattr(adapter, "lowres_supported", True) else None
     track = entry.get("track", "native")
     ladder = adapter.ladder(entry["original"], scale if track == "lowres" else None)
+    # Стартова сходинка задана для 12-сходинкової драбини Unreal. У коротших (RE Engine — 4–8)
+    # вона означала б «усе на мінімум» — масштабуємо пропорційно (один раз, до першого заміру).
+    if not entry.get("start_scaled") and not entry.get("history"):
+        entry["level"] = min(len(ladder) - 1,
+                             int(round(device["start_level"] * (len(ladder) - 1) / 11.0)))
+        entry.pop("last", None)
+    entry["start_scaled"] = True
     level, note = decide(entry, target, len(ladder))
 
     # Підбір на повній роздільності завершено → чи не краще ≈HD з вищою графікою?
