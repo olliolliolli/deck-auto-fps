@@ -52,6 +52,7 @@ type Settings = {
   opti_gpu_arch: string;
   opti_fg: boolean;
   ref_sharpness: string;
+  bridge_version: string;
 };
 
 type Tune = {
@@ -718,6 +719,18 @@ function OptiSection({
           ]}
           selectedOption={settings.opti_method === "optiscaler" ? "optiscaler" : "auto"}
           onChange={(o: { data: string }) => update("opti_method", o.data)}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <DropdownItem
+          label="Міст FSR 4 (Resident Evil 4)"
+          description="Чим міст замінює FSR 2 гри. FSR 4 — найкраща картинка; FSR 3.1 — на ~15% більше FPS на Legion Go S / Steam Deck. Діє одразу, навіть посеред гри"
+          rgOptions={[
+            { data: "4", label: "FSR 4 (якість)" },
+            { data: "3", label: "FSR 3.1 (швидше)" },
+          ]}
+          selectedOption={settings.bridge_version ?? "4"}
+          onChange={(o: { data: string }) => update("bridge_version", o.data)}
         />
       </PanelSectionRow>
       <PanelSectionRow>

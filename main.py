@@ -79,7 +79,8 @@ DEFAULT_SETTINGS = {
     "opti_method": "auto",     # auto (гра з FSR 3.1 → «один файл» FSR 4) | direct | optiscaler
     "opti_gpu_arch": "auto",   # auto | rdna2 | rdna3 | rdna4 — якщо автовизначення помилилось
     "opti_fg": False,
-    "ref_sharpness": "sharp",  # ігри Capcom з REFramework: sharp (рендер 77%) | native (100%) | auto          # генерація кадрів OptiScaler (тоді lsfg-vk у цій грі вимикається)
+    "ref_sharpness": "sharp",
+    "bridge_version": "4",     # міст FSR2→FSR4 (RE4): "4" — FSR 4 (краща картинка) | "3" — FSR 3.1 (+~15% FPS)  # ігри Capcom з REFramework: sharp (рендер 77%) | native (100%) | auto          # генерація кадрів OptiScaler (тоді lsfg-vk у цій грі вимикається)
 }
 
 
@@ -1051,6 +1052,14 @@ class Plugin:
             write_lsfg(self.settings, max(2, self.mult))
         if key == "fg_mode":
             self._write_fg_mode()
+        if key == "bridge_version":   # застосувати одразу, навіть посеред гри (міст перечитує ini)
+            for fn in glob.glob(os.path.join(O.games_dir(), "*.json")):
+                g = _load_json(fn, {})
+                if g.get("enabled") and g.get("method") == "bridge" and g.get("target"):
+                    try:
+                        O.bridge_set_version(g["target"], self.settings)
+                    except Exception as e:  # noqa: BLE001
+                        decky.logger.warning(f"bridge version: {e}")
         return True
 
     async def reprobe(self):

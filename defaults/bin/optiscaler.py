@@ -1219,6 +1219,7 @@ def bridge_install(appid, install_path, game_name="", args=None, settings=None, 
     if not os.path.isfile(ini) or "AutoFPS" in C.read_text(ini)[:200]:
         with open(ini, "w", encoding="utf-8") as f:
             f.write(BRIDGE_INI_TEXT)
+    bridge_set_version(target, settings)
     # ручне перевизначення з тестів більше не потрібне — його дає ensure()
     try:
         os.remove(os.path.join(C.CFG_DIR, f"dlloverride_{appid}"))
@@ -1236,8 +1237,23 @@ def bridge_install(appid, install_path, game_name="", args=None, settings=None, 
     return game
 
 
+def bridge_set_version(target, settings):
+    """Налаштування «Міст: FSR 4 / FSR 3.1» → рядок version= у autofps_fsr.ini (міст підхопить на льоту)."""
+    want = "3" if (settings or {}).get("bridge_version") == "3" else "4"
+    ini = os.path.join(target, BRIDGE_INI)
+    try:
+        text = open(ini, encoding="utf-8").read()
+    except OSError:
+        return
+    new = re.sub(r"^version=.*$", f"version={want}", text, flags=re.M)
+    if new != text:
+        with open(ini, "w", encoding="utf-8") as f:
+            f.write(new)
+
+
 def bridge_ensure(appid, game, args, settings, log=print):
     target = game.get("target") or ""
+    bridge_set_version(target, settings)
     dll = os.path.join(target, "dinput8.dll")
     missing = not _is_ours(dll) or not os.path.isfile(os.path.join(target, "amd_fidelityfx_dx12.dll"))
     newer = bridge_dll() and os.path.isfile(dll) and sha256(dll) != sha256(bridge_dll())
