@@ -4,6 +4,7 @@
 set -e
 cd "$(dirname "$0")"
 npm install --no-audit --no-fund
+npx tsc --noEmit -p .
 npm run build
 rm -rf out && mkdir -p out/AutoFPS
 cp -r dist plugin.json package.json main.py README.md LICENSE out/AutoFPS/

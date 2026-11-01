@@ -10,7 +10,9 @@ AutoFPS — Decky Loader plugin
 """
 
 import asyncio
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -99,19 +101,38 @@ def apply_display(device, fps_limit, refresh):
 
 # ------------------------------------------------------------ lsfg-vk
 
+LSFG_PROFILE = "autofps"
+
+
+def _lsfg_dll_path():
+    """Шлях до Lossless.dll з конфіга Decky LSFG-VK (якщо там вказаний)."""
+    text = _read(os.path.join(HOME, ".config", "lsfg-vk", "conf.toml"))
+    m = re.search(r'^\s*dll\s*=\s*"([^"]+)"', text, re.M)
+    return m.group(1) if m else ""
+
+
 def write_lsfg(settings, multiplier):
-    """Окремий профіль lsfg-vk (формат v1). multiplier=1 — вимкнено.
-    lsfg-vk перечитує файл на льоту, тож перемикання без рестарту гри."""
+    """Власний профіль lsfg-vk у форматі v2 (його ставить актуальний Decky LSFG-VK).
+    Обгортка гри вибирає його через LSFGVK_CONFIG + LSFGVK_PROFILE.
+    multiplier=1 — без генерації. Файл перечитується на льоту."""
     flow = max(0.25, min(1.0, float(settings["fg_flow_scale"])))
-    text = (
-        "version = 1\n"
-        "[global]\n\n"
-        "[[game]]  # керується AutoFPS\n"
-        'exe = "autofps"\n'
-        f"multiplier = {int(max(1, multiplier))}\n"
-        f"flow_scale = {flow:.2f}\n"
-        f"performance_mode = {'true' if settings['fg_performance_mode'] else 'false'}\n"
-    )
+    dll = _lsfg_dll_path()
+    lines = ["version = 2", "", "[global]"]
+    if dll:
+        lines.append(f"dll = {json.dumps(dll)}")
+    lines += [
+        "allow_fp16 = true",
+        "",
+        "[[profile]]  # керується AutoFPS",
+        f'name = "{LSFG_PROFILE}"',
+        'pacing_mode = "vsync"',
+        f"multiplier = {int(max(1, multiplier))}",
+        f"flow_scale = {flow:.2f}",
+        f"performance_mode = {'true' if settings['fg_performance_mode'] else 'false'}",
+        "override_present_mode = true",
+        "preserve_swapchain_image_count = false",
+    ]
+    text = "\n".join(lines) + "\n"
     os.makedirs(CFG_DIR, exist_ok=True)
     if _read(LSFG_CONF) != text.strip():
         with open(LSFG_CONF, "w", encoding="utf-8") as f:
@@ -407,8 +428,13 @@ class Plugin:
             self.message = "Розігрів (завантаження, шейдери)…"
 
         if not self.settings["enabled"]:
+            if self.phase != "disabled":
+                self._restore_display()  # прибрати наш ліміт FPS і FG
+                self.phase = "disabled"
             self.message = "Автоматика вимкнена"
             return
+        if self.phase == "disabled":
+            self.phase, self.phase_t = "warmup", now
 
         for fps, gpu in self.reader.read(self.game_started):
             if self.mult > 1 and self.phase == "locked" \
@@ -564,6 +590,31 @@ class Plugin:
             _save_json(GAMES_FILE, self.games)
             self._start_probe(time.time())
         return True
+
+    async def list_games(self):
+        """Встановлені ігри Steam (для кнопки «Увімкнути AutoFPS у грі»)."""
+        steam = os.path.join(HOME, ".local", "share", "Steam")
+        vdf = _read(os.path.join(steam, "steamapps", "libraryfolders.vdf"))
+        libs = {os.path.join(steam, "steamapps")}
+        for path in re.findall(r'"path"\s+"([^"]+)"', vdf):
+            libs.add(os.path.join(path.replace("\\\\", "/"), "steamapps"))
+        skip = re.compile(r"proton|steam linux runtime|steamworks common|steamvr", re.I)
+        games = {}
+        for lib in libs:
+            try:
+                names = os.listdir(lib)
+            except OSError:
+                continue
+            for fn in names:
+                if not (fn.startswith("appmanifest_") and fn.endswith(".acf")):
+                    continue
+                acf = _read(os.path.join(lib, fn))
+                appid = re.search(r'"appid"\s+"(\d+)"', acf)
+                name = re.search(r'"name"\s+"([^"]+)"', acf)
+                if appid and name and not skip.search(name.group(1)):
+                    games[appid.group(1)] = name.group(1)
+        return sorted(({"appid": int(a), "name": n} for a, n in games.items()),
+                      key=lambda g: g["name"].lower())
 
     async def forget_all(self):
         self.games = {}

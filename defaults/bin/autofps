@@ -28,11 +28,12 @@ printf '{"appid":"%s","pid":%d,"started":%d}\n' "$APPID" "$$" "$(date +%s)" \
 export MANGOHUD=1
 export MANGOHUD_CONFIG="autostart_log=1,log_interval=250,log_duration=0,output_folder=$CACHE/logs,alpha=0.0,background_alpha=0.0,font_size=1"
 
-# lsfg-vk: власний конфіг AutoFPS (v1 та v2 змінні). multiplier=1 = вимкнено.
-export LSFG_CONFIG="$CFG/lsfg-vk.toml"
-export LSFGVK_CONFIG="$CFG/lsfg-vk.toml"
-export LSFG_PROCESS="autofps"
-export ENABLE_LSFG=1
+# lsfg-vk v2 (ставить Decky LSFG-VK): наш окремий конфіг і профіль "autofps".
+# multiplier=1 у профілі = без генерації; плагін змінює його на льоту.
+if [ -f "$CFG/lsfg-vk.toml" ]; then
+  export LSFGVK_CONFIG="$CFG/lsfg-vk.toml"
+  export LSFGVK_PROFILE="autofps"
+fi
 
 if command -v mangohud >/dev/null 2>&1; then
   exec mangohud "$@"

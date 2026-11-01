@@ -30,11 +30,12 @@
    **Decky LSFG-VK** з магазину Decky → у ньому натиснути *Install lsfg-vk*.
    AutoFPS використовує встановлений шар, але свій окремий конфіг
    (`~/.config/autofps/lsfg-vk.toml`), тож налаштування не конфліктують.
-4. Для кожної гри: Властивості → Параметри запуску:
+4. Для кожної гри: меню AutoFPS → **Підключення до гри** → вибери гру → **Увімкнути AutoFPS у цій грі**.
+   Плагін сам допише в параметри запуску:
    ```
    bash ~/homebrew/plugins/AutoFPS/bin/autofps %command%
    ```
-   Не поєднуйте з `~/lsfg %command%` — обгортка AutoFPS уже вмикає lsfg-vk.
+   (інші параметри й змінні середовища зберігаються; вимкнення прибирає лише цей рядок).
 5. У швидкому меню Steam (…) → Продуктивність **вимкніть ліміт кадрів** Steam.
 
 ## Автоналаштування графіки гри (як оптимізація NVIDIA)
@@ -80,7 +81,8 @@ PlayerPrefs) підбір розпізнає як «не впливає» і з�
   `~/homebrew/logs/AutoFPS/` і `~/.cache/autofps/wrapper.log`.
 - Ліміт FPS і частота ставляться через атоми gamescope (`GAMESCOPE_FPS_LIMIT`,
   `GAMESCOPE_DYNAMIC_REFRESH`). Якщо Steam перебиває — плагін повторює кожні 5 с.
-- lsfg-vk: конфіг у форматі v1 (стабільна гілка). Для dev-збірок 2.x формат може відрізнятися.
+- lsfg-vk: конфіг у форматі v2 (його використовує актуальний Decky LSFG-VK), профіль `autofps`
+  вибирається через `LSFGVK_CONFIG` + `LSFGVK_PROFILE`; шлях до Lossless.dll береться з конфіга Decky LSFG-VK.
 - Якщо MangoHud рахує FPS до фрейм-генерації, вимкніть `fps_counts_generated`
   у `~/.config/autofps/settings.json`.
 - TDP плагін не чіпає — для цього є SimpleDeckyTDP / вбудований слайдер.

@@ -268,7 +268,9 @@ class UnityAdapter:
         return f"[software\\\\{self.company}\\\\{self.product}]".lower()
 
     def _section(self, reg):
-        lines = C.read_text(reg).splitlines()
+        # читаємо без strip(): індекси рядків мають збігатися з write()
+        with open(reg, encoding="utf-8", errors="ignore") as f:
+            lines = f.read().split("\n")
         hdr = self._header()
         for i, line in enumerate(lines):
             if line.lower().startswith(hdr):
@@ -282,7 +284,10 @@ class UnityAdapter:
         out = {}
         if self.windows:
             span = self._section(cfg)
-            lines = C.read_text(cfg).splitlines()
+            if not span:
+                return out
+            with open(cfg, encoding="utf-8", errors="ignore") as f:
+                lines = f.read().split("\n")
             for name, key in UNITY_KEYS.items():
                 pref = f'"{unity_hash(key)}"=dword:'
                 for line in lines[span[0]:span[1]]:
@@ -450,7 +455,7 @@ def run(appid, args, device=None, log=print):
 
     adapter = None
     for A in ADAPTERS:
-        if (entry.get("engine") in (None, A.engine)) and A.detect(install):
+        if entry.get("engine") in (None, "unknown", A.engine) and A.detect(install):
             adapter = A(install, compat, device)
             break
     if not adapter:

@@ -4,6 +4,7 @@ import {
   Field,
   PanelSection,
   PanelSectionRow,
+  Router,
   SliderField,
   ToggleField,
   staticClasses,
@@ -11,6 +12,15 @@ import {
 import { callable, definePlugin, toaster } from "@decky/api";
 import { useEffect, useState } from "react";
 import { FaTachometerAlt } from "react-icons/fa";
+import {
+  WRAPPER,
+  addWrapper,
+  copyText,
+  hasWrapper,
+  readLaunchOptions,
+  removeWrapper,
+  writeLaunchOptions,
+} from "./launchOptions";
 
 type Settings = {
   enabled: boolean;
@@ -67,6 +77,7 @@ const setSetting = callable<[key: string, value: unknown], boolean>("set_setting
 const reprobe = callable<[], boolean>("reprobe");
 const forgetAll = callable<[], boolean>("forget_all");
 const retune = callable<[], boolean>("retune");
+const listGames = callable<[], { appid: number; name: string }[]>("list_games");
 const restoreOriginal = callable<[], boolean>("restore_original");
 
 const ENGINE: Record<string, string> = {
@@ -90,6 +101,112 @@ const PHASE: Record<string, string> = {
   locked: "стабільно",
   manual: "вручну",
 };
+
+function runningAppId(): number | null {
+  const app = (Router as any).MainRunningApp;
+  const id = Number(app?.appid);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+function GameLaunchSection() {
+  const [games, setGames] = useState<{ appid: number; name: string }[]>([]);
+  const [appid, setAppid] = useState<number | null>(runningAppId());
+  const [options, setOptions] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    listGames()
+      .then((list) => {
+        setGames(list);
+        if (appid === null && list.length) setAppid(list[0].appid);
+      })
+      .catch(() => setGames([]));
+  }, []);
+
+  useEffect(() => {
+    if (appid === null) return;
+    setOptions(null);
+    readLaunchOptions(appid)
+      .then(setOptions)
+      .catch(() => setOptions(""));
+  }, [appid]);
+
+  const running = runningAppId();
+  const opts = games.map((g) => ({
+    data: g.appid,
+    label: (g.appid === running ? "▶ " : "") + g.name,
+  }));
+  if (running !== null && !games.some((g) => g.appid === running)) {
+    opts.unshift({ data: running, label: `▶ Поточна гра (${running})` });
+  }
+  const enabled = options !== null && hasWrapper(options);
+
+  const toggle = async () => {
+    if (appid === null || options === null) return;
+    setBusy(true);
+    const next = enabled ? removeWrapper(options) : addWrapper(options);
+    try {
+      const ok = await writeLaunchOptions(appid, next);
+      setOptions(await readLaunchOptions(appid));
+      toaster.toast({
+        title: "AutoFPS",
+        body: ok
+          ? enabled
+            ? "Вимкнено для гри"
+            : "Увімкнено. Діє з наступного запуску гри"
+          : "Steam не зберіг параметри запуску",
+      });
+    } catch (e) {
+      toaster.toast({ title: "AutoFPS", body: `Помилка: ${String(e)}` });
+    }
+    setBusy(false);
+  };
+
+  return (
+    <PanelSection title="Підключення до гри">
+      <PanelSectionRow>
+        <DropdownItem
+          label="Гра"
+          rgOptions={opts}
+          selectedOption={appid}
+          strDefaultLabel={games.length ? "Виберіть гру" : "Завантаження…"}
+          onChange={(o: { data: number }) => setAppid(o.data)}
+        />
+      </PanelSectionRow>
+      {appid !== null && (
+        <PanelSectionRow>
+          <Field
+            label={options === null ? "Читаю параметри запуску…" : enabled ? "AutoFPS увімкнено" : "AutoFPS не увімкнено"}
+            description={options ? `Параметри: ${options}` : "Параметрів запуску немає"}
+          />
+        </PanelSectionRow>
+      )}
+      {appid !== null && options !== null && (
+        <PanelSectionRow>
+          <ButtonItem layout="below" disabled={busy} onClick={toggle}>
+            {enabled ? "Вимкнути AutoFPS у цій грі" : "Увімкнути AutoFPS у цій грі"}
+          </ButtonItem>
+        </PanelSectionRow>
+      )}
+      <PanelSectionRow>
+        <ButtonItem
+          layout="below"
+          onClick={() => {
+            const ok = copyText(`${WRAPPER} %command%`);
+            toaster.toast({
+              title: "AutoFPS",
+              body: ok
+                ? "Параметр запуску скопійовано"
+                : "Steam не дав скопіювати — скористайтеся кнопкою «Увімкнути AutoFPS у цій грі»",
+            });
+          }}
+        >
+          Скопіювати параметр запуску
+        </ButtonItem>
+      </PanelSectionRow>
+    </PanelSection>
+  );
+}
 
 function Content() {
   const [st, setSt] = useState<Status | null>(null);
@@ -176,6 +293,8 @@ function Content() {
           </PanelSectionRow>
         )}
       </PanelSection>
+
+      <GameLaunchSection />
 
       <PanelSection title="Режим">
         <PanelSectionRow>
@@ -311,24 +430,7 @@ function Content() {
         </PanelSectionRow>
       </PanelSection>
 
-      <PanelSection title="Налаштування гри">
-        <PanelSectionRow>
-          <Field
-            label="Параметр запуску"
-            description={st.launch_option}
-          />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            onClick={() => {
-              navigator.clipboard?.writeText(st.launch_option);
-              toaster.toast({ title: "AutoFPS", body: "Параметр запуску скопійовано" });
-            }}
-          >
-            Скопіювати параметр запуску
-          </ButtonItem>
-        </PanelSectionRow>
+      <PanelSection title="Інше">
         <PanelSectionRow>
           <Field
             label="Порада"
