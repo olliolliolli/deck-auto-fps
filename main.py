@@ -31,6 +31,7 @@ HOME = C.HOME
 CFG_DIR, CACHE_DIR, LOG_DIR = C.CFG_DIR, C.CACHE_DIR, C.LOG_DIR
 CURRENT_FILE, SETTINGS_FILE, GAMES_FILE = C.CURRENT_FILE, C.SETTINGS_FILE, C.GAMES_FILE
 TUNE_FILE, LSFG_CONF, PROFILES_DIR = C.TUNE_FILE, C.LSFG_CONF, C.PROFILES_DIR
+APPS_FILE = os.path.join(CFG_DIR, "apps.json")  # {appid: {"enabled": bool, "seen": ts}}
 
 _read, _load_json, _save_json = C.read_text, C.load_json, C.save_json
 percentile, detect_device = C.percentile, C.detect_device
@@ -561,6 +562,7 @@ class Plugin:
             self.game_started = float(cur.get("started", now))
             self.phase, self.phase_t = "warmup", now
             self.last_appid = self.appid
+            self._mark_app(self.appid, seen=int(now))
             self.tuning = self._tuning_active(self._tune_entry())
             self.message = "Розігрів (завантаження, шейдери)…"
             if self.settings["enabled"]:
@@ -749,6 +751,22 @@ class Plugin:
             self._start_probe(time.time())
         return True
 
+    def _mark_app(self, appid, enabled=None, seen=None):
+        if not appid or str(appid) == "0":
+            return
+        apps = _load_json(APPS_FILE, {})
+        e = apps.setdefault(str(appid), {})
+        if enabled is not None:
+            e["enabled"] = bool(enabled)
+        if seen is not None:
+            e["seen"] = seen
+        _save_json(APPS_FILE, apps)
+
+    async def set_game_enabled(self, appid, enabled):
+        """Фронтенд повідомляє, що змінив параметри запуску гри."""
+        self._mark_app(appid, enabled=enabled)
+        return True
+
     async def list_games(self):
         """Встановлені ігри Steam (для кнопки «Увімкнути AutoFPS у грі»)."""
         libs = _steam_libraries()
@@ -767,8 +785,14 @@ class Plugin:
                 name = re.search(r'"name"\s+"([^"]+)"', acf)
                 if appid and name and not skip.search(name.group(1)):
                     games[appid.group(1)] = name.group(1)
-        return sorted(({"appid": int(a), "name": n} for a, n in games.items()),
-                      key=lambda g: g["name"].lower())
+        apps = _load_json(APPS_FILE, {})
+        out = []
+        for a, n in games.items():
+            info = apps.get(a, {})
+            out.append({"appid": int(a), "name": n,
+                        "enabled": bool(info.get("enabled")),
+                        "seen": int(info.get("seen", 0))})
+        return sorted(out, key=lambda g: g["name"].lower())
 
     async def forget_all(self):
         self.games = {}

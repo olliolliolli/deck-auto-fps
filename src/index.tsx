@@ -84,7 +84,8 @@ const setSetting = callable<[key: string, value: unknown], boolean>("set_setting
 const reprobe = callable<[], boolean>("reprobe");
 const forgetAll = callable<[], boolean>("forget_all");
 const retune = callable<[], boolean>("retune");
-const listGames = callable<[], { appid: number; name: string }[]>("list_games");
+const listGames = callable<[], Game[]>("list_games");
+const setGameEnabled = callable<[appid: number, enabled: boolean], boolean>("set_game_enabled");
 const restoreOriginal = callable<[], boolean>("restore_original");
 
 const ENGINE: Record<string, string> = {
@@ -122,56 +123,94 @@ function runningAppId(): number | null {
   return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
+type Game = { appid: number; name: string; enabled: boolean; seen: number };
+
+// Номер запиту: відповідь для попередньо вибраної гри не перезапише нову
+let readSeq = 0;
+
 function GameLaunchSection() {
-  const [games, setGames] = useState<{ appid: number; name: string }[]>([]);
+  const [games, setGames] = useState<Game[]>([]);
   const [appid, setAppid] = useState<number | null>(runningAppId());
   const [options, setOptions] = useState<string | null>(null);
+  const [readError, setReadError] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
+  const reloadGames = () =>
     listGames()
       .then((list) => {
         setGames(list);
-        if (appid === null && list.length) setAppid(list[0].appid);
+        return list;
       })
-      .catch(() => setGames([]));
-  }, []);
+      .catch(() => [] as Game[]);
 
   useEffect(() => {
-    if (appid === null) return;
+    reloadGames().then((list) => {
+      if (runningAppId() === null && list.length) {
+        setAppid((cur) => (cur === null ? list[0].appid : cur));
+      }
+    });
+  }, []);
+
+  const loadOptions = (id: number) => {
+    const seq = ++readSeq;
     setOptions(null);
-    readLaunchOptions(appid)
-      .then(setOptions)
-      .catch(() => setOptions(""));
+    setReadError(false);
+    readLaunchOptions(id)
+      .then((o) => {
+        if (seq === readSeq) setOptions(o);
+      })
+      .catch(() => {
+        if (seq === readSeq) {
+          setReadError(true);
+          setOptions("");
+        }
+      });
+  };
+
+  useEffect(() => {
+    if (appid !== null) loadOptions(appid);
   }, [appid]);
 
   const running = runningAppId();
+  const game = games.find((g) => g.appid === appid);
   const opts = games.map((g) => ({
     data: g.appid,
-    label: (g.appid === running ? "▶ " : "") + g.name,
+    label: `${g.appid === running ? "▶ " : ""}${g.enabled ? "✓ " : ""}${g.name}`,
   }));
   if (running !== null && !games.some((g) => g.appid === running)) {
     opts.unshift({ data: running, label: `▶ Поточна гра (${running})` });
   }
   const enabled = options !== null && hasWrapper(options);
 
+  let statusLabel = "Читаю параметри запуску…";
+  if (options !== null) {
+    statusLabel = enabled ? "✓ AutoFPS увімкнено" : "AutoFPS не увімкнено";
+    if (readError) statusLabel = "⚠ Steam не віддав параметри запуску";
+  }
+  const seenText = game?.seen
+    ? `Останній запуск з AutoFPS: ${new Date(game.seen * 1000).toLocaleString()}`
+    : "З AutoFPS ще не запускалася";
+
   const toggle = async () => {
-    if (appid === null || options === null) return;
+    if (appid === null) return;
     setBusy(true);
-    const next = enabled ? removeWrapper(options) : addWrapper(options);
     try {
+      // перечитуємо саме цю гру безпосередньо перед зміною
+      const current = await readLaunchOptions(appid);
+      const turnOn = !hasWrapper(current);
+      const next = turnOn ? addWrapper(current) : removeWrapper(current);
       const ok = await writeLaunchOptions(appid, next);
-      setOptions(await readLaunchOptions(appid));
+      if (ok) await setGameEnabled(appid, turnOn);
+      await reloadGames();
+      loadOptions(appid);
       toaster.toast({
         title: "AutoFPS",
         body: ok
-          ? enabled
-            ? "Вимкнено для гри"
-            : "Увімкнено. Діє з наступного запуску гри"
+          ? `${game?.name ?? appid}: ${turnOn ? "увімкнено, діє з наступного запуску" : "вимкнено"}`
           : "Steam не зберіг параметри запуску",
       });
     } catch (e) {
-      toaster.toast({ title: "AutoFPS", body: `Помилка: ${String(e)}` });
+      toaster.toast({ title: "AutoFPS", body: `Не вдалося прочитати параметри гри: ${String(e)}` });
     }
     setBusy(false);
   };
@@ -181,6 +220,7 @@ function GameLaunchSection() {
       <PanelSectionRow>
         <DropdownItem
           label="Гра"
+          description="✓ — AutoFPS увімкнено, ▶ — зараз запущена"
           rgOptions={opts}
           selectedOption={appid}
           strDefaultLabel={games.length ? "Виберіть гру" : "Завантаження…"}
@@ -190,8 +230,8 @@ function GameLaunchSection() {
       {appid !== null && (
         <PanelSectionRow>
           <Field
-            label={options === null ? "Читаю параметри запуску…" : enabled ? "AutoFPS увімкнено" : "AutoFPS не увімкнено"}
-            description={options ? `Параметри: ${options}` : "Параметрів запуску немає"}
+            label={statusLabel}
+            description={`${options ? `Параметри: ${options}` : "Параметрів запуску немає"}\n${seenText}`}
           />
         </PanelSectionRow>
       )}

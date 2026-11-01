@@ -30,6 +30,7 @@ export function readLaunchOptions(appid: number): Promise<string> {
   return new Promise((resolve, reject) => {
     let done = false;
     let reg: { unregister?: () => void } | undefined;
+    let candidate: string | null = null; // дані без номера гри — лише як запасний варіант
     const finish = (err: Error | null, value = "") => {
       if (done) return;
       done = true;
@@ -38,11 +39,19 @@ export function readLaunchOptions(appid: number): Promise<string> {
       window.setTimeout(() => reg?.unregister?.(), 0);
       err ? reject(err) : resolve(value);
     };
-    const timer = window.setTimeout(() => finish(new Error("Steam не відповів")), 5000);
+    const timer = window.setTimeout(
+      () => (candidate !== null ? finish(null, candidate) : finish(new Error("Steam не відповів"))),
+      3000,
+    );
     try {
-      reg = SteamClient.Apps.RegisterForAppDetails(appid, (d: any) =>
-        finish(null, d?.strLaunchOptions ?? ""),
-      );
+      reg = SteamClient.Apps.RegisterForAppDetails(appid, (d: any) => {
+        if (!d) return;
+        const opts = typeof d.strLaunchOptions === "string" ? d.strLaunchOptions : "";
+        const id = Number(d.unAppID);
+        if (id === appid) finish(null, opts);
+        else if (!id) candidate = opts;
+        // дані іншої гри ігноруємо
+      });
     } catch (e) {
       finish(e instanceof Error ? e : new Error(String(e)));
     }
