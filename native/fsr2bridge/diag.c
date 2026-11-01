@@ -58,14 +58,20 @@ static void open_log(void)
 
 /* ------------------------------------------------------------------ налаштування вікна заміру */
 
-static DWORD g_win_start_ms = 45000;  /* почати запис Dispatch через стільки мс після старту */
-static DWORD g_win_len_ms = 3000;     /* і писати стільки мс */
-static LONG g_max_lines = 60000;
+/* Запис Dispatch вікнами: перше через 60 с після старту, далі щохвилини по 2.5 с, 6 разів —
+   щоб хоч одне вікно точно припало на гру з увімкненим FSR 2, а не на меню. */
+static DWORD g_win_start_ms = 60000;
+static DWORD g_win_len_ms = 2500;
+static DWORD g_win_period_ms = 60000;
+static DWORD g_win_count = 6;
+static LONG g_max_lines = 150000;
 
 static int in_window(void)
 {
     DWORD t = GetTickCount() - g_t0;
-    return t >= g_win_start_ms && t < g_win_start_ms + g_win_len_ms && g_lines < g_max_lines;
+    if (t < g_win_start_ms || g_lines >= g_max_lines) return 0;
+    DWORD k = (t - g_win_start_ms) / g_win_period_ms;
+    return k < g_win_count && (t - g_win_start_ms) % g_win_period_ms < g_win_len_ms;
 }
 
 /* ------------------------------------------------------------------ таблиці (вказівник → значення) */
@@ -441,8 +447,9 @@ static DWORD WINAPI init_thread(void *arg)
         hook((void *)queue->lpVtbl->ExecuteCommandLists, (void *)h_ExecuteCommandLists, (void **)&o_ExecuteCommandLists, "ExecuteCommandLists");
 
     MH_STATUS s = MH_EnableHook(MH_ALL_HOOKS);
-    LOG("MH_EnableHook = %d; вікно запису Dispatch: %lu..%lu мс", (int)s,
-        (unsigned long)g_win_start_ms, (unsigned long)(g_win_start_ms + g_win_len_ms));
+    LOG("MH_EnableHook = %d; запис Dispatch: з %lu мс, кожні %lu мс по %lu мс, %lu разів", (int)s,
+        (unsigned long)g_win_start_ms, (unsigned long)g_win_period_ms, (unsigned long)g_win_len_ms,
+        (unsigned long)g_win_count);
 
     if (cl) ID3D12GraphicsCommandList_Release(cl);
     if (alloc) ID3D12CommandAllocator_Release(alloc);
