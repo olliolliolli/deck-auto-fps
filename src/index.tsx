@@ -85,6 +85,10 @@ const reprobe = callable<[], boolean>("reprobe");
 const forgetAll = callable<[], boolean>("forget_all");
 const retune = callable<[], boolean>("retune");
 const listGames = callable<[], Game[]>("list_games");
+const collectDiagnostics = callable<
+  [],
+  { ok: boolean; path?: string; size?: number; error?: string }
+>("collect_diagnostics");
 const setGameEnabled = callable<[appid: number, enabled: boolean], boolean>("set_game_enabled");
 const restoreOriginal = callable<[], boolean>("restore_original");
 
@@ -497,6 +501,31 @@ function Content() {
             </PanelSectionRow>
           ))
         )}
+      </PanelSection>
+
+      <PanelSection title="Діагностика">
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            onClick={async () => {
+              const r = await collectDiagnostics();
+              toaster.toast({
+                title: "AutoFPS",
+                body: r.ok
+                  ? `Збережено ${r.path}. Надішли цей файл у чат з Claude`
+                  : `Не вдалося: ${r.error}`,
+              });
+            }}
+          >
+            Зібрати діагностику
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <Field
+            label="Як надіслати"
+            description="Файл ~/autofps-diagnostics.txt (тека «Домашня»). Найкраще зібрати під час або одразу після гри. Режим робочого столу → браузер → claude.ai → прикріпити файл до чату."
+          />
+        </PanelSectionRow>
       </PanelSection>
 
       <PanelSection title="Інше">

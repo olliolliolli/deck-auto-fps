@@ -10,6 +10,7 @@ AutoFPS — Decky Loader plugin
 """
 
 import asyncio
+import glob
 import json
 import os
 import re
@@ -793,6 +794,147 @@ class Plugin:
                         "enabled": bool(info.get("enabled")),
                         "seen": int(info.get("seen", 0))})
         return sorted(out, key=lambda g: g["name"].lower())
+
+    # ---------------- діагностика
+
+    def _diagnostics_text(self):
+        out = []
+
+        def sec(title):
+            out.append(f"\n===== {title} =====")
+
+        def add(text):
+            out.append(text if isinstance(text, str) else json.dumps(text, indent=2, ensure_ascii=False))
+
+        def tail(path, n):
+            try:
+                with open(path, encoding="utf-8", errors="ignore") as f:
+                    return "".join(f.readlines()[-n:])
+            except OSError as e:
+                return f"(немає: {e.__class__.__name__})"
+
+        def run(cmd):
+            try:
+                r = subprocess.run(cmd, env=_clean_env(), capture_output=True, text=True, timeout=3)
+                return (r.stdout + r.stderr).strip() or f"(код {r.returncode}, без виводу)"
+            except Exception as e:  # noqa: BLE001
+                return f"(помилка: {e})"
+
+        meta = _load_json(os.path.join(_PLUGIN_DIR, "package.json"), {})
+        add(f"AutoFPS diagnostics · версія {meta.get('version', '?')} · "
+            f"{time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+        sec("Пристрій")
+        dmi = {k: _read(f"/sys/class/dmi/id/{k}") for k in
+               ("sys_vendor", "product_name", "product_family", "product_version", "board_name")}
+        add(dmi)
+        add({k: v for k, v in self.device.items()})
+        osr = _read("/etc/os-release")
+        add("\n".join(l for l in osr.splitlines()
+                      if l.split("=")[0] in ("PRETTY_NAME", "VERSION_ID", "BUILD_ID", "VARIANT_ID")))
+        add(f"kernel: {_read('/proc/sys/kernel/osrelease')}")
+        add(f"python: {sys.version.split()[0]}  uid: {os.getuid()}")
+
+        sec("Інструменти")
+        for tool in ("xprop", "mangohud", "gamescope", "python3"):
+            add(f"{tool}: {shutil.which(tool) or 'НЕ ЗНАЙДЕНО'}")
+
+        sec("Gamescope (читання атомів)")
+        xprop = shutil.which("xprop") or "/usr/bin/xprop"
+        add(run([xprop, "-root", "GAMESCOPE_FPS_LIMIT", "GAMESCOPE_DYNAMIC_REFRESH",
+                 "GAMESCOPE_FOCUSED_APP"]))
+
+        sec("Фрейм-генерація")
+        add(lsfg_status())
+        add("Vulkan implicit layers:")
+        for d in _layer_dirs():
+            try:
+                add(f"  {d}: {sorted(os.listdir(d))}")
+            except OSError:
+                pass
+        add("--- конфіг AutoFPS для lsfg-vk ---")
+        add(_read(LSFG_CONF) or "(немає)")
+        their = _read(os.path.join(HOME, ".config", "lsfg-vk", "conf.toml"))
+        add("--- conf.toml Decky LSFG-VK (перші 15 рядків) ---")
+        add("\n".join(their.splitlines()[:15]) or "(немає)")
+
+        sec("Налаштування AutoFPS")
+        add(self.settings)
+
+        sec("Поточний стан")
+        add({"appid": self.appid, "last_appid": getattr(self, "last_appid", None),
+             "phase": self.phase, "base": self.base, "mult": self.mult,
+             "native_p10": round(self.native_p10, 1), "message": self.message,
+             "samples_in_memory": len(self.samples)})
+        add("Журнал:")
+        for e in getattr(self, "events", []):
+            add(f"  {time.strftime('%H:%M:%S', time.localtime(e['t']))} {e['title']} — {e['body']}")
+        add("current.json: " + (_read(CURRENT_FILE) or "(немає)"))
+
+        sec("Ігри")
+        add({"apps.json": _load_json(APPS_FILE, {}), "games.json": self.games})
+        tune = _load_json(TUNE_FILE, {})
+        for e in tune.values():
+            e.pop("original", None)  # великий і не потрібен
+        add({"tune.json": tune})
+
+        sec("Параметри запуску Steam з AutoFPS (localconfig.vdf)")
+        found = False
+        for vdf in glob.glob(os.path.join(HOME, ".local/share/Steam/userdata/*/config/localconfig.vdf")):
+            last_id = None
+            for line in _read(vdf).splitlines():
+                m = re.match(r'\s*"(\d+)"\s*$', line)
+                if m:
+                    last_id = m.group(1)
+                m = re.match(r'\s*"LaunchOptions"\s+"(.*)"\s*$', line)
+                if m and ("autofps" in m.group(1).lower() or "lsfg" in m.group(1).lower()
+                          or "mako" in m.group(1).lower()):
+                    add(f"  {last_id}: {m.group(1)}")
+                    found = True
+        if not found:
+            add("  (не знайдено; Steam може записати зміни у файл пізніше)")
+
+        sec("wrapper.log (останні 80 рядків)")
+        add(tail(os.path.join(CACHE_DIR, "wrapper.log"), 80))
+
+        sec("Лог MangoHud (останній)")
+        try:
+            logs = sorted((os.path.join(LOG_DIR, f) for f in os.listdir(LOG_DIR)
+                           if f.endswith(".csv")), key=os.path.getmtime)
+        except OSError:
+            logs = []
+        if logs:
+            last = logs[-1]
+            add(f"{os.path.basename(last)} · {os.path.getsize(last)} байт · "
+                f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(last)))}"
+                f" · всього логів: {len(logs)}")
+            lines = _read(last).splitlines()
+            add("\n".join(lines[:6] + ["…"] + lines[-15:]))
+        else:
+            add("(логів немає — MangoHud нічого не записав)")
+
+        sec("Лог Decky для AutoFPS (останні 120 рядків)")
+        dlogs = sorted(glob.glob(os.path.join(HOME, "homebrew/logs/AutoFPS/*.log")),
+                       key=os.path.getmtime)
+        add(tail(dlogs[-1], 120) if dlogs else "(немає)")
+
+        text = "\n".join(out)
+        # приватність: домашню теку й номер акаунта Steam прибираємо
+        text = text.replace(HOME, "~")
+        text = re.sub(r"userdata/\d+", "userdata/<id>", text)
+        return text
+
+    async def collect_diagnostics(self):
+        path = os.path.join(HOME, "autofps-diagnostics.txt")
+        try:
+            text = self._diagnostics_text()
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text + "\n")
+            return {"ok": True, "path": "~/autofps-diagnostics.txt",
+                    "size": len(text.encode("utf-8"))}
+        except Exception as e:  # noqa: BLE001
+            decky.logger.error(f"diagnostics failed: {e}")
+            return {"ok": False, "error": str(e)}
 
     async def forget_all(self):
         self.games = {}
