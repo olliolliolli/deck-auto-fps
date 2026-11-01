@@ -9,7 +9,13 @@ import {
   ToggleField,
   staticClasses,
 } from "@decky/ui";
-import { callable, definePlugin, toaster } from "@decky/api";
+import {
+  addEventListener,
+  callable,
+  definePlugin,
+  removeEventListener,
+  toaster,
+} from "@decky/api";
 import { useEffect, useState } from "react";
 import { FaTachometerAlt } from "react-icons/fa";
 import {
@@ -42,7 +48,7 @@ type Settings = {
 type Tune = {
   appid: string;
   engine: string | null;
-  state: "tuning" | "done" | "cpu" | "off" | "wait";
+  state: "tuning" | "done" | "cpu" | "off" | "wait" | "user";
   level: number | null;
   steps: number | null;
   note: string;
@@ -67,8 +73,9 @@ type Status = {
   fps_now: number | null;
   native_p10: number;
   message: string;
-  lsfg: boolean;
+  lsfg: { ready: boolean; hint: string; layers: string[]; plugins: string[]; dll: string };
   tune: Tune | null;
+  events: { t: number; title: string; body: string }[];
   launch_option: string;
 };
 
@@ -92,6 +99,7 @@ const TUNE_STATE: Record<string, string> = {
   cpu: "не впливає на FPS",
   off: "вимкнено для гри",
   wait: "очікує",
+  user: "твої налаштування",
 };
 
 const PHASE: Record<string, string> = {
@@ -100,7 +108,13 @@ const PHASE: Record<string, string> = {
   probe: "вимірювання",
   locked: "стабільно",
   manual: "вручну",
+  disabled: "вимкнено",
 };
+
+function hhmm(t: number): string {
+  const d = new Date(t * 1000);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
 
 function runningAppId(): number | null {
   const app = (Router as any).MainRunningApp;
@@ -373,14 +387,12 @@ function Content() {
       </PanelSection>
 
       <PanelSection title="Фрейм-генерація (lsfg-vk)">
-        {!st.lsfg && (
-          <PanelSectionRow>
-            <Field
-              label="lsfg-vk не знайдено"
-              description="Встановіть плагін «Decky LSFG-VK» з магазину Decky і натисніть у ньому Install lsfg-vk (потрібен Lossless Scaling у Steam)."
-            />
-          </PanelSectionRow>
-        )}
+        <PanelSectionRow>
+          <Field
+            label={st.lsfg.ready ? "✓ Готово" : "⚠ Не готово"}
+            description={st.lsfg.hint}
+          />
+        </PanelSectionRow>
         <PanelSectionRow>
           <DropdownItem
             label="Режим"
@@ -430,6 +442,23 @@ function Content() {
         </PanelSectionRow>
       </PanelSection>
 
+      <PanelSection title="Що зробив AutoFPS">
+        {st.events.length === 0 ? (
+          <PanelSectionRow>
+            <Field
+              label="Ще нічого"
+              description="Запусти гру, підключену до AutoFPS, — тут з'являться всі зміни"
+            />
+          </PanelSectionRow>
+        ) : (
+          st.events.slice(0, 6).map((e, i) => (
+            <PanelSectionRow key={`${e.t}-${i}`}>
+              <Field label={`${hhmm(e.t)} · ${e.title.replace(/^AutoFPS:?\s*/, "")}`} description={e.body} />
+            </PanelSectionRow>
+          ))
+        )}
+      </PanelSection>
+
       <PanelSection title="Інше">
         <PanelSectionRow>
           <Field
@@ -447,10 +476,44 @@ function Content() {
   );
 }
 
-export default definePlugin(() => ({
+export default definePlugin(() => {
+  // Сповіщення від бекенда показуємо навіть коли меню плагіна закрите
+  const onToast = (title: string, body: string) => toaster.toast({ title, body });
+  addEventListener<[string, string]>("autofps_toast", onToast);
+
+  // Гра запущена, але не через AutoFPS — підказуємо один раз
+  const warned = new Set<number>();
+  let seenSince: Record<number, number> = {};
+  const watch = window.setInterval(async () => {
+    const running = runningAppId();
+    if (running === null) {
+      seenSince = {};
+      return;
+    }
+    seenSince[running] ??= Date.now();
+    if (warned.has(running) || Date.now() - seenSince[running] < 20000) return;
+    try {
+      const status = await getStatus();
+      if (status.appid === null) {
+        warned.add(running);
+        toaster.toast({
+          title: "AutoFPS не працює в цій грі",
+          body: "Гру запущено без AutoFPS. Відкрий меню плагіна → Підключення до гри → Увімкнути, і перезапусти гру",
+        });
+      }
+    } catch {
+      /* бекенд недоступний */
+    }
+  }, 5000);
+
+  return {
   name: "AutoFPS",
   titleView: <div className={staticClasses.Title}>AutoFPS</div>,
   content: <Content />,
   icon: <FaTachometerAlt />,
-  onDismount() {},
-}));
+  onDismount() {
+    removeEventListener("autofps_toast", onToast);
+    window.clearInterval(watch);
+  },
+  };
+});

@@ -145,6 +145,19 @@ def _drop_lines(path, pred):
         f.writelines(line for line in lines if not pred(line.strip()))
 
 
+def changed_by_user(applied, current):
+    """Чи змінено значення, які ми записали минулого разу (у меню гри)."""
+    for k, v in applied.items():
+        if k in current:
+            try:
+                if abs(float(current[k]) - float(v)) > 0.01:
+                    return True
+            except (TypeError, ValueError):
+                if str(current[k]) != str(v):
+                    return True
+    return False
+
+
 def backup_once(path):
     bak = path + ".autofps.bak"
     if os.path.isfile(path) and not os.path.exists(bak):
@@ -216,8 +229,20 @@ class UnrealAdapter:
         drop = [k for k in UE_KEYS if k not in original]
         _drop_lines(cfg, lambda s: s.split("=", 1)[0].strip() in drop)
 
+    def comparable(self, values):
+        return dict(values)
+
     def describe(self, values):
-        return f"роздільність {values.get('sg.ResolutionQuality', '?')}%, тіні {values.get('sg.ShadowQuality', '?')}/3"
+        lvl = ["низькі", "середні", "високі", "ультра"]
+
+        def q(key):
+            try:
+                return lvl[max(0, min(3, int(float(values[f"sg.{key}"]))))]
+            except (KeyError, ValueError):
+                return "?"
+        return (f"роздільність {values.get('sg.ResolutionQuality', '?')}%, тіні {q('ShadowQuality')}, "
+                f"освітлення {q('GlobalIlluminationQuality')}, ефекти {q('PostProcessQuality')}, "
+                f"текстури {q('TextureQuality')}")
 
 
 def unity_hash(name):
@@ -361,9 +386,16 @@ class UnityAdapter:
         else:
             _drop_lines(cfg, lambda s: any(f'<pref name="{k}"' in s for k in drop))
 
-    def describe(self, values):
+    def comparable(self, values):
+        # роздільну здатність не порівнюємо: гра може зберегти найближчий режим екрана
         q = values.get("quality")
-        return f"роздільність {values.get('scale', '?')}%" + (f", якість {q}" if q is not None else "")
+        return {} if q is None else {"quality": q}
+
+    def describe(self, values):
+        c = self._concrete(values)
+        q = values.get("quality")
+        res = f"роздільність {values.get('scale', '?')}% ({c['width']}×{c['height']})"
+        return res + (f", рівень якості {q}" if q is not None else "")
 
 
 ADAPTERS = [UnrealAdapter, UnityAdapter]
@@ -480,12 +512,25 @@ def run(appid, args, device=None, log=print):
         adapter.restore(cfg, entry["original"])
         entry.update(restore_pending=False, disabled=True,
                      note="Повернуто оригінальні налаштування гри")
+        entry.pop("applied_values", None)
         entry.pop("applied_level", None)
         C.save_json(C.TUNE_FILE, tune)
         return
     if entry.get("disabled"):
         entry.pop("applied_level", None)
         C.save_json(C.TUNE_FILE, tune)
+        return
+
+    # Користувач змінив графіку в меню гри — більше не чіпаємо (до «Підібрати заново»)
+    applied = entry.get("applied_values")
+    if applied and not entry.get("user_override") and changed_by_user(applied, adapter.read(cfg)):
+        entry["user_override"] = True
+    if entry.get("user_override"):
+        entry.pop("applied_level", None)
+        entry["note"] = "Графіку змінено в меню гри — залишаю твої налаштування"
+        entry["summary"] = ""
+        C.save_json(C.TUNE_FILE, tune)
+        log(f"{appid}: ручні налаштування користувача, не чіпаю")
         return
 
     target = C.quality_target(settings, device)
@@ -498,8 +543,11 @@ def run(appid, args, device=None, log=print):
     level, note = decide(entry, target, len(ladder))
     values = ladder[level]
     adapter.write(cfg, values)
+    prev = entry.get("applied_values")
     entry.update(level=level, applied_level=level, steps=len(ladder),
-                 note=note, summary=adapter.describe(values))
+                 note=note, summary=adapter.describe(values),
+                 applied_values=adapter.comparable(values),
+                 changed=prev != adapter.comparable(values))
     C.save_json(C.TUNE_FILE, tune)
     log(f"{appid}: {adapter.engine} сходинка {level + 1}/{len(ladder)} — {note}")
 

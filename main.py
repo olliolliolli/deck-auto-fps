@@ -116,7 +116,7 @@ def write_lsfg(settings, multiplier):
     Обгортка гри вибирає його через LSFGVK_CONFIG + LSFGVK_PROFILE.
     multiplier=1 — без генерації. Файл перечитується на льоту."""
     flow = max(0.25, min(1.0, float(settings["fg_flow_scale"])))
-    dll = _lsfg_dll_path()
+    dll = _find_dll()
     lines = ["version = 2", "", "[global]"]
     if dll:
         lines.append(f"dll = {json.dumps(dll)}")
@@ -139,19 +139,108 @@ def write_lsfg(settings, multiplier):
             f.write(text)
 
 
-def lsfg_installed():
-    candidates = [
-        os.path.join(HOME, ".local/share/vulkan/implicit_layer.d"),
-        "/usr/share/vulkan/implicit_layer.d",
-        "/etc/vulkan/implicit_layer.d",
-    ]
-    for d in candidates:
+def _layer_dirs():
+    dirs = [os.path.join(HOME, ".local/share/vulkan/implicit_layer.d"),
+            "/usr/share/vulkan/implicit_layer.d", "/usr/local/share/vulkan/implicit_layer.d",
+            "/etc/vulkan/implicit_layer.d"]
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg:
+        dirs.insert(0, os.path.join(xdg, "vulkan/implicit_layer.d"))
+    return dirs
+
+
+def _find_layers():
+    """Імена файлів Vulkan-шарів (lsfg-vk / MAKO), знайдених у системі."""
+    found = []
+    for d in _layer_dirs():
         try:
-            if any("lsfg" in f.lower() for f in os.listdir(d)):
-                return True
+            names = os.listdir(d)
         except OSError:
-            pass
-    return False
+            continue
+        for fn in names:
+            if not fn.endswith(".json"):
+                continue
+            low = fn.lower()
+            if "lsfg" in low or "mako" in low:
+                found.append(fn)
+                continue
+            # запасний варіант: ім'я шару всередині маніфесту
+            text = _read(os.path.join(d, fn)).lower()
+            if '"name"' in text and ("lsfg" in text or "lossless" in text):
+                found.append(fn)
+    return found
+
+
+def _steam_libraries():
+    steam = os.path.join(HOME, ".local", "share", "Steam")
+    libs = [os.path.join(steam, "steamapps")]
+    vdf = _read(os.path.join(steam, "steamapps", "libraryfolders.vdf"))
+    for path in re.findall(r'"path"\s+"([^"]+)"', vdf):
+        lib = os.path.join(path, "steamapps")
+        if lib not in libs:
+            libs.append(lib)
+    return libs
+
+
+def _decky_plugins():
+    """Назви встановлених Decky-плагінів (з plugin.json)."""
+    names = []
+    base = os.path.join(HOME, "homebrew", "plugins")
+    try:
+        dirs = os.listdir(base)
+    except OSError:
+        return names
+    for d in dirs:
+        meta = _load_json(os.path.join(base, d, "plugin.json"), None)
+        if meta:  # тека без plugin.json — залишок, не плагін
+            names.append(str(meta.get("name") or d))
+    return names
+
+
+def _find_dll():
+    """Lossless.dll: з конфіга Decky LSFG-VK або з бібліотек Steam."""
+    dll = _lsfg_dll_path()
+    if dll and os.path.isfile(dll):
+        return dll
+    for lib in _steam_libraries():
+        cand = os.path.join(lib, "common", "Lossless Scaling", "Lossless.dll")
+        if os.path.isfile(cand):
+            return cand
+    return ""
+
+
+def lsfg_status():
+    """Детальна перевірка фрейм-генерації: що знайдено і що зробити."""
+    layers = _find_layers()
+    has_lsfg = any("mako" not in fn.lower() for fn in layers)
+    has_mako = any("mako" in fn.lower() for fn in layers) or \
+        os.path.exists(os.path.join(HOME, ".local/bin/mako-launch"))
+    plugins = _decky_plugins()
+    lsfg_plugin = next((p for p in plugins if "lsfg" in p.lower()), None)
+    mako_plugin = next((p for p in plugins if "mako" in p.lower()), None)
+    dll = _find_dll()
+
+    if has_lsfg and dll:
+        hint, ready = "lsfg-vk встановлено, Lossless Scaling знайдено — генерація кадрів готова", True
+    elif has_lsfg:
+        hint, ready = ("lsfg-vk встановлено, але не знайдено Lossless.dll. Встанови Lossless Scaling "
+                       "у Steam (потрібна купівля), потім у Decky LSFG-VK перевір шлях до DLL"), False
+    elif lsfg_plugin:
+        hint, ready = (f"Плагін «{lsfg_plugin}» є, але сам lsfg-vk не встановлено. "
+                       "Відкрий його в Decky і натисни «Install lsfg-vk»"), False
+    elif has_mako or mako_plugin:
+        hint, ready = ("Знайдено MAKO, а не lsfg-vk. AutoFPS керує генерацією кадрів лише через "
+                       "lsfg-vk: встанови «Decky LSFG-VK» з магазину Decky. MAKO не вмикай для тих "
+                       "самих ігор — вони конфліктують"), False
+    else:
+        hint, ready = ("lsfg-vk не знайдено. Встанови «Decky LSFG-VK» з магазину Decky і натисни "
+                       "в ньому «Install lsfg-vk» (потрібен Lossless Scaling у Steam)"), False
+    return {"ready": ready, "hint": hint, "layers": layers,
+            "plugins": [p for p in (lsfg_plugin, mako_plugin) if p], "dll": dll}
+
+
+def lsfg_installed():
+    return lsfg_status()["ready"]
 
 
 # ------------------------------------------------------- MangoHud reader
@@ -232,6 +321,8 @@ class Plugin:
         self.reader = LogReader()
         self._reset_game_state()
         self.last_appid = None
+        self.events = []
+        self.loop = asyncio.get_event_loop()
         write_lsfg(self.settings, 1)
         decky.logger.info(f"AutoFPS started on {self.device['label']}")
         self.task = asyncio.get_event_loop().create_task(self._loop())
@@ -261,6 +352,7 @@ class Plugin:
         self.last_probe = 0.0
         self.last_apply = 0.0
         self.tuning = False       # цей запуск — крок автопідбору графіки
+        self.warned_no_data = False
         self.message = "Гра не запущена через AutoFPS"
 
     def _restore_display(self):
@@ -270,6 +362,40 @@ class Plugin:
                           if self.device["refresh_control"] else None)
         except Exception:  # noqa: BLE001
             pass
+
+    # ---------------- сповіщення
+
+    def _notify(self, title, body):
+        """Тост у Steam + запис у журнал плагіна."""
+        self.events.append({"t": int(time.time()), "title": title, "body": body})
+        del self.events[:-12]
+        emit = getattr(decky, "emit", None)
+        loop = getattr(self, "loop", None)
+        if emit and loop:
+            try:
+                loop.create_task(emit("autofps_toast", title, body))
+            except Exception as e:  # noqa: BLE001
+                decky.logger.warning(f"emit failed: {e}")
+
+    def _graphics_report(self):
+        """Що зроблено з графікою гри на цьому запуску (пише bin/autotune.py)."""
+        if not self.settings["autotune"]:
+            return "Автопідбір графіки вимкнено"
+        e = self._tune_entry()
+        if not e:
+            return "Графіку не змінено"
+        eng = {"unreal": "Unreal", "unity": "Unity"}.get(e.get("engine"), "")
+        if e.get("engine") == "unknown":
+            return "Рушій гри не підтримується — графіку не змінюю, лише FPS"
+        if e.get("user_override"):
+            return "Графіка: твої налаштування з меню гри — не чіпаю"
+        if e.get("disabled"):
+            return "Графіка: оригінальні налаштування гри"
+        if e.get("applied_level") is None:
+            return e.get("note") or "Графіку не змінено"
+        step = f"сходинка {e['applied_level'] + 1}/{e.get('steps', '?')}"
+        verb = "Змінено графіку" if e.get("changed") else "Графіка без змін"
+        return f"{verb} ({eng}, {step}): {e.get('summary', '')}. {e.get('note', '')}".strip()
 
     def _out_fps(self):
         return self.base * self.mult
@@ -291,7 +417,7 @@ class Plugin:
         h = float(self.settings["headroom"])
         native = max([t for t in tiers if p10 >= t * h], default=tiers[0])
         fg = self.settings["fg_mode"]
-        if fg == "off" or not lsfg_installed():
+        if fg == "off" or not self._lsfg_cached()["ready"]:
             return native, 1
         mults = [2, 3] if self.settings["fg_allow_3x"] else [2]
         best = (native, 1)
@@ -357,13 +483,16 @@ class Plugin:
             }
             _save_json(GAMES_FILE, self.games)
 
-    def _start_probe(self, now):
+    def _start_probe(self, now, upgrade=False):
         self.phase, self.phase_t, self.samples = "probe", now, []
         self.last_probe = now
         self.message = "Вимірюю, скільки гра тягне без обмеження…"
+        if upgrade:
+            self._notify("AutoFPS: є запас", "Перевіряю, чи гра потягне вищий FPS (~20 с)")
         self._apply()
 
-    def _lock(self, base, mult, now, why):
+    def _lock(self, base, mult, now, why, detail=""):
+        old_out = self._out_fps() if self.phase == "locked" else 0
         self.base, self.mult = base, mult
         self.phase, self.phase_t, self.samples = "locked", now, []
         self.bad_windows = self.idle_windows = 0
@@ -371,6 +500,13 @@ class Plugin:
         self.message = f"{why}: {base} FPS{fg}"
         self._apply()
         self._remember()
+        if base * mult != old_out:
+            body = f"Ліміт {base} FPS"
+            body += (f", генерація кадрів ×{mult} → {base * mult} FPS на екрані"
+                     if mult > 1 else ", без генерації кадрів")
+            if detail:
+                body = f"{detail}. {body}"
+            self._notify(f"AutoFPS: {base * mult} FPS", body)
 
     def _step_down(self, now, p10):
         tiers = self.device["tiers"]
@@ -384,7 +520,8 @@ class Plugin:
             base, mult = lower[-1], self.mult
             if mult > 1 and base * mult not in tiers:
                 mult = 1
-        self._lock(base, mult, now, "Знизив рівень")
+        self._lock(base, mult, now, "Знизив рівень",
+                   f"Гра не тримала {self.base} FPS (просідання до {p10:.0f})")
 
     # ---------------- main loop
 
@@ -426,6 +563,10 @@ class Plugin:
             self.last_appid = self.appid
             self.tuning = self._tuning_active(self._tune_entry())
             self.message = "Розігрів (завантаження, шейдери)…"
+            if self.settings["enabled"]:
+                nxt = ("заміряю FPS після розігріву (~20–40 с)" if self.settings["mode"] == "auto"
+                       else f"фіксовано {self.settings['mode']} FPS")
+                self._notify("AutoFPS підключено", f"{self._graphics_report()}\nДалі: {nxt}")
 
         if not self.settings["enabled"]:
             if self.phase != "disabled":
@@ -450,6 +591,7 @@ class Plugin:
                 self.base, self.mult = base, 1
                 self.phase, self.message = "manual", f"Вручну: {base} FPS"
                 self._apply()
+                self._notify(f"AutoFPS: {base} FPS", "Фіксований рівень, вибраний вручну")
             elif now - self.last_apply > 5:
                 self._apply()
             return
@@ -466,7 +608,7 @@ class Plugin:
                 elif saved and saved.get("device") == self.device["id"]:
                     self.native_p10 = saved.get("native_p10", 0)
                     self._lock(int(saved["base"]), int(saved["mult"]), now,
-                               "Збережений рівень")
+                               "Збережений рівень", "Рівень з минулого разу")
                 else:
                     self._start_probe(now)
             return
@@ -477,12 +619,18 @@ class Plugin:
                 if len(fps) < 10:
                     self.message = ("Немає даних FPS. Перевірте параметр запуску "
                                     "та що MangoHud встановлений")
+                    if not self.warned_no_data:
+                        self.warned_no_data = True
+                        self._notify("AutoFPS: немає даних FPS",
+                                     "MangoHud не пише лог — FPS не підбирається. "
+                                     "Надішли ~/.cache/autofps/wrapper.log")
                     self.phase_t = now
                     return
                 self.native_p10 = percentile(fps, 0.10)
                 self._record_tune(self.native_p10)
                 base, mult = self._choose(self.native_p10)
-                self._lock(base, mult, now, "Підібрано")
+                self._lock(base, mult, now, "Підібрано",
+                           f"Гра тримає щонайменше {self.native_p10:.0f} FPS")
             return
 
         if self.phase == "locked":
@@ -516,7 +664,7 @@ class Plugin:
             else:
                 self.idle_windows = 0
             if self.idle_windows >= 6 and now - self.last_probe > 180:
-                self._start_probe(now)
+                self._start_probe(now, upgrade=True)
             self.samples = [s for s in self.samples if now - s[0] <= 1]
 
     # ---------------- API for frontend
@@ -534,10 +682,18 @@ class Plugin:
             "fps_now": round(sum(last) / len(last), 1) if last else None,
             "native_p10": round(self.native_p10, 1),
             "message": self.message,
-            "lsfg": lsfg_installed(),
+            "lsfg": self._lsfg_cached(),
             "tune": self._tune_status(),
+            "events": list(reversed(getattr(self, "events", []))),
             "launch_option": f"bash {HOME}/homebrew/plugins/AutoFPS/bin/autofps %command%",
         }
+
+    def _lsfg_cached(self):
+        """Перевірка файлів раз на 10 с, а не на кожен запит інтерфейсу."""
+        now = time.time()
+        if now - getattr(self, "_lsfg_t", 0) > 10:
+            self._lsfg_t, self._lsfg = now, lsfg_status()
+        return self._lsfg
 
     def _tune_status(self):
         appid = self.appid or getattr(self, "last_appid", None)
@@ -546,7 +702,8 @@ class Plugin:
         e = self._tune_entry(appid)
         if not e:
             return None
-        state = ("off" if e.get("disabled") else "done" if e.get("converged")
+        state = ("off" if e.get("disabled") else "user" if e.get("user_override")
+                 else "done" if e.get("converged")
                  else "cpu" if e.get("ineffective") else "tuning"
                  if e.get("applied_level") is not None else "wait")
         return {"appid": appid, "engine": e.get("engine"), "state": state,
@@ -560,6 +717,7 @@ class Plugin:
 
         def fn(e):
             for k in ("history", "failed", "converged", "ineffective", "last",
+                      "user_override", "applied_values",
                       "disabled", "restore_pending"):
                 e.pop(k, None)
             e["level"] = self.device["start_level"]
@@ -593,11 +751,7 @@ class Plugin:
 
     async def list_games(self):
         """Встановлені ігри Steam (для кнопки «Увімкнути AutoFPS у грі»)."""
-        steam = os.path.join(HOME, ".local", "share", "Steam")
-        vdf = _read(os.path.join(steam, "steamapps", "libraryfolders.vdf"))
-        libs = {os.path.join(steam, "steamapps")}
-        for path in re.findall(r'"path"\s+"([^"]+)"', vdf):
-            libs.add(os.path.join(path.replace("\\\\", "/"), "steamapps"))
+        libs = _steam_libraries()
         skip = re.compile(r"proton|steam linux runtime|steamworks common|steamvr", re.I)
         games = {}
         for lib in libs:
