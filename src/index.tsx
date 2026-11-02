@@ -88,6 +88,7 @@ type Status = {
     quality_target: number;
     res: [number, number];
     vrr?: boolean;
+    vrr_range?: [number, number] | null;
   };
   settings: Settings;
   appid: string | null;
@@ -879,8 +880,9 @@ function Content() {
   const modeLabel = (m: string) => modeOptions.find((o) => o.data === m)?.label ?? m;
   const qualityOptions = [
     { data: "auto", label: `Авто — з ліміту від батареї (${st.graphics_target ?? st.device.quality_target})` },
-    ...[30, 40, 45, 60]
-      .filter((t) => t <= st.device.max_hz)
+    ...Array.from(new Set([30, 40, 45, ...st.device.tiers]))
+      .filter((t) => t <= Math.min(90, st.device.max_hz))
+      .sort((a, b) => a - b)
       .map((t) => ({ data: String(t), label: `${t} FPS` })),
   ];
   const fgOptions = [
@@ -975,7 +977,17 @@ function Content() {
         <PanelSectionRow>
           <Field
             label={`Зараз ${st.power?.ac ? "🔌 від зарядки" : "🔋 від батареї"}: ${modeLabel(st.power?.mode ?? s.mode)}`}
-            description="Скільки кадрів буде на екрані. З Lossless — разом зі згенерованими. Перемикається сам, коли під'єднуєш зарядку"
+            description={
+              "Скільки кадрів буде на екрані. З Lossless — разом зі згенерованими. Перемикається сам, коли під'єднуєш зарядку" +
+              (st.device.vrr
+                ? `\nVRR екрана: ${st.device.vrr_range ? `${st.device.vrr_range[0]}–${st.device.vrr_range[1]} Гц` : "діапазон невідомий"}` +
+                  (st.device.vrr_range
+                    ? st.device.vrr_range[1] >= 2 * st.device.vrr_range[0]
+                      ? ` — нижче ${st.device.vrr_range[0]} FPS gamescope подвоює кадри (LFC), плавно`
+                      : ` — нижче ${st.device.vrr_range[0]} FPS VRR не працює`
+                    : "")
+                : "")
+            }
           />
         </PanelSectionRow>
         <PanelSectionRow>

@@ -709,6 +709,12 @@ class Plugin:
             apply_display(self.device, self.device["max_hz"], None, vrr=True)
             self.last_apply = time.time()
             return
+        if self.device.get("vrr"):
+            # фіксований ліміт теж з VRR: 47/90 FPS на 120 Гц без нерівних кадрів
+            limit = 0 if self.phase == "probe" else out
+            apply_display(self.device, limit, None, vrr=True)
+            self.last_apply = time.time()
+            return
         limit = 0 if self.phase == "probe" else out
         refresh = best_refresh(self.device,
                                self.device["max_hz"] if self.phase == "probe" else out)

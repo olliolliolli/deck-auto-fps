@@ -64,6 +64,30 @@ def percentile(values, p):
     return s[lo] + (s[hi] - s[lo]) * (k - lo)
 
 
+def panel_vrr_range():
+    """Діапазон частот вбудованого екрана з EDID (дескриптор 0xFD): (min, max) Гц або None."""
+    import glob as _g
+    for path in _g.glob("/sys/class/drm/card*-eDP-*/edid"):
+        try:
+            with open(path, "rb") as f:
+                d = f.read()
+        except OSError:
+            continue
+        if len(d) < 128:
+            continue
+        for i in range(4):
+            b = d[54 + 18 * i: 72 + 18 * i]
+            if b[0:3] == b"\0\0\0" and b[3] == 0xFD:
+                lo, hi = b[5], b[6]
+                if b[4] & 0x01:
+                    lo += 255
+                if b[4] & 0x02:
+                    hi += 255
+                if 0 < lo < hi:
+                    return lo, hi
+    return None
+
+
 def detect_device():
     name = read_text("/sys/class/dmi/id/product_name")
     family = read_text("/sys/class/dmi/id/product_family")
@@ -85,7 +109,9 @@ def detect_device():
         return {"id": "legion_go_s", "label": "Lenovo Legion Go S",
                 "min_hz": 60, "max_hz": 120, "refresh_control": False, "vrr": True,
                 "quiet_profiles": True,   # ручний TDP (custom) гучний — керуємо профілями Lenovo
-                "tiers": [30, 40, 60, 120], "res": [1920, 1200],
+                # VRR: 47 і 90 теж плавні (екран підлаштовує частоту)
+                "tiers": [30, 40, 47, 60, 90, 120], "res": [1920, 1200],
+                "vrr_range": panel_vrr_range(),
                 "quality_target": 40, "start_level": 4}   # 60 базових FPS у важких іграх недосяжні
     return {"id": "generic", "label": f"Невідомий пристрій ({name or '?'})",
             "min_hz": 60, "max_hz": 60, "refresh_control": False,
