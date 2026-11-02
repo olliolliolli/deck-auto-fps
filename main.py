@@ -78,7 +78,7 @@ DEFAULT_SETTINGS = {
     "fg_allow_3x": False,
     "fg_flow_scale": 0.8,
     "fg_performance_mode": True,
-    "fps_counts_generated": True,  # MangoHud бачить згенеровані кадри
+    "fps_counts_generated": False,  # MangoHud бачить лише справжні кадри гри (перевірено на Legion: 42 у MangoHud = 84 на екрані з Lossless ×2)
     "autotune": True,          # автопідбір графіки гри (Unreal/Unity)
     "ue5_tweak": True,         # твік Engine.ini для ігор на Unreal Engine 5
     "unity_tweak": True,       # твік boot.config для ігор на Unity
@@ -507,6 +507,23 @@ class Plugin:
             self.settings.update(fg_mode="external", fg_external_migrated=True)
             _save_json(SETTINGS_FILE, self.settings)
         # екран з VRR (Legion Go S): за замовчуванням — VRR без обмеження до 120 FPS (одноразово)
+        if not self.settings.get("fps_fix_migrated"):
+            # раніше FPS з MangoHud ділився на множник Lossless — заміри графіки були вдвічі заниженими
+            self.settings.update(fps_counts_generated=False, fps_fix_migrated=True)
+            _save_json(SETTINGS_FILE, self.settings)
+            tune = _load_json(TUNE_FILE, {})
+            for e in tune.values():
+                if isinstance(e, dict) and not e.get("from_community"):
+                    for k in ("last", "history", "failed", "converged", "ineffective",
+                              "native_result", "lowres_done", "track"):
+                        e.pop(k, None)
+                    e["note"] = "Заміри FPS виправлено — графіку буде підібрано заново"
+            _save_json(TUNE_FILE, tune)
+            games = _load_json(GAMES_FILE, {})
+            for g in games.values():
+                if isinstance(g, dict):
+                    g.pop("tdp", None)
+            _save_json(GAMES_FILE, games)
         if not self.settings.get("power_migrated"):   # тиша й батарея — завжди, не лише від батареї
             self.settings.update(auto_tdp="always", power_migrated=True)
             _save_json(SETTINGS_FILE, self.settings)
@@ -1210,9 +1227,12 @@ class Plugin:
             if self.phase != "manual" or getattr(self, "manual_key", None) != (mode, self.sfg):
                 self.manual_key = (mode, self.sfg)
                 self.base, self.mult = base, (self.sfg if self.sfg >= 2 else 1)
+                # рівень — це FPS на екрані; з генерацією кадрів гра рендерить у mult разів менше
+                self.base = max(1, base // self.mult)
                 if vrr:
-                    self.base = max(1, base // self.mult)   # на екрані — до частоти панелі
                     self.phase, self.message = "manual", f"VRR: до {base} FPS, частота екрана йде за грою"
+                elif self.mult > 1:
+                    self.phase, self.message = "manual", f"Вручну: {base} FPS на екрані ({self.base} × FG {self.mult})"
                 else:
                     self.phase, self.message = "manual", f"Вручну: {base} FPS"
                 self._apply()
