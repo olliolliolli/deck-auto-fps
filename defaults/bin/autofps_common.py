@@ -84,6 +84,7 @@ def detect_device():
         # 120 Гц панель: 30/40/60/120 діляться рівно, тож частоту не міняємо
         return {"id": "legion_go_s", "label": "Lenovo Legion Go S",
                 "min_hz": 60, "max_hz": 120, "refresh_control": False, "vrr": True,
+                "quiet_profiles": True,   # ручний TDP (custom) гучний — керуємо профілями Lenovo
                 "tiers": [30, 40, 60, 120], "res": [1920, 1200],
                 "quality_target": 40, "start_level": 4}   # 60 базових FPS у важких іграх недосяжні
     return {"id": "generic", "label": f"Невідомий пристрій ({name or '?'})",

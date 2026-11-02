@@ -62,7 +62,7 @@ percentile, detect_device = C.percentile, C.detect_device
 DEFAULT_SETTINGS = {
     "enabled": True,
     "mode": "auto",            # "auto" | "vrr" (VRR, без обмеження до частоти екрана) | фіксований рівень, напр. "60"
-    "auto_tdp": "battery",     # мінімальний TDP, що тримає FPS: battery (лише від батареї) | always | off
+    "auto_tdp": "always",      # найтихіше живлення, що тримає FPS: always | battery (лише від батареї) | off
     "power_profiles": True,    # окремі рівні FPS від батареї й від зарядки
     "bat_mode": "same",        # FPS від батареї: same (як «mode») | auto | 30 | 40 | …
     "ac_mode": "same",         # FPS від зарядки
@@ -507,6 +507,9 @@ class Plugin:
             self.settings.update(fg_mode="external", fg_external_migrated=True)
             _save_json(SETTINGS_FILE, self.settings)
         # екран з VRR (Legion Go S): за замовчуванням — VRR без обмеження до 120 FPS (одноразово)
+        if not self.settings.get("power_migrated"):   # тиша й батарея — завжди, не лише від батареї
+            self.settings.update(auto_tdp="always", power_migrated=True)
+            _save_json(SETTINGS_FILE, self.settings)
         if self.device.get("vrr") and not self.settings.get("vrr_migrated"):
             self.settings.update(mode="vrr", vrr_migrated=True)
             _save_json(SETTINGS_FILE, self.settings)
@@ -514,9 +517,11 @@ class Plugin:
         self.reader = LogReader()
         self.ac = P.on_ac()
         self.ac_checked = 0.0
-        self.tdp = P.Tdp(decky.logger.info)
+        self.pw = P.PowerCtl(self.device, decky.logger.info)
         self.tdp_orig = None
-        decky.logger.info(f"TDP: {'є' if self.tdp.available else 'немає'} {self.tdp.min}–{self.tdp.max} Вт {self.tdp.error}")
+        self.telemetry = {}
+        decky.logger.info(f"живлення: {self.pw.kind or 'немає керування'} "
+                          f"[{', '.join(self.pw.label(i) for i in range(len(self.pw.levels)))}] {self.pw.error}")
         self._reset_game_state()
         self.last_appid = None
         self.events = []
@@ -570,6 +575,8 @@ class Plugin:
         self.tdp_floor = 0        # нижче цього вже не тримало
         self.tdp_samples = []
         self.tdp_key = None
+        self.tdp_ref = None       # VRR: p10 на повному живленні
+        self.hot, self.hot_since, self.hot_warned = False, 0, False
 
     def _restore_display(self):
         try:
@@ -747,102 +754,148 @@ class Plugin:
         return bool(self.device.get("vrr")) and self._mode() == "vrr"
 
     def _tdp_wanted(self):
-        """off — не керуємо; max — повна потужність; auto — шукаємо мінімальний TDP."""
-        if not self.tdp.available or self._vrr():
-            return "off"      # VRR без цілі FPS: TDP лишаємо, як у Steam
-        a = self.settings.get("auto_tdp", "battery")
+        """off — не керуємо; max — повна потужність; auto — шукаємо найтихішу сходинку, що тримає FPS."""
+        if not self.pw.available:
+            return "off"
+        a = self.settings.get("auto_tdp", "always")
         if a == "always":
             return "auto"
         if a == "battery":
             return "max" if self.ac else "auto"
         return "off"
 
-    def _tdp_set(self, w, why=""):
+    def _tdp_label(self):
+        return self.pw.label(self.tdp_cur)
+
+    def _tdp_set(self, i, why=""):
         if self.tdp_orig is None:
-            self.tdp_orig = self.tdp.get()
-        w = max(self.tdp.min, min(self.tdp.max, int(w)))
-        if w != self.tdp_cur and self.tdp.set(w):
-            decky.logger.info(f"TDP → {w} Вт {why}")
-        self.tdp_cur = w
+            self.tdp_orig = self.pw.snapshot()
+        i = max(0, min(len(self.pw.levels) - 1, int(i)))
+        if i != self.tdp_cur and self.pw.apply(i):
+            decky.logger.info(f"живлення → {self.pw.label(i)} {why}")
+        self.tdp_cur = i
         self.tdp_last = time.time()
 
     def _tdp_restore(self):
-        if getattr(self, "tdp_orig", None) is not None and self.tdp.available:
-            self.tdp.set(self.tdp_orig)
-            decky.logger.info(f"TDP повернуто: {self.tdp_orig} Вт")
+        if getattr(self, "tdp_orig", None) is not None and self.pw.available:
+            self.pw.restore(self.tdp_orig)
+            decky.logger.info(f"живлення повернуто: {self.tdp_orig}")
         self.tdp_orig = None
 
     def _tdp_saved_key(self):
-        return f"{self.device['id']}:{'ac' if self.ac else 'bat'}:{self._out_fps()}"
+        out = "vrr" if self._vrr() else self._out_fps()
+        return f"{self.device['id']}:{'ac' if self.ac else 'bat'}:{out}"
 
     def _tdp_begin(self):
-        """Рівень FPS зафіксовано — починаємо (або відновлюємо) підбір TDP."""
+        """Рівень FPS зафіксовано — починаємо (або відновлюємо) підбір живлення."""
         want = self._tdp_wanted()
         self.tdp_samples = []
-        self.tdp_floor = 0
+        self.tdp_floor = -1
+        self.tdp_ref = None
         if want == "off":
             if self.tdp_state != "off":
                 self._tdp_restore()
                 self.tdp_cur = None
             self.tdp_state = "off"
             return
+        top = len(self.pw.levels) - 1
         if want == "max":
             self.tdp_state = "max"
-            self._tdp_set(self.tdp.max, "(зарядка — повна потужність)")
+            self._tdp_set(top, "(зарядка — повна потужність)")
             return
         self.tdp_key = self._tdp_saved_key()
         saved = (self.games.get(str(self.appid)) or {}).get("tdp", {}).get(self.tdp_key)
-        if saved:
+        idx = self.pw.index_of(saved) if saved is not None else None
+        if idx is not None:
             self.tdp_state = "settled"
-            self._tdp_set(saved, "(збережене для цієї гри)")
+            self._tdp_set(idx, "(збережене для цієї гри)")
         else:
             self.tdp_state = "descending"
-            self._tdp_set(self.tdp_cur or self.tdp.max, "(старт підбору)")
+            self._tdp_set(top, "(старт підбору)")
 
     def _tdp_save(self):
         if not self.appid or self.tdp_cur is None:
             return
         g = self.games.setdefault(str(self.appid), {})
-        g.setdefault("tdp", {})[self.tdp_key or self._tdp_saved_key()] = self.tdp_cur
+        g.setdefault("tdp", {})[self.tdp_key or self._tdp_saved_key()] = self.pw.key(self.tdp_cur)
         _save_json(GAMES_FILE, self.games)
 
     def _tdp_rescue(self):
-        """FPS просів, а TDP знижено нами — спершу додаємо потужність, а не знижуємо FPS."""
+        """FPS просів, а живлення знижено нами — спершу додаємо потужність, а не знижуємо FPS."""
         if self.tdp_state not in ("descending", "settled") or self.tdp_cur is None \
-                or self.tdp_cur >= self.tdp.max:
+                or self.tdp_cur >= len(self.pw.levels) - 1 or getattr(self, "hot", False):
             return False
         self.tdp_floor = max(self.tdp_floor, self.tdp_cur)
-        self._tdp_set(self.tdp_cur + 3, "(не тримало FPS)")
+        self._tdp_set(self.tdp_cur + 1, "(не тримало FPS)")
         if self.tdp_state == "descending":
             self.tdp_state = "settled"
-            self._notify(f"AutoFPS: TDP {self.tdp_cur} Вт",
-                         f"Мінімальна потужність, що тримає {self._out_fps()} FPS. Запам'ятав для цієї гри")
+            self._notify(f"AutoFPS: {self._tdp_label()}",
+                         f"Найтихіше живлення, що тримає {self._fps_goal_text()}. Запам'ятав для цієї гри")
         self._tdp_save()
         self.tdp_samples = []
         return True
 
+    def _fps_goal_text(self):
+        return f"VRR ~{self.tdp_ref:.0f} FPS" if self._vrr() and self.tdp_ref else f"{self._out_fps()} FPS"
+
+    def _tdp_threshold(self):
+        """Нижче цього p10 вважаємо, що живлення замало."""
+        if self._vrr():
+            if not self.tdp_ref:
+                return None
+            q = C.quality_target(self.settings, self.device)
+            return max(self.tdp_ref * 0.88, q * 0.97)     # VRR: до -12% FPS заради тиші
+        return self.base * 0.93
+
+    def _thermal_tick(self, now):
+        """Перегрів (APU ≥ 87 °C пів хвилини) — тихіша сходинка навіть ціною FPS."""
+        if now - getattr(self, "thermal_t", 0) < 5:
+            return
+        self.thermal_t = now
+        self.telemetry = P.telemetry()
+        t = self.telemetry.get("temp")
+        if t is None:
+            return
+        self.hot_since = (getattr(self, "hot_since", 0) or now) if t >= 87 else 0
+        self.hot = bool(self.hot_since and now - self.hot_since >= 30)
+        if self.hot and self.tdp_state in ("descending", "settled") and self.tdp_cur:
+            self._tdp_set(self.tdp_cur - 1, f"(перегрів {t} °C)")
+            self.tdp_state = "settled"
+            self._tdp_save()
+            self.hot_since = now
+            if not getattr(self, "hot_warned", False):
+                self.hot_warned = True
+                self._notify(f"AutoFPS: гаряче — {t} °C",
+                             f"Знизив живлення до «{self._tdp_label()}». Якщо FPS просяде, вибери нижчий рівень FPS")
+
     def _tdp_tick(self, now):
+        self._thermal_tick(now)
         if self.tdp_state == "off" or self.phase not in ("locked", "manual"):
             return
         if self.tdp_state == "max":
-            if now - self.tdp_last > 30:      # Steam міг змінити ліміт
-                self._tdp_set(self.tdp.max)
+            if now - self.tdp_last > 30:      # Steam міг змінити профіль
+                self._tdp_set(len(self.pw.levels) - 1)
+                self.tdp_last = now
             return
         self.tdp_samples = [x for x in self.tdp_samples if now - x[0] <= 12]
         if now - self.tdp_last < 12 or len(self.tdp_samples) < 10 or now - self.tdp_samples[0][0] < 10:
             return
         p10 = percentile([x[1] for x in self.tdp_samples], 0.10)
         self.tdp_samples = []
-        if p10 < self.base * 0.93:
+        if self._vrr() and self.tdp_ref is None:
+            self.tdp_ref = p10                 # VRR: скільки гра дає на повному живленні
+            return
+        thr = self._tdp_threshold()
+        if thr and p10 < thr:
             self._tdp_rescue()
             return
         if self.tdp_state == "descending":
-            nxt = self.tdp_cur - 2
-            if nxt <= max(self.tdp.min, self.tdp_floor):
+            nxt = self.tdp_cur - 1
+            if nxt <= self.tdp_floor or nxt < 0:
                 self.tdp_state = "settled"
                 self._tdp_save()
-                self._notify(f"AutoFPS: TDP {self.tdp_cur} Вт",
-                             f"Гра тримає {self._out_fps()} FPS навіть на мінімальній потужності")
+                self._notify(f"AutoFPS: {self._tdp_label()}",
+                             f"Гра тримає {self._fps_goal_text()} навіть на найтихішому живленні")
                 return
             self._tdp_set(nxt, f"(тримає {p10:.0f} FPS)")
 
@@ -954,8 +1007,8 @@ class Plugin:
 
     def _start_probe(self, now, upgrade=False):
         self.phase, self.phase_t, self.samples = "probe", now, []
-        if self.tdp_state != "off" and self.tdp.available:
-            self._tdp_set(self.tdp.max, "(замір без обмежень)")
+        if self.tdp_state != "off" and self.pw.available:
+            self._tdp_set(len(self.pw.levels) - 1, "(замір без обмежень)")
             self.tdp_state, self.tdp_key = "max", None
         self.last_probe = now
         self.message = "Вимірюю, скільки гра тягне без обмеження…"
@@ -1282,8 +1335,11 @@ class Plugin:
             "lsfg_launcher": lsfg_launcher(self.settings.get("fg_tool", "lsfg")),
             "fg_launchers": fg_launchers(),
             "power": {"ac": self.ac, "battery": P.battery_percent(),
-                      "tdp_available": self.tdp.available, "tdp_min": self.tdp.min, "tdp_max": self.tdp.max,
-                      "tdp": self.tdp_cur, "tdp_state": self.tdp_state, "tdp_error": self.tdp.error,
+                      "tdp_available": self.pw.available, "kind": self.pw.kind,
+                      "level": self.pw.label(self.tdp_cur) if self.tdp_cur is not None else None,
+                      "levels": len(self.pw.levels), "level_i": self.tdp_cur,
+                      "tdp_state": self.tdp_state, "tdp_error": self.pw.error,
+                      "telemetry": self.telemetry, "hot": bool(getattr(self, "hot", False)),
                       "mode": self._mode()},
             "game_update": getattr(self, "game_update", None),
         }

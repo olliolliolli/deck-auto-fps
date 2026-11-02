@@ -106,10 +106,13 @@ type Status = {
     ac: boolean;
     battery: number | null;
     tdp_available: boolean;
-    tdp_min: number | null;
-    tdp_max: number | null;
-    tdp: number | null;
+    kind: string | null;
+    level: string | null;
+    levels: number;
+    level_i: number | null;
     tdp_state: string;
+    telemetry?: { temp: number | null; fan: number | null; watts: number | null };
+    hot?: boolean;
     tdp_error: string;
     mode: string;
   };
@@ -119,7 +122,7 @@ type Status = {
 const TDP_STATE: Record<string, string> = {
   off: "не керую",
   max: "повна потужність",
-  descending: "шукаю мінімум…",
+  descending: "шукаю найтихіше…",
   settled: "підібрано",
 };
 
@@ -985,7 +988,7 @@ function Content() {
         <PanelSectionRow>
           <DropdownItem
             label="Рівень FPS"
-            description={st.device.vrr ? "VRR: екран підлаштовує частоту під FPS гри — плавно без жорсткого ліміту. Для економії батареї вибери 40/60 у профілі батареї (тоді працює автоTDP)" : undefined}
+            description={st.device.vrr ? "VRR: екран підлаштовує частоту під FPS гри — плавно без жорсткого ліміту. У VRR живлення теж знижується, поки FPS падає не більше ніж на ~12%" : undefined}
             rgOptions={modeOptions}
             selectedOption={s.mode}
             onChange={(o: { data: string }) => update("mode", o.data)}
@@ -998,23 +1001,34 @@ function Content() {
           <Field
             label={`${st.power?.ac ? "🔌 Від зарядки" : "🔋 Від батареї"}${st.power?.battery != null ? ` · ${st.power.battery}%` : ""}`}
             description={
-              st.power?.tdp_available
-                ? `TDP ${st.power.tdp ?? "—"} Вт (${st.power.tdp_min}–${st.power.tdp_max}) · ${TDP_STATE[st.power.tdp_state] ?? st.power.tdp_state}`
-                : `Керування TDP недоступне: ${st.power?.tdp_error || "немає steamos-manager"}`
+              (st.power?.tdp_available
+                ? `${st.power.level ?? "живлення як у Steam"}` +
+                  (st.power.level_i != null ? ` (сходинка ${st.power.level_i + 1}/${st.power.levels})` : "") +
+                  ` · ${TDP_STATE[st.power.tdp_state] ?? st.power.tdp_state}`
+                : `Керування живленням недоступне: ${st.power?.tdp_error || "немає steamos-manager"}`) +
+              (st.power?.telemetry?.temp != null
+                ? `\n${st.power.hot ? "🔥 " : ""}APU ${st.power.telemetry.temp} °C` +
+                  (st.power.telemetry.fan ? ` · вентилятор ${st.power.telemetry.fan} об/хв` : "") +
+                  (st.power.telemetry.watts ? ` · ${st.power.telemetry.watts} Вт` : "")
+                : "")
             }
           />
         </PanelSectionRow>
         <PanelSectionRow>
           <DropdownItem
-            label="Автопідбір TDP"
-            description="Шукає найменшу потужність, на якій гра тримає вибраний FPS: довше працює від батареї, тихіше й холодніше. Значення запам'ятовується для кожної гри"
+            label="Тихо й економно"
+            description={
+              st.power?.kind === "profiles"
+                ? "Перемикає профілі Lenovo (Тихий / Збалансований / Продуктивний) і турбо CPU — найтихіший, що тримає FPS. Ручний «Custom» TDP не використовується: з ним вентилятор гуде. При ≥87 °C знижує живлення. Запам'ятовується для кожної гри"
+                : "Шукає найменший TDP, на якому гра тримає FPS: довше працює батарея, тихіше й холодніше. При ≥87 °C знижує живлення. Запам'ятовується для кожної гри"
+            }
             disabled={!st.power?.tdp_available}
             rgOptions={[
-              { data: "battery", label: "Від батареї (на зарядці — максимум)" },
-              { data: "always", label: "Завжди" },
+              { data: "always", label: "Завжди (рекомендовано)" },
+              { data: "battery", label: "Лише від батареї" },
               { data: "off", label: "Вимкнено" },
             ]}
-            selectedOption={s.auto_tdp ?? "battery"}
+            selectedOption={s.auto_tdp ?? "always"}
             onChange={(o: { data: string }) => update("auto_tdp", o.data)}
           />
         </PanelSectionRow>
