@@ -848,12 +848,27 @@ def run(appid, args, device=None, log=print):
             adapter = A(install, compat, device)
             adapter.appid = appid
             break
+    if adapter and adapter.engine == "unity":
+        # Багато Unity-ігор мають власні налаштування (ключі PlayerPrefs ShadowQuality_h…,
+        # JSON у LocalLow) і ігнорують загальний «рівень якості» — тоді керуємо ними
+        try:
+            import generic_settings as G
+            cached = (entry.get("generic_fmt"), entry.get("config")) if entry.get("generic_fmt") else None
+            g = G.GenericAdapter.find(install, compat, device, cached)
+            if g and len(g._settings_of(g.fmt_cls(g.cfg))) >= 4:
+                adapter = g
+                adapter.appid = appid
+                entry["generic_fmt"] = g.fmt_name
+        except Exception as e:  # noqa: BLE001
+            log(f"unity custom settings: {e!r}")
     if not adapter:
         try:
             import generic_settings as G
-            adapter = G.GenericAdapter.find(install, compat, device)
+            cached = (entry.get("generic_fmt"), entry.get("config")) if entry.get("generic_fmt") else None
+            adapter = G.GenericAdapter.find(install, compat, device, cached)
             if adapter:
                 adapter.appid = appid
+                entry["generic_fmt"] = adapter.fmt_name
         except Exception as e:  # noqa: BLE001
             log(f"generic settings: {e!r}")
             adapter = None
