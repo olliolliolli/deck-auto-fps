@@ -40,6 +40,13 @@ log "режим: $MODE"
 
 find "$CACHE/logs" -name '*.csv' -mtime +2 -delete 2>/dev/null
 
+# --- чи гру оновлено з минулого разу (тоді графіку перевіряємо заново, FSR/твіки — нижче)
+[ -f "$DIR/gamecheck.py" ] && timeout 5 python3 "$DIR/gamecheck.py" "$APPID" "$@" >>"$LOG" 2>&1
+# --- нова гра: готовий профіль з бази AutoFPS (якщо є для цього пристрою)
+if [ "$MODE" != "safe" ] && [ -f "$DIR/profiles_db.py" ]; then
+  timeout 8 python3 "$DIR/profiles_db.py" fetch "$APPID" >>"$LOG" 2>&1 || true
+fi
+
 # --- автопідбір графіки (не в безпечному режимі: зміни конфігів теж можуть бути причиною)
 rm -f "$CACHE/tuning_now" 2>/dev/null
 if [ "$MODE" != "safe" ] && [ -f "$DIR/autotune.py" ]; then

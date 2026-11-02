@@ -150,7 +150,7 @@ def apply_to(path):
     return len(add)
 
 
-def run(cmd, appid, args, log=print):
+def run_ue(cmd, appid, args, log=print):
     settings = C.load_json(C.SETTINGS_FILE, {})
     state = C.load_json(STATE_FILE, {})
     entry = state.get(str(appid), {})
@@ -180,6 +180,106 @@ def run(cmd, appid, args, log=print):
     state[str(appid)] = {"install": install, "path": path, "applied": True, "lines": n, "t": int(time.time())}
     C.save_json(STATE_FILE, state)
     log(f"UE5 твік: {n} параметрів у {path}")
+
+
+# ------------------------------------------------------------------ Unity: <Гра>_Data/boot.config
+
+UNITY_TWEAKS = [
+    ("gfx-enable-gfx-jobs", "1"),          # рендер-команди готуються в кількох потоках
+    ("gfx-enable-native-gfx-jobs", "1"),
+    ("gfx-disable-mt-rendering", "0"),     # окремий потік рендера (деякі ігри його вимикають)
+    ("wait-for-native-debugger", "0"),
+]
+UNITY_STATE = os.path.join(C.CFG_DIR, "unity_tweaks.json")
+
+
+def unity_boot_configs(install):
+    return [p for p in glob.glob(os.path.join(install, "*_Data", "boot.config"))
+            if os.path.isfile(os.path.join(os.path.dirname(p), "..", "UnityPlayer.dll"))
+            or glob.glob(os.path.join(os.path.dirname(p), "Managed")) or glob.glob(os.path.join(os.path.dirname(p), "il2cpp_data"))]
+
+
+def _kv_read(path):
+    with open(path, encoding="utf-8", errors="ignore", newline="") as f:
+        return f.readlines()
+
+
+def unity_apply(path, saved):
+    """saved — {ключ: оригінальне значення або None}; повертає кількість змінених ключів."""
+    lines = _kv_read(path)
+    nl = "\r\n" if any(ln.endswith("\r\n") for ln in lines) else "\n"
+    idx = {ln.split("=", 1)[0].strip(): i for i, ln in enumerate(lines) if "=" in ln}
+    changed = 0
+    for k, v in UNITY_TWEAKS:
+        if k in idx:
+            cur = lines[idx[k]].split("=", 1)[1].strip()
+            if cur == v:
+                continue
+            saved.setdefault(k, cur)
+            lines[idx[k]] = f"{k}={v}{nl}"
+        else:
+            saved.setdefault(k, None)
+            if lines and not lines[-1].endswith(("\n", "\r")):
+                lines[-1] += nl
+            lines.append(f"{k}={v}{nl}")
+        changed += 1
+    if changed:
+        _write(path, lines)
+    return changed
+
+
+def unity_restore(path, saved):
+    if not os.path.isfile(path) or not saved:
+        return False
+    lines = _kv_read(path)
+    out = []
+    for ln in lines:
+        k = ln.split("=", 1)[0].strip() if "=" in ln else None
+        if k in saved:
+            if saved[k] is None:
+                continue
+            nl = "\r\n" if ln.endswith("\r\n") else "\n"
+            ln = f"{k}={saved[k]}{nl}"
+        out.append(ln)
+    _write(path, out)
+    return True
+
+
+def run_unity(cmd, appid, args, log=print):
+    settings = C.load_json(C.SETTINGS_FILE, {})
+    state = C.load_json(UNITY_STATE, {})
+    entry = state.get(str(appid), {})
+    install = T.find_install(args) or entry.get("install")
+    if not install:
+        return
+    want = cmd == "apply" and settings.get("unity_tweak", True) and not entry.get("restore_pending")
+    files = entry.get("files", {})
+    if not want:
+        for path, saved in files.items():
+            if unity_restore(path, saved):
+                log(f"Unity твік: прибрано з {path}")
+        if entry:
+            state[str(appid)] = {"install": install, "files": {}, "applied": False}
+            C.save_json(UNITY_STATE, state)
+        return
+    cfgs = unity_boot_configs(install)
+    if not cfgs:
+        return
+    total = 0
+    for path in cfgs:
+        saved = files.setdefault(path, {})
+        total += unity_apply(path, saved)
+    state[str(appid)] = {"install": install, "files": files, "applied": True, "t": int(time.time())}
+    C.save_json(UNITY_STATE, state)
+    log(f"Unity твік: boot.config готовий ({total} змін)")
+
+
+def run(cmd, appid, args, log=print):
+    for fn in (run_ue, run_unity):
+        try:
+            fn(cmd, appid, args, log)
+        except Exception as e:  # noqa: BLE001
+            log(f"{fn.__name__}: {e}")
 
 
 def main():

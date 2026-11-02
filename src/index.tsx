@@ -1,6 +1,9 @@
 import {
   ButtonItem,
+  DialogButton,
   DropdownItem,
+  Focusable,
+  Navigation,
   Field,
   PanelSection,
   PanelSectionRow,
@@ -39,6 +42,12 @@ type Settings = {
   fg_mode: "external" | "off" | "auto" | "always";
   fg_tool?: "lsfg" | "mako" | "none";
   ue5_tweak?: boolean;
+  unity_tweak?: boolean;
+  auto_tdp?: "battery" | "always" | "off";
+  power_profiles?: boolean;
+  bat_mode?: string;
+  ac_mode?: string;
+  community_profiles?: boolean;
   fg_min_base: number;
   fg_allow_3x: boolean;
   fg_flow_scale: number;
@@ -92,7 +101,64 @@ type Status = {
   tune: Tune | null;
   events: { t: number; title: string; body: string }[];
   launch_option: string;
+  power?: {
+    ac: boolean;
+    battery: number | null;
+    tdp_available: boolean;
+    tdp_min: number | null;
+    tdp_max: number | null;
+    tdp: number | null;
+    tdp_state: string;
+    tdp_error: string;
+    mode: string;
+  };
+  game_update?: { appid: string; old: string; new: string; t: number } | null;
 };
+
+const TDP_STATE: Record<string, string> = {
+  off: "не керую",
+  max: "повна потужність",
+  descending: "шукаю мінімум…",
+  settled: "підібрано",
+};
+
+const shareProfile = callable<
+  [appid?: string],
+  { ok: boolean; url?: string; error?: string; profile?: { name: string; graphics?: { summary?: string } } }
+>("share_profile");
+
+const TABS = [
+  { id: "game", label: "Гра" },
+  { id: "fps", label: "FPS" },
+  { id: "gfx", label: "Графіка" },
+  { id: "fg", label: "FG" },
+  { id: "more", label: "Ще" },
+];
+let lastTab = "game";
+
+function TabBar({ tab, setTab }: { tab: string; setTab: (t: string) => void }) {
+  return (
+    <Focusable style={{ display: "flex", gap: "4px", padding: "0 0 8px 0" }} flow-children="horizontal">
+      {TABS.map((t) => (
+        <DialogButton
+          key={t.id}
+          onClick={() => setTab(t.id)}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            padding: "6px 2px",
+            fontSize: "12px",
+            lineHeight: "16px",
+            opacity: tab === t.id ? 1 : 0.55,
+            borderBottom: tab === t.id ? "2px solid #1a9fff" : "2px solid transparent",
+          }}
+        >
+          {t.label}
+        </DialogButton>
+      ))}
+    </Focusable>
+  );
+}
 
 const getStatus = callable<[], Status>("get_status");
 const setSetting = callable<[key: string, value: unknown], boolean>("set_setting");
@@ -758,6 +824,11 @@ function OptiSection({
 
 function Content() {
   const [st, setSt] = useState<Status | null>(null);
+  const [tab, setTabState] = useState(lastTab);
+  const setTab = (t: string) => {
+    lastTab = t;
+    setTabState(t);
+  };
 
   useEffect(() => {
     let alive = true;
@@ -814,6 +885,11 @@ function Content() {
 
   return (
     <>
+      <PanelSection>
+        <TabBar tab={tab} setTab={setTab} />
+      </PanelSection>
+      {tab === "game" && (
+        <>
       <PanelSection title="Стан">
         <PanelSectionRow>
           <Field label="Пристрій" description={st.device.label} />
@@ -833,6 +909,14 @@ function Content() {
                 (st.mult > 1 ? ` (база ${st.base} × FG ${st.mult})` : "") +
                 (st.native_p10 ? ` · p10 без ліміту ${st.native_p10}` : "")
               }
+            />
+          </PanelSectionRow>
+        )}
+        {st.appid && st.game_update && st.game_update.appid === st.appid && (
+          <PanelSectionRow>
+            <Field
+              label="Гру оновлено"
+              description={`Збірка ${st.game_update.old} → ${st.game_update.new}. FSR 4 і твіки перевірено, графіка перевіряється заново`}
             />
           </PanelSectionRow>
         )}
@@ -859,7 +943,27 @@ function Content() {
       </PanelSection>
 
       <GameLaunchSection />
+      <PanelSection title="Що зробив AutoFPS">
+        {st.events.length === 0 ? (
+          <PanelSectionRow>
+            <Field
+              label="Ще нічого"
+              description="Запусти гру, підключену до AutoFPS, — тут з'являться всі зміни"
+            />
+          </PanelSectionRow>
+        ) : (
+          st.events.slice(0, 6).map((e, i) => (
+            <PanelSectionRow key={`${e.t}-${i}`}>
+              <Field label={`${hhmm(e.t)} · ${e.title.replace(/^AutoFPS:?\s*/, "")}`} description={e.body} />
+            </PanelSectionRow>
+          ))
+        )}
+      </PanelSection>
 
+        </>
+      )}
+      {tab === "fps" && (
+        <>
       <PanelSection title="Режим">
         <PanelSectionRow>
           <ToggleField
@@ -871,7 +975,7 @@ function Content() {
         <PanelSectionRow>
           <ToggleField
             label="Починати підбір за кнопкою"
-            description="Щоб не міряти FPS у меню гри: підбір стартує, коли натиснеш «▶ Почати підбір» у розділі «Стан»"
+            description="Щоб не міряти FPS у меню гри: підбір стартує, коли натиснеш «▶ Почати підбір» на вкладці «Гра»"
             checked={s.start_on_button ?? true}
             onChange={(v: boolean) => update("start_on_button", v)}
           />
@@ -886,6 +990,64 @@ function Content() {
         </PanelSectionRow>
       </PanelSection>
 
+      <PanelSection title="Живлення">
+        <PanelSectionRow>
+          <Field
+            label={`${st.power?.ac ? "🔌 Від зарядки" : "🔋 Від батареї"}${st.power?.battery != null ? ` · ${st.power.battery}%` : ""}`}
+            description={
+              st.power?.tdp_available
+                ? `TDP ${st.power.tdp ?? "—"} Вт (${st.power.tdp_min}–${st.power.tdp_max}) · ${TDP_STATE[st.power.tdp_state] ?? st.power.tdp_state}`
+                : `Керування TDP недоступне: ${st.power?.tdp_error || "немає steamos-manager"}`
+            }
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <DropdownItem
+            label="Автопідбір TDP"
+            description="Шукає найменшу потужність, на якій гра тримає вибраний FPS: довше працює від батареї, тихіше й холодніше. Значення запам'ятовується для кожної гри"
+            disabled={!st.power?.tdp_available}
+            rgOptions={[
+              { data: "battery", label: "Від батареї (на зарядці — максимум)" },
+              { data: "always", label: "Завжди" },
+              { data: "off", label: "Вимкнено" },
+            ]}
+            selectedOption={s.auto_tdp ?? "battery"}
+            onChange={(o: { data: string }) => update("auto_tdp", o.data)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="Різний FPS від батареї й від зарядки"
+            description="Перемикається сам, коли під'єднуєш або від'єднуєш зарядку"
+            checked={s.power_profiles !== false}
+            onChange={(v: boolean) => update("power_profiles", v)}
+          />
+        </PanelSectionRow>
+        {s.power_profiles !== false && (
+          <>
+            <PanelSectionRow>
+              <DropdownItem
+                label="🔋 FPS від батареї"
+                rgOptions={[{ data: "same", label: "Як «Рівень FPS»" }, ...modeOptions]}
+                selectedOption={s.bat_mode ?? "same"}
+                onChange={(o: { data: string }) => update("bat_mode", o.data)}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <DropdownItem
+                label="🔌 FPS від зарядки"
+                rgOptions={[{ data: "same", label: "Як «Рівень FPS»" }, ...modeOptions]}
+                selectedOption={s.ac_mode ?? "same"}
+                onChange={(o: { data: string }) => update("ac_mode", o.data)}
+              />
+            </PanelSectionRow>
+          </>
+        )}
+      </PanelSection>
+        </>
+      )}
+      {tab === "gfx" && (
+        <>
       <PanelSection title="Графіка гри (автопідбір)">
         <PanelSectionRow>
           <ToggleField
@@ -901,6 +1063,14 @@ function Content() {
             description="Менше підвисань (кеш шейдерів), рівніший кадр, легші Nanite/Lumen/туман. Діє з наступного запуску гри"
             checked={s.ue5_tweak !== false}
             onChange={(v: boolean) => update("ue5_tweak", v)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="Твік boot.config для Unity"
+            description="Багатопотокова підготовка кадру (graphics jobs). Якщо гра почне падати на старті — AutoFPS сам прибере твік"
+            checked={s.unity_tweak !== false}
+            onChange={(v: boolean) => update("unity_tweak", v)}
           />
         </PanelSectionRow>
         <PanelSectionRow>
@@ -957,7 +1127,10 @@ function Content() {
       </PanelSection>
 
       <OptiSection settings={s} update={update} />
-
+        </>
+      )}
+      {tab === "fg" && (
+        <>
       <PanelSection title="Фрейм-генерація">
         <PanelSectionRow>
           <DropdownItem
@@ -1027,23 +1200,44 @@ function Content() {
         )}
       </PanelSection>
 
-      <PanelSection title="Що зробив AutoFPS">
-        {st.events.length === 0 ? (
-          <PanelSectionRow>
-            <Field
-              label="Ще нічого"
-              description="Запусти гру, підключену до AutoFPS, — тут з'являться всі зміни"
-            />
-          </PanelSectionRow>
-        ) : (
-          st.events.slice(0, 6).map((e, i) => (
-            <PanelSectionRow key={`${e.t}-${i}`}>
-              <Field label={`${hhmm(e.t)} · ${e.title.replace(/^AutoFPS:?\s*/, "")}`} description={e.body} />
-            </PanelSectionRow>
-          ))
-        )}
+        </>
+      )}
+      {tab === "more" && (
+        <>
+      <PanelSection title="Профілі ігор">
+        <PanelSectionRow>
+          <ToggleField
+            label="Готові профілі з бази AutoFPS"
+            description="Нова гра, для якої в базі є профіль під цей пристрій, одразу запускається з підібраною графікою, FPS і TDP — без кількох запусків підбору"
+            checked={s.community_profiles !== false}
+            onChange={(v: boolean) => update("community_profiles", v)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            disabled={!st.appid}
+            onClick={async () => {
+              const r = await shareProfile(st.appid ?? undefined);
+              if (!r.ok || !r.url) {
+                toaster.toast({ title: "AutoFPS", body: r.error ?? "Не вдалося" });
+                return;
+              }
+              toaster.toast({
+                title: "AutoFPS · профіль",
+                body: "Відкриваю GitHub з готовим файлом — натисни «Commit changes» (потрібен вхід у GitHub)",
+              });
+              try {
+                Navigation.NavigateToExternalWeb(r.url);
+              } catch {
+                SteamClient.URL.ExecuteSteamURL(`steam://openurl/${r.url}`);
+              }
+            }}
+          >
+            Поділитися профілем поточної гри
+          </ButtonItem>
+        </PanelSectionRow>
       </PanelSection>
-
       <PanelSection title="Діагностика">
         <PanelSectionRow>
           <ButtonItem
@@ -1074,6 +1268,8 @@ function Content() {
         </PanelSectionRow>
       </PanelSection>
 
+        </>
+      )}
     </>
   );
 }

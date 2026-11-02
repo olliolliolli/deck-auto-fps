@@ -27,6 +27,7 @@ for _p in (os.path.join(_PLUGIN_DIR, "bin"), os.path.join(_PLUGIN_DIR, "defaults
         sys.path.insert(0, _p)
 import autofps_common as C  # noqa: E402
 import optiscaler as O  # noqa: E402
+import power as P  # noqa: E402
 
 C.set_home(decky.DECKY_USER_HOME)
 HOME = C.HOME
@@ -61,6 +62,11 @@ percentile, detect_device = C.percentile, C.detect_device
 DEFAULT_SETTINGS = {
     "enabled": True,
     "mode": "auto",            # "auto" або фіксований рівень, напр. "60"
+    "auto_tdp": "battery",     # мінімальний TDP, що тримає FPS: battery (лише від батареї) | always | off
+    "power_profiles": True,    # окремі рівні FPS від батареї й від зарядки
+    "bat_mode": "same",        # FPS від батареї: same (як «mode») | auto | 30 | 40 | …
+    "ac_mode": "same",         # FPS від зарядки
+    "community_profiles": True,  # готові профілі ігор з бази AutoFPS на GitHub
     "headroom": 0.95,          # p10 FPS має бути >= рівень * headroom
     "drop_ratio": 0.88,        # якщо p10 < рівень * drop_ratio — знижуємо
     "warmup_s": 20,            # пропустити завантаження/шейдери
@@ -75,6 +81,7 @@ DEFAULT_SETTINGS = {
     "fps_counts_generated": True,  # MangoHud бачить згенеровані кадри
     "autotune": True,          # автопідбір графіки гри (Unreal/Unity)
     "ue5_tweak": True,         # твік Engine.ini для ігор на Unreal Engine 5
+    "unity_tweak": True,       # твік boot.config для ігор на Unity
     "quality_target": "auto",  # базовий FPS, під який підбирається графіка
     "respect_manual_graphics": False,
     "lowres_for_quality": True,  # екран 1080p+: пробувати рендер ≈HD, якщо так графіка вища  # True — ручні зміни в меню гри зупиняють підбір
@@ -499,6 +506,11 @@ class Plugin:
             _save_json(SETTINGS_FILE, self.settings)
         self.games = _load_json(GAMES_FILE, {})
         self.reader = LogReader()
+        self.ac = P.on_ac()
+        self.ac_checked = 0.0
+        self.tdp = P.Tdp(decky.logger.info)
+        self.tdp_orig = None
+        decky.logger.info(f"TDP: {'є' if self.tdp.available else 'немає'} {self.tdp.min}–{self.tdp.max} Вт {self.tdp.error}")
         self._reset_game_state()
         self.last_appid = None
         self.events = []
@@ -517,6 +529,7 @@ class Plugin:
         if getattr(self, "task", None):
             self.task.cancel()
         self._restore_display()
+        self._tdp_restore()
 
     async def _uninstall(self):
         self._restore_display()
@@ -544,6 +557,12 @@ class Plugin:
         self.cur_info = {}
         self.sfg = 0              # множник генерації кадрів, увімкненої обгорткою в цій сесії
         self.message = "Гра не запущена через AutoFPS"
+        self.tdp_state = "off"    # off | max | descending | settled
+        self.tdp_cur = None
+        self.tdp_last = 0.0
+        self.tdp_floor = 0        # нижче цього вже не тримало
+        self.tdp_samples = []
+        self.tdp_key = None
 
     def _restore_display(self):
         try:
@@ -675,6 +694,161 @@ class Plugin:
         except OSError:
             pass
 
+    def _start_notes(self, now):
+        """Що обгортка зробила перед стартом: оновлення гри, профіль з бази."""
+        notes = []
+        upd = _load_json(os.path.join(CACHE_DIR, "game_updated.json"), None)
+        if upd and str(upd.get("appid")) == str(self.appid) and int(upd.get("t", 0)) >= self.game_started - 300:
+            self.game_update = upd
+            notes.append("Гру оновлено — FSR 4 і твіки перевірено/відновлено"
+                         + (", графіку перевірю на цьому запуску" if upd.get("retune") else ""))
+        com = _load_json(os.path.join(CACHE_DIR, "community_applied.json"), None)
+        if com and str(com.get("appid")) == str(self.appid) and int(com.get("t", 0)) >= self.game_started - 300:
+            notes.append("Застосовано готовий профіль з бази AutoFPS" +
+                         (f": {com['summary']}" if com.get("summary") else ""))
+        return notes
+
+    async def share_profile(self, appid=None):
+        """Профіль гри для бази: зберігає локально і повертає посилання на GitHub."""
+        import profiles_db as PDB
+        appid = str(appid or self.appid or getattr(self, "last_appid", "") or "")
+        if not appid:
+            return {"ok": False, "error": "Немає гри"}
+        prof = PDB.export(appid, self.device)
+        if not prof:
+            return {"ok": False, "error": "Гра ще не підібрана — зіграй кілька разів"}
+        os.makedirs(os.path.join(CFG_DIR, "shared"), exist_ok=True)
+        _save_json(os.path.join(CFG_DIR, "shared", f"{appid}.json"), prof)
+        return {"ok": True, "url": PDB.share_url(prof), "profile": prof}
+
+    # ---------------- живлення: профілі батарея/зарядка, автопідбір TDP
+
+    def _mode(self):
+        """Рівень FPS з урахуванням джерела живлення."""
+        if self.settings.get("power_profiles", True):
+            m = str(self.settings.get("ac_mode" if self.ac else "bat_mode", "same"))
+            if m != "same":
+                return m
+        return str(self.settings["mode"])
+
+    def _tdp_wanted(self):
+        """off — не керуємо; max — повна потужність; auto — шукаємо мінімальний TDP."""
+        if not self.tdp.available:
+            return "off"
+        a = self.settings.get("auto_tdp", "battery")
+        if a == "always":
+            return "auto"
+        if a == "battery":
+            return "max" if self.ac else "auto"
+        return "off"
+
+    def _tdp_set(self, w, why=""):
+        if self.tdp_orig is None:
+            self.tdp_orig = self.tdp.get()
+        w = max(self.tdp.min, min(self.tdp.max, int(w)))
+        if w != self.tdp_cur and self.tdp.set(w):
+            decky.logger.info(f"TDP → {w} Вт {why}")
+        self.tdp_cur = w
+        self.tdp_last = time.time()
+
+    def _tdp_restore(self):
+        if getattr(self, "tdp_orig", None) is not None and self.tdp.available:
+            self.tdp.set(self.tdp_orig)
+            decky.logger.info(f"TDP повернуто: {self.tdp_orig} Вт")
+        self.tdp_orig = None
+
+    def _tdp_saved_key(self):
+        return f"{self.device['id']}:{'ac' if self.ac else 'bat'}:{self._out_fps()}"
+
+    def _tdp_begin(self):
+        """Рівень FPS зафіксовано — починаємо (або відновлюємо) підбір TDP."""
+        want = self._tdp_wanted()
+        self.tdp_samples = []
+        self.tdp_floor = 0
+        if want == "off":
+            if self.tdp_state != "off":
+                self._tdp_restore()
+                self.tdp_cur = None
+            self.tdp_state = "off"
+            return
+        if want == "max":
+            self.tdp_state = "max"
+            self._tdp_set(self.tdp.max, "(зарядка — повна потужність)")
+            return
+        self.tdp_key = self._tdp_saved_key()
+        saved = (self.games.get(str(self.appid)) or {}).get("tdp", {}).get(self.tdp_key)
+        if saved:
+            self.tdp_state = "settled"
+            self._tdp_set(saved, "(збережене для цієї гри)")
+        else:
+            self.tdp_state = "descending"
+            self._tdp_set(self.tdp_cur or self.tdp.max, "(старт підбору)")
+
+    def _tdp_save(self):
+        if not self.appid or self.tdp_cur is None:
+            return
+        g = self.games.setdefault(str(self.appid), {})
+        g.setdefault("tdp", {})[self.tdp_key or self._tdp_saved_key()] = self.tdp_cur
+        _save_json(GAMES_FILE, self.games)
+
+    def _tdp_rescue(self):
+        """FPS просів, а TDP знижено нами — спершу додаємо потужність, а не знижуємо FPS."""
+        if self.tdp_state not in ("descending", "settled") or self.tdp_cur is None \
+                or self.tdp_cur >= self.tdp.max:
+            return False
+        self.tdp_floor = max(self.tdp_floor, self.tdp_cur)
+        self._tdp_set(self.tdp_cur + 3, "(не тримало FPS)")
+        if self.tdp_state == "descending":
+            self.tdp_state = "settled"
+            self._notify(f"AutoFPS: TDP {self.tdp_cur} Вт",
+                         f"Мінімальна потужність, що тримає {self._out_fps()} FPS. Запам'ятав для цієї гри")
+        self._tdp_save()
+        self.tdp_samples = []
+        return True
+
+    def _tdp_tick(self, now):
+        if self.tdp_state == "off" or self.phase not in ("locked", "manual"):
+            return
+        if self.tdp_state == "max":
+            if now - self.tdp_last > 30:      # Steam міг змінити ліміт
+                self._tdp_set(self.tdp.max)
+            return
+        self.tdp_samples = [x for x in self.tdp_samples if now - x[0] <= 12]
+        if now - self.tdp_last < 12 or len(self.tdp_samples) < 10 or now - self.tdp_samples[0][0] < 10:
+            return
+        p10 = percentile([x[1] for x in self.tdp_samples], 0.10)
+        self.tdp_samples = []
+        if p10 < self.base * 0.93:
+            self._tdp_rescue()
+            return
+        if self.tdp_state == "descending":
+            nxt = self.tdp_cur - 2
+            if nxt <= max(self.tdp.min, self.tdp_floor):
+                self.tdp_state = "settled"
+                self._tdp_save()
+                self._notify(f"AutoFPS: TDP {self.tdp_cur} Вт",
+                             f"Гра тримає {self._out_fps()} FPS навіть на мінімальній потужності")
+                return
+            self._tdp_set(nxt, f"(тримає {p10:.0f} FPS)")
+
+    def _power_tick(self, now):
+        if now - self.ac_checked < 5:
+            return
+        self.ac_checked = now
+        ac = P.on_ac()
+        if ac == self.ac:
+            return
+        self.ac = ac
+        if self.appid is None:
+            return
+        src = "зарядки" if ac else "батареї"
+        self._notify(f"AutoFPS: живлення від {src}",
+                     f"Профіль {'зарядки' if ac else 'батареї'}: FPS {self._mode() if self._mode() != 'auto' else 'авто'}"
+                     + (", TDP підбирається" if self._tdp_wanted() == "auto" else
+                        ", повна потужність" if self._tdp_wanted() == "max" else ""))
+        if self.phase in ("locked", "manual"):
+            self._tdp_begin()   # ручний рівень FPS перезастосується в _tick сам
+
     # ---------------- decision logic
 
     def _choose(self, p10):
@@ -765,6 +939,9 @@ class Plugin:
 
     def _start_probe(self, now, upgrade=False):
         self.phase, self.phase_t, self.samples = "probe", now, []
+        if self.tdp_state != "off" and self.tdp.available:
+            self._tdp_set(self.tdp.max, "(замір без обмежень)")
+            self.tdp_state, self.tdp_key = "max", None
         self.last_probe = now
         self.message = "Вимірюю, скільки гра тягне без обмеження…"
         if upgrade:
@@ -779,6 +956,8 @@ class Plugin:
         fg = f" + FG ×{mult} → {base * mult}" if mult > 1 else ""
         self.message = f"{why}: {base} FPS{fg}"
         self._apply()
+        if self.tdp_key != self._tdp_saved_key() or self.tdp_state == "off":
+            self._tdp_begin()
         if save:
             self._remember()
         if base * mult != old_out:
@@ -856,9 +1035,12 @@ class Plugin:
                 self._opti_selfcheck(now)
                 self._report_crash()
                 self._restore_display()
+                self._tdp_restore()
                 self._reset_game_state()
                 self.reader.reset()
+            self._power_tick(now)
             return
+        self._power_tick(now)
 
         if str(cur.get("appid")) != str(self.appid) or cur.get("pid") != self.pid:
             self._reset_game_state()
@@ -880,15 +1062,15 @@ class Plugin:
             self.message = "Розігрів (завантаження, шейдери)…"
             if self.settings["enabled"]:
                 saved = self.games.get(self.appid) or {}
-                if self.settings["mode"] != "auto":
-                    nxt = f"фіксовано {self.settings['mode']} FPS"
+                if self._mode() != "auto":
+                    nxt = f"фіксовано {self._mode()} FPS"
                 elif saved.get("device") == self.device["id"] and not self.tuning:
                     nxt = "застосую рівень з минулого разу після розігріву (~20 с)"
                 else:
                     nxt = "заміряю FPS після розігріву (~20–40 с)"
                 if self.settings.get("start_on_button", True):
                     nxt = "коли почнеш грати (не в меню), відкрий AutoFPS і натисни «▶ Почати підбір»"
-                extra = self._mode_report(cur)
+                extra = self._mode_report(cur) + self._start_notes(now)
                 body = "\n".join([self._graphics_report(), *extra, f"Далі: {nxt}"])
                 self._notify("AutoFPS підключено", body)
 
@@ -915,9 +1097,11 @@ class Plugin:
             if self.sfg >= 2 and self.settings["fps_counts_generated"]:
                 fps = fps / max(2, self.mult)  # MangoHud бачить і згенеровані кадри
             self.samples.append((now, fps, gpu))
+            self.tdp_samples.append((now, fps))
+        self._tdp_tick(now)
 
         # фіксований рівень вибрано вручну
-        mode = self.settings["mode"]
+        mode = self._mode()
         if mode != "auto":
             base = int(mode)
             # Крок автопідбору графіки при фіксованому FPS: спершу ~20 с замір без обмеження
@@ -945,6 +1129,7 @@ class Plugin:
                 self.base, self.mult = base, (self.sfg if self.sfg >= 2 else 1)
                 self.phase, self.message = "manual", f"Вручну: {base} FPS"
                 self._apply()
+                self._tdp_begin()
                 self._notify(f"AutoFPS: {base} FPS", "Фіксований рівень, вибраний вручну")
             elif now - self.last_apply > 5:
                 self._apply()
@@ -1026,6 +1211,9 @@ class Plugin:
                 self.bad_windows += 1
             else:
                 self.bad_windows = 0
+            if self.bad_windows >= 2 and self._tdp_rescue():
+                self.bad_windows = 0      # спершу повертаємо потужність, FPS не чіпаємо
+                return
             if self.bad_windows >= 2:
                 if self.sfg < 2:
                     self._record_tune(p10, lower_only=True)
@@ -1063,6 +1251,11 @@ class Plugin:
             "launch_option": LAUNCH_OPTION,
             "lsfg_launcher": lsfg_launcher(self.settings.get("fg_tool", "lsfg")),
             "fg_launchers": fg_launchers(),
+            "power": {"ac": self.ac, "battery": P.battery_percent(),
+                      "tdp_available": self.tdp.available, "tdp_min": self.tdp.min, "tdp_max": self.tdp.max,
+                      "tdp": self.tdp_cur, "tdp_state": self.tdp_state, "tdp_error": self.tdp.error,
+                      "mode": self._mode()},
+            "game_update": getattr(self, "game_update", None),
         }
 
     def _lsfg_cached(self):
@@ -1105,12 +1298,13 @@ class Plugin:
         """Повернути оригінальні налаштування гри (при наступному запуску)."""
         appid = self.appid or getattr(self, "last_appid", None)
 
-        if appid:   # твік Engine.ini UE5 теж прибрати
-            uet = os.path.join(CFG_DIR, "ue_tweaks.json")
-            d = _load_json(uet, {})
-            if str(appid) in d:
-                d[str(appid)]["restore_pending"] = True
-                _save_json(uet, d)
+        if appid:   # твіки рушіїв (Engine.ini UE5, boot.config Unity) теж прибрати
+            for name in ("ue_tweaks.json", "unity_tweaks.json"):
+                uet = os.path.join(CFG_DIR, name)
+                d = _load_json(uet, {})
+                if str(appid) in d:
+                    d[str(appid)]["restore_pending"] = True
+                    _save_json(uet, d)
 
         def fn(e):
             e["restore_pending"] = True
