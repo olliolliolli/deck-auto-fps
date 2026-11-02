@@ -1240,6 +1240,7 @@ class Plugin:
                               else O.resolve_upscaler("auto", gpu)[1]),
             "current": O.resolve_upscaler(self.settings.get("opti_upscaler", "auto"), gpu)[1],
             "detected_arch": O.detect_gpu().get("arch"), "game": None,
+            "helixsr": O.helixsr_hlx(),
         }
         if appid:
             a = str(appid)

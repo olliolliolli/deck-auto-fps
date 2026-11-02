@@ -197,6 +197,7 @@ type OptiStatus = {
   extractor: string;
   upscaler_auto: string;
   game: OptiGame | null;
+  helixsr: { tag: string; path: string } | null;
 };
 type OptiResult = {
   ok: boolean;
@@ -733,10 +734,16 @@ function OptiSection({
       <PanelSectionRow>
         <DropdownItem
           label="Resident Evil 4"
-          description="FSR 4 — найкраща картинка, FSR 3.1 — на ~15% більше FPS. Діє одразу, навіть посеред гри"
+          description={
+            "FSR 4 — найкраща картинка, FSR 3.1 — на ~15% більше FPS (діє одразу)." +
+            (st.helixsr
+              ? " HLX FSR 4 — FSR 4 від HelixSR Manager, зібраний для RDNA2/3 (з наступного запуску гри)"
+              : " Встанови HelixSR Manager і збери HLX FSR 4 — з'явиться ще один варіант")
+          }
           rgOptions={[
             { data: "4", label: "FSR 4" },
             { data: "3", label: "FSR 3.1 (швидше)" },
+            ...(st.helixsr ? [{ data: "hlx", label: `HLX FSR 4 · HelixSR ${st.helixsr.tag}` }] : []),
           ]}
           selectedOption={settings.bridge_version ?? "4"}
           onChange={(o: { data: string }) => update("bridge_version", o.data)}

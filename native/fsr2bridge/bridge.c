@@ -727,12 +727,17 @@ static uint64_t ffx_pick_version(ID3D12Device *dev)
     const char *names[16] = {0};
     q.versionIds = ids; q.versionNames = names;
     f_query(NULL, &q.header);
-    uint64_t pick = 0; int best = -1;
+    uint64_t pick = 0; int best = -100000;
     for (uint64_t i = 0; i < count; i++) {
         const char *nm = names[i] ? names[i] : "?";
         LOG("FFX: доступна версія %llu: %s (id=%llx)", (unsigned long long)i, nm, (unsigned long long)ids[i]);
-        int major = atoi(nm);
-        int score = major * 100;   /* перша в списку — найновіша в межах «мажорної» */
+        const char *dg = nm;
+        while (*dg && (*dg < '0' || *dg > '9')) dg++;          /* «HLX FSR 4 (4.1.2)» → 4 */
+        int major = atoi(dg);
+        int hlx = strstr(nm, "HLX") != NULL || strstr(nm, "Helix") != NULL;
+        int score = major * 100 - (int)i;   /* при рівності — перша в списку (найновіша) */
+        if (g_cfg.want[0] == 'h') { if (hlx) score += 5000; }
+        else if (hlx) score -= 3000;         /* HLX — лише коли його вибрали явно */
         if (g_cfg.want[0] == '4' && major == 4) score += 1000;
         if (g_cfg.want[0] == '3' && major == 3) score += 1000;
         if (score > best) { best = score; pick = ids[i]; snprintf(g_ffx_version, sizeof(g_ffx_version), "%s", nm); }

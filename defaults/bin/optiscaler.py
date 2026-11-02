@@ -874,7 +874,11 @@ def install(appid, install_path, game_name="", args=None, settings=None, log=pri
     backups = list(game.get("backups", []))
     # 1) бекап оригінальних файлів гри (лише ті, що не наші)
     ours = set(game.get("files", []))
+    helix_here = os.path.isfile(os.path.join(target, HELIX_MARKER)) or \
+        os.path.isdir(os.path.join(target, "HelixSR"))
     for name in ORIGINAL_BACKUPS + (["dinput8.dll"] if ref_kind else []):
+        if helix_here and name.startswith("amd_fidelityfx"):
+            continue                 # HelixSR уже стоїть у грі — його файли не чіпаємо
         p = os.path.join(target, name)
         if os.path.isfile(p) and name not in ours and not os.path.exists(p + ".b"):
             shutil.move(p, p + ".b")
@@ -882,6 +886,8 @@ def install(appid, install_path, game_name="", args=None, settings=None, log=pri
     # 2) копіювання файлів OptiScaler
     files = []
     for name in _files_to_copy(src):
+        if helix_here and name.startswith("amd_fidelityfx"):
+            continue
         s = os.path.join(src, name)
         if name == "OptiScaler.dll":
             d = os.path.join(target, dll)
@@ -900,7 +906,7 @@ def install(appid, install_path, game_name="", args=None, settings=None, log=pri
         name = ASSETS[key]["file"]
         shutil.copy2(path, os.path.join(target, name))
         files.append(name)
-    if up_override:
+    if up_override and not helix_here:
         shutil.copy2(up_override, os.path.join(target, "amd_fidelityfx_upscaler_dx12.dll"))
         files.append("amd_fidelityfx_upscaler_dx12.dll")
     # 3b) REFramework (+ PDPerfPlugin) поруч з exe гри
@@ -1122,6 +1128,37 @@ jitter_y=1
 """
 
 
+# ---- HelixSR (плагін «HelixSR Manager»): беремо вже зібраний ним HLX FSR 4 — AMD FSR 4 на конвеєрі
+# HelixSR, розрахований на RDNA2/3. Самі нічого не завантажуємо й не збираємо (ліцензія HelixSR).
+HLX_MAGIC = b"HLXFSR4D"
+HELIX_MARKER = "helixsr-install.json"
+
+
+def helixsr_hlx():
+    """Найновіший зібраний HLX FSR 4 з ~/HelixSR/<версія>/HLX-FSR4/ (або теки з налаштувань менеджера)."""
+    bases = [os.path.join(C.HOME, "HelixSR")]
+    for sf in glob.glob(os.path.join(C.HOME, "homebrew", "settings", "*elix*", "settings.json")):
+        d = C.load_json(sf, {}).get("helix_dir")
+        if d:
+            bases.insert(0, d)
+    found = []
+    for b in bases:
+        for dll in glob.glob(os.path.join(b, "*", "HLX-FSR4", "amd_fidelityfx_upscaler_dx12.dll")):
+            try:
+                with open(dll, "rb") as f:
+                    f.seek(-24, os.SEEK_END)
+                    if f.read(8) != HLX_MAGIC:
+                        continue          # шейдери ще не зібрано — у грі не запрацює
+            except OSError:
+                continue
+            tag = os.path.basename(os.path.dirname(os.path.dirname(dll)))
+            found.append((_version_tuple(tag), tag, dll))
+    if not found:
+        return None
+    found.sort(reverse=True)
+    return {"tag": found[0][1], "path": found[0][2]}
+
+
 def bridge_dll():
     p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fsr2bridge", "dinput8.dll")
     return p if os.path.isfile(p) else None
@@ -1197,8 +1234,12 @@ def bridge_install(appid, install_path, game_name="", args=None, settings=None, 
     src_dir = version_dir(installed_tag())
     gpu = effective_gpu(settings)
     loader = os.path.join(src_dir, "amd_fidelityfx_dx12.dll")
-    upscaler = os.path.join(src_dir, "amd_fidelityfx_upscaler_dx12.dll") if gpu.get("arch") == "rdna4" \
-        else fetch_asset("fsr40_int8", log)        # FSR 4.0.2 INT8 — працює на RDNA2/3
+    hlx = helixsr_hlx() if settings.get("bridge_version") == "hlx" else None
+    if hlx:
+        upscaler = hlx["path"]                      # HLX FSR 4 з HelixSR Manager
+    else:
+        upscaler = os.path.join(src_dir, "amd_fidelityfx_upscaler_dx12.dll") if gpu.get("arch") == "rdna4" \
+            else fetch_asset("fsr40_int8", log)    # FSR 4.0.2 INT8 — працює на RDNA2/3
     if not os.path.isfile(loader):
         raise RuntimeError("у пакеті OptiScaler немає amd_fidelityfx_dx12.dll")
     target = find_target(appid, install_path, game_name, args)
@@ -1208,6 +1249,8 @@ def bridge_install(appid, install_path, game_name="", args=None, settings=None, 
              "amd_fidelityfx_upscaler_dx12.dll": upscaler}
     backups = list(game.get("bridge_backups", []))
     ours = _our_shas() | {sha256(p) for p in files.values()}
+    if hlx:
+        ours.add(sha256(hlx["path"]))
     for name, src in files.items():
         dst = os.path.join(target, name)
         if os.path.isfile(dst) and not _is_ours(dst) and sha256(dst) not in ours \
@@ -1237,9 +1280,30 @@ def bridge_install(appid, install_path, game_name="", args=None, settings=None, 
     return game
 
 
-def bridge_set_version(target, settings):
-    """Налаштування «Міст: FSR 4 / FSR 3.1» → рядок version= у autofps_fsr.ini (міст підхопить на льоту)."""
-    want = "3" if (settings or {}).get("bridge_version") == "3" else "4"
+def bridge_set_version(target, settings, log=print):
+    """Налаштування «Міст: FSR 4 / FSR 3.1 / HLX FSR 4» → рядок version= у autofps_fsr.ini (міст підхопить
+    на льоту). Для HLX FSR 4 ще й підміняється бібліотека апскейлера (діє з наступного запуску гри)."""
+    bv = (settings or {}).get("bridge_version", "4")
+    hlx = helixsr_hlx() if bv == "hlx" else None
+    want = "hlx" if hlx else "3" if bv == "3" else "4"
+    dst = os.path.join(target, "amd_fidelityfx_upscaler_dx12.dll")
+    src = hlx["path"] if hlx else None
+    if not src and os.path.isfile(dst):
+        try:
+            with open(dst, "rb") as f:
+                f.seek(-24, os.SEEK_END)
+                is_hlx = f.read(8) == HLX_MAGIC
+        except OSError:
+            is_hlx = False
+        if is_hlx:   # був HLX — повертаємо FSR 4.0.2 INT8 від AMD
+            try:
+                src = fetch_asset("fsr40_int8", log)
+            except Exception as e:  # noqa: BLE001
+                log(f"міст: не вдалося повернути FSR 4: {e}")
+    if src and os.path.isfile(dst) and sha256(src) != sha256(dst):
+        tmp = dst + ".autofps-new"
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dst)   # новий файл: запущена гра лишає старий, нова — візьме новий
     ini = os.path.join(target, BRIDGE_INI)
     try:
         text = open(ini, encoding="utf-8").read()
