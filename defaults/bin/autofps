@@ -47,6 +47,12 @@ if [ "$MODE" != "safe" ] && [ -f "$DIR/autotune.py" ]; then
     || log "autotune завершився з помилкою (ігнорую)"
 fi
 TUNING="$(cat "$CACHE/tuning_now" 2>/dev/null)"
+# --- Unreal Engine 5: твік Engine.ini (кеш шейдерів, рівніший кадр, дешевші важкі ефекти)
+if [ -f "$DIR/ue_tweaks.py" ]; then
+  if [ "$MODE" != "safe" ]; then UE_CMD=apply; else UE_CMD=remove; fi
+  timeout 20 python3 "$DIR/ue_tweaks.py" "$UE_CMD" "$APPID" "$@" >>"$LOG" 2>&1 \
+    || log "ue_tweaks завершився з помилкою (ігнорую)"
+fi
 
 # --- додаткові бібліотеки з теки гри для цієї гри (напр. міст FSR2→FSR4 як dinput8.dll):
 #     ~/.config/autofps/dlloverride_<appid> — назви через кому (лише літери/цифри/_)

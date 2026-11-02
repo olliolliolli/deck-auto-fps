@@ -38,6 +38,7 @@ type Settings = {
   probe_s: number;
   fg_mode: "external" | "off" | "auto" | "always";
   fg_tool?: "lsfg" | "mako" | "none";
+  ue5_tweak?: boolean;
   fg_min_base: number;
   fg_allow_3x: boolean;
   fg_flow_scale: number;
@@ -892,6 +893,14 @@ function Content() {
             description="Підбирає якість за кілька запусків гри"
             checked={s.autotune}
             onChange={(v: boolean) => update("autotune", v)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="Твік Engine.ini для Unreal Engine 5"
+            description="Менше підвисань (кеш шейдерів), рівніший кадр, легші Nanite/Lumen/туман. Діє з наступного запуску гри"
+            checked={s.ue5_tweak !== false}
+            onChange={(v: boolean) => update("ue5_tweak", v)}
           />
         </PanelSectionRow>
         <PanelSectionRow>

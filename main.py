@@ -74,6 +74,7 @@ DEFAULT_SETTINGS = {
     "fg_performance_mode": True,
     "fps_counts_generated": True,  # MangoHud бачить згенеровані кадри
     "autotune": True,          # автопідбір графіки гри (Unreal/Unity)
+    "ue5_tweak": True,         # твік Engine.ini для ігор на Unreal Engine 5
     "quality_target": "auto",  # базовий FPS, під який підбирається графіка
     "respect_manual_graphics": False,
     "lowres_for_quality": True,  # екран 1080p+: пробувати рендер ≈HD, якщо так графіка вища  # True — ручні зміни в меню гри зупиняють підбір
@@ -1103,6 +1104,13 @@ class Plugin:
     async def restore_original(self):
         """Повернути оригінальні налаштування гри (при наступному запуску)."""
         appid = self.appid or getattr(self, "last_appid", None)
+
+        if appid:   # твік Engine.ini UE5 теж прибрати
+            uet = os.path.join(CFG_DIR, "ue_tweaks.json")
+            d = _load_json(uet, {})
+            if str(appid) in d:
+                d[str(appid)]["restore_pending"] = True
+                _save_json(uet, d)
 
         def fn(e):
             e["restore_pending"] = True
