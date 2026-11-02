@@ -173,7 +173,10 @@ class PowerCtl:
                     if p != profs[0]:
                         self.levels.append({"profile": p, "boost": True})
                 self.kind = "profiles"
-        if not self.kind and self.tdp.available:
+        if device.get("quiet_profiles") and not self.kind:
+            # тут ручний TDP = гучний «custom» — краще не керувати зовсім
+            self.error = self.error or "профілі живлення не знайдено в steamos-manager"
+        elif not self.kind and self.tdp.available:
             ws = list(range(self.tdp.min, self.tdp.max + 1, 2))
             if ws[-1] != self.tdp.max:
                 ws.append(self.tdp.max)

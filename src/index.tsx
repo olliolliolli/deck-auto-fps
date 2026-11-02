@@ -168,7 +168,7 @@ const getStatus = callable<[], Status>("get_status");
 const setSetting = callable<[key: string, value: unknown], boolean>("set_setting");
 const reprobe = callable<[], boolean>("reprobe");
 const forgetAll = callable<[], boolean>("forget_all");
-const retune = callable<[], boolean>("retune");
+const retune = callable<[appid?: string], { ok: boolean; message: string }>("retune");
 const listGames = callable<[], Game[]>("list_games");
 const collectDiagnostics = callable<
   [],
@@ -1130,12 +1130,27 @@ function Content() {
         {st.tune && st.tune.engine && st.tune.engine !== "unknown" && (
           <>
             <PanelSectionRow>
-              <ButtonItem layout="below" onClick={() => retune()}>
+              <ButtonItem
+                layout="below"
+                onClick={async () => {
+                  const r = await retune(st.tune?.appid ?? undefined);
+                  toaster.toast({ title: r.ok ? "AutoFPS · графіку буде підібрано заново" : "AutoFPS", body: r.message });
+                }}
+              >
                 Підібрати графіку заново
               </ButtonItem>
             </PanelSectionRow>
             <PanelSectionRow>
-              <ButtonItem layout="below" onClick={() => restoreOriginal()}>
+              <ButtonItem
+                layout="below"
+                onClick={async () => {
+                  const ok = await restoreOriginal();
+                  toaster.toast({
+                    title: "AutoFPS",
+                    body: ok ? "Оригінальні налаштування гри повернуться при наступному запуску" : "Цю гру ще не запускали з AutoFPS",
+                  });
+                }}
+              >
                 Повернути оригінальні налаштування
               </ButtonItem>
             </PanelSectionRow>

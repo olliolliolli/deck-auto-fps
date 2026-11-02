@@ -1161,7 +1161,15 @@ class Plugin:
             self.samples = []
             if self.phase != "waiting":
                 self.phase, self.phase_t = "waiting", now
-            self.message = "Чекаю: коли почнеш грати, натисни «▶ Почати підбір» у меню AutoFPS"
+            # підбір графіки без кнопки стояв би вічно — через 3 хв гри починаємо самі
+            if self.tuning and now - self.phase_t > 180:
+                self.user_started = True
+                self.phase, self.phase_t = "warmup", now - max(0.0, float(self.settings["warmup_s"]) - 5.0)
+                self._notify("AutoFPS: почав підбір графіки сам",
+                             "Кнопку «▶ Почати підбір» не натиснуто 3 хв — міряю FPS для підбору графіки")
+                return
+            self.message = ("Чекаю: коли почнеш грати, натисни «▶ Почати підбір» у меню AutoFPS"
+                            + (" (підбір графіки почнеться сам через 3 хв)" if self.tuning else ""))
             return
 
         for fps, gpu in self.reader.read(self.game_started):
@@ -1351,8 +1359,15 @@ class Plugin:
             self._lsfg_t, self._lsfg = now, lsfg_status(self.settings)
         return self._lsfg
 
+    def _last_app(self):
+        """Поточна гра, або остання запущена (і після перезапуску плагіна)."""
+        a = self.appid or getattr(self, "last_appid", None)
+        if not a:
+            a = (_load_json(CURRENT_FILE, None) or {}).get("appid")
+        return str(a) if a else None
+
     def _tune_status(self):
-        appid = self.appid or getattr(self, "last_appid", None)
+        appid = self._last_app()
         if not appid:
             return None
         e = self._tune_entry(appid)
@@ -1367,22 +1382,29 @@ class Plugin:
                 "note": e.get("note", ""), "summary": e.get("summary", ""),
                 "target": e.get("target")}
 
-    async def retune(self):
-        """Почати підбір графіки цієї гри з нуля (з наступного запуску)."""
-        appid = self.appid or getattr(self, "last_appid", None)
+    async def retune(self, appid=None):
+        """Почати підбір графіки цієї гри з нуля (з наступного запуску). Повертає повідомлення."""
+        appid = str(appid or self._last_app() or "")
+        if not appid:
+            return {"ok": False, "message": "Спершу запусти гру з AutoFPS"}
 
         def fn(e):
             for k in ("history", "failed", "converged", "ineffective", "last",
-                      "user_override", "applied_values",
+                      "user_override", "applied_values", "start_scaled", "track",
+                      "native_result", "lowres_done", "from_community",
                       "disabled", "restore_pending"):
                 e.pop(k, None)
             e["level"] = self.device["start_level"]
             e["note"] = "Підбір почнеться з наступного запуску гри"
-        return self._modify_tune(appid, fn)
+        if not self._modify_tune(appid, fn):
+            return {"ok": False, "message": "Цю гру ще не запускали з AutoFPS — підбір почнеться при першому запуску"}
+        running = str(self.appid) == appid
+        return {"ok": True, "message": ("Перезапусти гру: графіка змінюється лише при старті. " if running else "") +
+                "Після запуску натисни «▶ Почати підбір», коли почнеш грати (або підбір почнеться сам за 3 хв)"}
 
     async def restore_original(self):
         """Повернути оригінальні налаштування гри (при наступному запуску)."""
-        appid = self.appid or getattr(self, "last_appid", None)
+        appid = self._last_app()
 
         if appid:   # твіки рушіїв (Engine.ini UE5, boot.config Unity) теж прибрати
             for name in ("ue_tweaks.json", "unity_tweaks.json"):
@@ -1644,6 +1666,15 @@ class Plugin:
 
     def _diagnostics_text(self):
         out = []
+        try:
+            out.append("\n===== живлення =====")
+            out.append(json.dumps({"kind": self.pw.kind, "levels": [self.pw.label(i) for i in range(len(self.pw.levels))],
+                                   "error": self.pw.error, "cli": self.pw.tdp.cli, "state": self.tdp_state,
+                                   "level": self.tdp_cur, "ac": self.ac, "telemetry": P.telemetry(),
+                                   "props": (self.pw.tdp._run("get-all-properties") or "")[:1500]},
+                                  ensure_ascii=False, indent=2))
+        except Exception as e:  # noqa: BLE001
+            out.append(f"живлення: {e}")
 
         def sec(title):
             out.append(f"\n===== {title} =====")
