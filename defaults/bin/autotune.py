@@ -36,6 +36,33 @@ UE_KEYS = ["sg.ResolutionQuality", "sg.ViewDistanceQuality", "sg.AntiAliasingQua
 UE_EXTRA_FOLLOW = {"MeshQuality": "ShadingQuality", "MaterialQuality": "ShadingQuality",
                    "DistanceFieldAmbientOcclusion": "GlobalIlluminationQuality"}
 UE_EXTRA_KEYS = list(UE_EXTRA_FOLLOW) + ["Anisotropy"]
+UE_NOT_GRAPHICS = ("upscal", "dlss", "fsr", "xess", "tsr", "audio", "sound", "population",
+                   "traffic", "crowd", "physics", "resolution", "preset", "framegen", "sharp")
+
+
+def ue_follow(name):
+    """За якою стандартною групою sg.* іде нестандартне налаштування (sg.HairQuality тощо)."""
+    n = name.lower()
+    table = [(("volumetric", "fog", "cloud", "sky", "atmospher", "lumen", "gi", "illum"), "GlobalIlluminationQuality"),
+             (("reflect", "ssr"), "ReflectionQuality"),
+             (("shadow",), "ShadowQuality"),
+             (("motionblur", "dof", "depthoffield", "bloom", "postprocess", "lens"), "PostProcessQuality"),
+             (("hair", "fx", "effect", "particle", "water", "destruct"), "EffectsQuality"),
+             (("foliage", "grass", "vegetation", "tree"), "FoliageQuality"),
+             (("view", "distance", "lod", "landscape", "terrain"), "ViewDistanceQuality"),
+             (("texture", "streaming"), "TextureQuality"),
+             (("mesh", "material", "object", "detail", "environment", "shading", "shader", "geometry"), "ShadingQuality")]
+    for words, grp in table:
+        if any(w in n for w in words):
+            return grp
+    return "EffectsQuality"
+
+
+def ue_is_quality(name, value):
+    n = name.lower()
+    if not n.endswith("quality") or any(w in n for w in UE_NOT_GRAPHICS):
+        return False
+    return bool(re.fullmatch(r"\s*[0-4]\s*", str(value)))
 
 # Кожна наступна сходинка = попередня + ці зміни.
 # Порядок: спершу дорогі для GPU й малопомітні ефекти, роздільна здатність і
@@ -246,14 +273,18 @@ class UnrealAdapter:
             if st.startswith("[") and st.endswith("]"):
                 cur = st[1:-1]
             elif cur and cur != self.SECTION and "=" in st and not st.startswith((";", "#")):
-                k = st.split("=", 1)[0].strip()
-                if k in UE_EXTRA_KEYS and k not in where:
+                k, v = (x.strip() for x in st.split("=", 1))
+                if k not in where and (k in UE_EXTRA_KEYS or ue_is_quality(k, v)) \
+                        and not cur.startswith("/Script/Engine."):
                     where[k] = cur
         return where
 
     def read(self, cfg):
         vals = read_ini_section(cfg, self.SECTION)
         out = {k: vals[k] for k in UE_KEYS if k in vals}
+        for k, v in vals.items():            # нестандартні групи гри (sg.HairQuality, …)
+            if k.startswith("sg.") and k not in out and ue_is_quality(k[3:], v):
+                out[k] = v
         for k, sec in self._extra_where(cfg).items():
             v = read_ini_section(cfg, sec).get(k)
             if v is not None:
@@ -264,17 +295,21 @@ class UnrealAdapter:
         steps = ue_ladder(lowres)
         handheld = (self.device or {}).get("id") in HANDHELDS
         extra_max = getattr(self, "extra_max", {}) or {}
+        cur = self.read(self.cfg) if getattr(self, "cfg", None) else {}
+        extras = [k for k in cur if k.startswith("x.") or (k.startswith("sg.") and k not in UE_KEYS)]
         n = len(steps)
         for i, st in enumerate(steps):
             if handheld:
                 st["sg.TextureQuality"] = str(min(int(st["sg.TextureQuality"]), UE_HANDHELD_TEXTURE_MAX))
             st["sg.StreamingQuality"] = st["sg.TextureQuality"]
-            for k, cap in extra_max.items():
-                if k == "Anisotropy":
+            for k in extras:
+                name = k.split(".", 1)[1]
+                cap = int(extra_max.get(k, extra_max.get(name, 3)))
+                if name == "Anisotropy":
                     want = 16 if i <= n * 0.3 else 8 if i <= n * 0.65 else 4
                 else:
-                    want = int(st[f"sg.{UE_EXTRA_FOLLOW[k]}"])
-                st[f"x.{k}"] = str(int(min(want, cap)))
+                    want = int(st[f"sg.{UE_EXTRA_FOLLOW.get(name) or ue_follow(name)}"])
+                st[k] = str(int(min(want, cap)))
         return steps
 
     def rank(self, values, ladder):
@@ -814,6 +849,15 @@ def run(appid, args, device=None, log=print):
             adapter.appid = appid
             break
     if not adapter:
+        try:
+            import generic_settings as G
+            adapter = G.GenericAdapter.find(install, compat, device)
+            if adapter:
+                adapter.appid = appid
+        except Exception as e:  # noqa: BLE001
+            log(f"generic settings: {e!r}")
+            adapter = None
+    if not adapter:
         entry["engine"] = "unknown"
         entry["note"] = "Рушій не підтримується — працює лише підбір FPS"
         C.save_json(C.TUNE_FILE, tune)
@@ -832,12 +876,14 @@ def run(appid, args, device=None, log=print):
         # максимум кожного додаткового налаштування, що будь-коли стояв у файлі (стеля гри)
         xm = entry.setdefault("extra_max", {})
         for k, v in adapter.read(cfg).items():
-            if k.startswith("x."):
+            if k.startswith("x.") or (k.startswith("sg.") and k not in UE_KEYS):
                 try:
-                    xm[k[2:]] = max(int(float(v)), int(xm.get(k[2:], 0)))
+                    xm[k] = max(int(float(v)), int(xm.get(k, xm.get(k.split(".", 1)[1], 0))))
                 except ValueError:
                     pass
         adapter.extra_max = xm
+    elif hasattr(adapter, "update_max"):
+        adapter.update_max(entry.setdefault("extra_max", {}))
     if "original" not in entry:
         entry["original"] = adapter.read(cfg)
 

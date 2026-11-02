@@ -700,7 +700,9 @@ class Plugin:
         e = self._tune_entry()
         if not e:
             return "Графіку не змінено"
-        eng = {"unreal": "Unreal", "unity": "Unity"}.get(e.get("engine"), "")
+        eng = {"unreal": "Unreal", "unity": "Unity", "re_engine": "RE Engine",
+               "generic:fromsoft": "FromSoftware", "generic:xmlattr": "XML",
+               "generic:kvquoted": "Blizzard"}.get(e.get("engine"), "")
         if e.get("engine") == "unknown":
             return "Рушій гри не підтримується — графіку не змінюю, лише FPS"
         if e.get("user_override"):
