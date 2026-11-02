@@ -117,6 +117,7 @@ type Status = {
     mode: string;
   };
   game_update?: { appid: string; old: string; new: string; t: number } | null;
+  graphics_target?: number;
 };
 
 const TDP_STATE: Record<string, string> = {
@@ -872,11 +873,12 @@ function Content() {
 
   const modeOptions = [
     ...(st.device.vrr ? [{ data: "vrr", label: `VRR до ${st.device.max_hz} (без ліміту)` }] : []),
-    { data: "auto", label: "Авто" },
+    { data: "auto", label: "Авто (найвищий, що гра тримає)" },
     ...st.device.tiers.map((t) => ({ data: String(t), label: `${t} FPS` })),
   ];
+  const modeLabel = (m: string) => modeOptions.find((o) => o.data === m)?.label ?? m;
   const qualityOptions = [
-    { data: "auto", label: `Авто (${st.device.quality_target} FPS)` },
+    { data: "auto", label: `Авто — з ліміту від батареї (${st.graphics_target ?? st.device.quality_target})` },
     ...[30, 40, 45, 60]
       .filter((t) => t <= st.device.max_hz)
       .map((t) => ({ data: String(t), label: `${t} FPS` })),
@@ -969,29 +971,36 @@ function Content() {
       )}
       {tab === "fps" && (
         <>
-      <PanelSection title="Режим">
+      <PanelSection title="Ліміт FPS на екрані">
         <PanelSectionRow>
-          <ToggleField
-            label="Автоматичний підбір"
-            checked={s.enabled}
-            onChange={(v: boolean) => update("enabled", v)}
-          />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ToggleField
-            label="Починати підбір за кнопкою"
-            description="Щоб не міряти FPS у меню гри: підбір стартує, коли натиснеш «▶ Почати підбір» на вкладці «Гра»"
-            checked={s.start_on_button ?? true}
-            onChange={(v: boolean) => update("start_on_button", v)}
+          <Field
+            label={`Зараз ${st.power?.ac ? "🔌 від зарядки" : "🔋 від батареї"}: ${modeLabel(st.power?.mode ?? s.mode)}`}
+            description="Скільки кадрів буде на екрані. З Lossless — разом зі згенерованими. Перемикається сам, коли під'єднуєш зарядку"
           />
         </PanelSectionRow>
         <PanelSectionRow>
           <DropdownItem
-            label="Рівень FPS"
-            description={st.device.vrr ? "VRR: екран підлаштовує частоту під FPS гри — плавно без жорсткого ліміту. У VRR живлення теж знижується, поки FPS падає не більше ніж на ~12%" : undefined}
+            label="🔋 Від батареї"
             rgOptions={modeOptions}
-            selectedOption={s.mode}
-            onChange={(o: { data: string }) => update("mode", o.data)}
+            selectedOption={!s.bat_mode || s.bat_mode === "same" ? s.mode : s.bat_mode}
+            onChange={(o: { data: string }) => update("bat_mode", o.data)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <DropdownItem
+            label="🔌 Від зарядки"
+            rgOptions={modeOptions}
+            selectedOption={!s.ac_mode || s.ac_mode === "same" ? s.mode : s.ac_mode}
+            onChange={(o: { data: string }) => update("ac_mode", o.data)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <Field
+            label={`Графіка підбирається під ${st.graphics_target ?? "—"} FPS гри`}
+            description={
+              "Справжніх кадрів, без генерації — щоб гра рівно тримала ліміт від батареї" +
+              (s.quality_target !== "auto" ? " (задано вручну на вкладці «Ще»)" : "")
+            }
           />
         </PanelSectionRow>
       </PanelSection>
@@ -999,16 +1008,18 @@ function Content() {
       <PanelSection title="Живлення">
         <PanelSectionRow>
           <Field
-            label={`${st.power?.ac ? "🔌 Від зарядки" : "🔋 Від батареї"}${st.power?.battery != null ? ` · ${st.power.battery}%` : ""}`}
+            label={
+              st.power?.tdp_available
+                ? `${st.power.level ?? "як у Steam"}${st.power.level_i != null ? ` (${st.power.level_i + 1}/${st.power.levels})` : ""}`
+                : "Керування живленням недоступне"
+            }
             description={
               (st.power?.tdp_available
-                ? `${st.power.level ?? "живлення як у Steam"}` +
-                  (st.power.level_i != null ? ` (сходинка ${st.power.level_i + 1}/${st.power.levels})` : "") +
-                  ` · ${TDP_STATE[st.power.tdp_state] ?? st.power.tdp_state}`
-                : `Керування живленням недоступне: ${st.power?.tdp_error || "немає steamos-manager"}`) +
+                ? TDP_STATE[st.power.tdp_state] ?? st.power.tdp_state
+                : st.power?.tdp_error || "немає steamos-manager") +
+              (st.power?.battery != null ? ` · батарея ${st.power.battery}%` : "") +
               (st.power?.telemetry?.temp != null
-                ? `\n${st.power.hot ? "🔥 " : ""}APU ${st.power.telemetry.temp} °C` +
-                  (st.power.telemetry.fan ? ` · вентилятор ${st.power.telemetry.fan} об/хв` : "") +
+                ? ` · ${st.power.hot ? "🔥 " : ""}APU ${st.power.telemetry.temp} °C` +
                   (st.power.telemetry.watts ? ` · ${st.power.telemetry.watts} Вт` : "")
                 : "")
             }
@@ -1019,12 +1030,12 @@ function Content() {
             label="Тихо й економно"
             description={
               st.power?.kind === "profiles"
-                ? "Перемикає профілі Lenovo (Тихий / Збалансований / Продуктивний) і турбо CPU — найтихіший, що тримає FPS. Ручний «Custom» TDP не використовується: з ним вентилятор гуде. При ≥87 °C знижує живлення. Запам'ятовується для кожної гри"
-                : "Шукає найменший TDP, на якому гра тримає FPS: довше працює батарея, тихіше й холодніше. При ≥87 °C знижує живлення. Запам'ятовується для кожної гри"
+                ? "Найтихіший профіль Lenovo, на якому гра тримає ліміт FPS (без гучного «Custom»)"
+                : "Найменший TDP, на якому гра тримає ліміт FPS"
             }
             disabled={!st.power?.tdp_available}
             rgOptions={[
-              { data: "always", label: "Завжди (рекомендовано)" },
+              { data: "always", label: "Завжди" },
               { data: "battery", label: "Лише від батареї" },
               { data: "off", label: "Вимкнено" },
             ]}
@@ -1032,34 +1043,6 @@ function Content() {
             onChange={(o: { data: string }) => update("auto_tdp", o.data)}
           />
         </PanelSectionRow>
-        <PanelSectionRow>
-          <ToggleField
-            label="Різний FPS від батареї й від зарядки"
-            description="Перемикається сам, коли під'єднуєш або від'єднуєш зарядку"
-            checked={s.power_profiles !== false}
-            onChange={(v: boolean) => update("power_profiles", v)}
-          />
-        </PanelSectionRow>
-        {s.power_profiles !== false && (
-          <>
-            <PanelSectionRow>
-              <DropdownItem
-                label="🔋 FPS від батареї"
-                rgOptions={[{ data: "same", label: "Як «Рівень FPS»" }, ...modeOptions]}
-                selectedOption={s.bat_mode ?? "same"}
-                onChange={(o: { data: string }) => update("bat_mode", o.data)}
-              />
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <DropdownItem
-                label="🔌 FPS від зарядки"
-                rgOptions={[{ data: "same", label: "Як «Рівень FPS»" }, ...modeOptions]}
-                selectedOption={s.ac_mode ?? "same"}
-                onChange={(o: { data: string }) => update("ac_mode", o.data)}
-              />
-            </PanelSectionRow>
-          </>
-        )}
       </PanelSection>
         </>
       )}
@@ -1088,30 +1071,6 @@ function Content() {
             description="Багатопотокова підготовка кадру (graphics jobs). Якщо гра почне падати на старті — AutoFPS сам прибере твік"
             checked={s.unity_tweak !== false}
             onChange={(v: boolean) => update("unity_tweak", v)}
-          />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <DropdownItem
-            label="Під який FPS підбирати якість"
-            rgOptions={qualityOptions}
-            selectedOption={s.quality_target}
-            onChange={(o: { data: string }) => update("quality_target", o.data)}
-          />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ToggleField
-            label="Залишати мої ручні налаштування"
-            description="Увімкни, якщо після змін у меню гри AutoFPS має більше не чіпати її графіку"
-            checked={s.respect_manual_graphics}
-            onChange={(v: boolean) => update("respect_manual_graphics", v)}
-          />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ToggleField
-            label="Знижувати роздільність заради графіки"
-            description="Якщо так графіка буде помітно кращою — рендер ≈HD замість повної роздільності"
-            checked={s.lowres_for_quality}
-            onChange={(v: boolean) => update("lowres_for_quality", v)}
           />
         </PanelSectionRow>
         {st.tune && (
@@ -1236,6 +1195,48 @@ function Content() {
       )}
       {tab === "more" && (
         <>
+      <PanelSection title="Додатково">
+        <PanelSectionRow>
+          <ToggleField
+            label="AutoFPS керує FPS"
+            description="Вимкни, щоб AutoFPS нічого не обмежував у грі"
+            checked={s.enabled}
+            onChange={(v: boolean) => update("enabled", v)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="Режим «Авто»: починати за кнопкою"
+            description="Щоб не міряти FPS у меню гри: замір стартує після «▶ Почати підбір» на вкладці «Гра» (підбір графіки — сам через 3 хв)"
+            checked={s.start_on_button ?? true}
+            onChange={(v: boolean) => update("start_on_button", v)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <DropdownItem
+            label="Під який FPS гри підбирати графіку"
+            rgOptions={qualityOptions}
+            selectedOption={s.quality_target}
+            onChange={(o: { data: string }) => update("quality_target", o.data)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="Залишати мої ручні налаштування"
+            description="Увімкни, якщо після змін у меню гри AutoFPS має більше не чіпати її графіку"
+            checked={s.respect_manual_graphics}
+            onChange={(v: boolean) => update("respect_manual_graphics", v)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="Знижувати роздільність заради графіки"
+            description="Якщо так графіка буде помітно кращою — рендер ≈HD замість повної роздільності"
+            checked={s.lowres_for_quality}
+            onChange={(v: boolean) => update("lowres_for_quality", v)}
+          />
+        </PanelSectionRow>
+      </PanelSection>
       <PanelSection title="Профілі ігор">
         <PanelSectionRow>
           <ToggleField

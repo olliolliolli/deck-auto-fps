@@ -524,11 +524,18 @@ class Plugin:
                 if isinstance(g, dict):
                     g.pop("tdp", None)
             _save_json(GAMES_FILE, games)
+        if not self.settings.get("ui_fps_migrated"):
+            # новий інтерфейс: окремо ліміт від батареї й від зарядки; графіка — під ліміт від батареї
+            for k in ("bat_mode", "ac_mode"):
+                if self.settings.get(k, "same") == "same":
+                    self.settings[k] = self.settings.get("mode", "auto")
+            self.settings.update(power_profiles=True, quality_target="auto", ui_fps_migrated=True)
+            _save_json(SETTINGS_FILE, self.settings)
         if not self.settings.get("power_migrated"):   # тиша й батарея — завжди, не лише від батареї
             self.settings.update(auto_tdp="always", power_migrated=True)
             _save_json(SETTINGS_FILE, self.settings)
         if self.device.get("vrr") and not self.settings.get("vrr_migrated"):
-            self.settings.update(mode="vrr", vrr_migrated=True)
+            self.settings.update(mode="vrr", bat_mode="vrr", ac_mode="vrr", vrr_migrated=True)
             _save_json(SETTINGS_FILE, self.settings)
         self.games = _load_json(GAMES_FILE, {})
         self.reader = LogReader()
@@ -1142,6 +1149,9 @@ class Plugin:
             decky.logger.info(f"game start: {json.dumps(cur)}")
             if self.sfg >= 2:
                 self.mult = self.sfg
+            if self.settings.get("last_fg_mult") != max(1, self.sfg):
+                self.settings["last_fg_mult"] = max(1, self.sfg)   # для цілі підбору графіки
+                _save_json(SETTINGS_FILE, self.settings)
             self._mark_app(self.appid, seen=int(now))
             self.tuning = self._tuning_active(self._tune_entry())
             self.message = "Розігрів (завантаження, шейдери)…"
@@ -1370,6 +1380,7 @@ class Plugin:
                       "telemetry": self.telemetry, "hot": bool(getattr(self, "hot", False)),
                       "mode": self._mode()},
             "game_update": getattr(self, "game_update", None),
+            "graphics_target": C.quality_target(self.settings, self.device),
         }
 
     def _lsfg_cached(self):

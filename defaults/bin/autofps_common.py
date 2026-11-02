@@ -94,5 +94,16 @@ def detect_device():
 
 
 def quality_target(settings, device):
+    """Під скільки справжніх FPS гри підбирати графіку.
+    auto — з ліміту від батареї: ліміт на екрані ÷ множник генерації кадрів (не менше 30);
+    для VRR/«Авто» — типове значення пристрою."""
     t = str(settings.get("quality_target", "auto"))
-    return device["quality_target"] if t == "auto" else int(t)
+    if t != "auto":
+        return int(t)
+    cap = str(settings.get("bat_mode", "same"))
+    if cap == "same":
+        cap = str(settings.get("mode", "auto"))
+    if cap.isdigit():
+        mult = max(1, int(settings.get("last_fg_mult", 1) or 1))
+        return max(30, int(cap) // mult)
+    return device["quality_target"]
