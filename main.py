@@ -602,6 +602,7 @@ class Plugin:
         self.tdp_key = None
         self.tdp_ref = None       # VRR: p10 на повному живленні
         self.hot, self.hot_since, self.hot_warned = False, 0, False
+        self.calib, self.calib_tries, self.calib_next = None, 0, 0.0
 
     def _restore_display(self):
         try:
@@ -964,6 +965,113 @@ class Plugin:
         if self.phase in ("locked", "manual"):
             self._tdp_begin()   # ручний рівень FPS перезастосується в _tick сам
 
+    # ---------------- що бачить MangoHud з генерацією кадрів (автокалібрування)
+    #
+    # Залежно від порядку шарів Vulkan (MangoHud до чи після lsfg-vk / MAKO) MangoHud
+    # рахує або лише справжні кадри гри, або разом зі згенерованими. Перевіряємо це
+    # на ділі: ставимо відомий ліміт на екрані (30) і дивимось, що показує MangoHud —
+    # ≈30 (рахує все) чи ≈30/множник (лише справжні). Результат — на інструмент і множник.
+
+    CALIB_CAP = 30
+    CALIB_START_S = 35      # після старту гри (лаунчер, логотипи)
+    CALIB_LEN_S = 10
+    CALIB_SKIP_S = 4        # перші секунди після зміни ліміту не враховуємо
+
+    def _reset_measurements(self, note):
+        """Заміри FPS були хибні — скидаємо підбір графіки й живлення (крім профілів з бази)."""
+        tune = _load_json(TUNE_FILE, {})
+        for e in tune.values():
+            if isinstance(e, dict) and not e.get("from_community"):
+                for k in ("last", "history", "failed", "converged", "ineffective",
+                          "native_result", "lowres_done", "track"):
+                    e.pop(k, None)
+                e["note"] = note
+        _save_json(TUNE_FILE, tune)
+        for g in self.games.values():
+            if isinstance(g, dict):
+                g.pop("tdp", None)
+        _save_json(GAMES_FILE, self.games)
+        self.tdp_key = None
+        decky.logger.info(f"заміри скинуто: {note}")
+
+    def _calib_key(self):
+        return f"{self.settings.get('fg_tool', 'lsfg')}:x{self.sfg}"
+
+    def _counts_generated(self):
+        """True — FPS з MangoHud треба ділити на множник."""
+        if self.sfg < 2:
+            return False
+        v = (self.settings.get("fps_calib") or {}).get(self._calib_key())
+        if isinstance(v, dict) and "generated" in v:
+            return bool(v["generated"])
+        return bool(self.settings["fps_counts_generated"])
+
+    def _calib_tick(self, now):
+        """True — зараз калібруємо (решту _tick пропустити)."""
+        if self.sfg < 2 or self.cur_info.get("mangohud") == 0:
+            return False
+        if self._calib_key() in (self.settings.get("fps_calib") or {}):
+            return False
+        c = getattr(self, "calib", None)
+        if c is None:
+            if self.calib_tries >= 4 or self.phase == "probe" \
+                    or now - self.game_started < self.CALIB_START_S \
+                    or now - getattr(self, "calib_next", 0) < 0:
+                return False
+            self.calib = c = {"t": now, "fps": []}
+            self.calib_tries += 1
+            for _ in self.reader.read(self.game_started):
+                pass
+            apply_display(self.device, self.CALIB_CAP, None, vrr=True if self.device.get("vrr") else None)
+            self.last_apply = now
+            self.message = f"Перевіряю, як MangoHud рахує кадри з генерацією (~{self.CALIB_LEN_S} с)…"
+            return True
+        for fps, _gpu in self.reader.read(self.game_started):
+            if now - c["t"] >= self.CALIB_SKIP_S:
+                c["fps"].append(fps)
+        if now - c["t"] < self.CALIB_LEN_S:
+            if now - self.last_apply > 3:   # Steam міг перезаписати ліміт
+                apply_display(self.device, self.CALIB_CAP, None)
+                self.last_apply = now
+            return True
+        self.calib = None
+        self.samples, self.tdp_samples = [], []
+        self.last_apply = 0.0                       # основна логіка перезастосує свій ліміт
+        if self.phase in ("waiting", "warmup", "idle"):
+            self._restore_display()
+        fps = c["fps"]
+        cap, m = float(self.CALIB_CAP), self.sfg
+        med = percentile(fps, 0.5) if fps else 0.0
+        p90 = percentile(fps, 0.9) if fps else 0.0
+        verdict = None
+        if len(fps) >= 15:
+            if 0.85 * cap <= med and p90 <= 1.15 * cap:
+                verdict = True                      # бачить усі кадри на екрані
+            elif 0.85 * cap / m <= med <= 1.15 * cap / m and p90 <= 1.3 * cap / m:
+                verdict = False                     # бачить лише справжні кадри гри
+        decky.logger.info(f"калібрування FPS {self._calib_key()}: ліміт {cap:.0f}, MangoHud "
+                          f"медіана {med:.1f} p90 {p90:.1f} ({len(fps)} зн.) → {verdict}")
+        if verdict is None:
+            self.calib_next = now + 60
+            if self.calib_tries >= 4:
+                self._notify("AutoFPS: не вдалося перевірити MangoHud",
+                             f"З лімітом {cap:.0f} FPS MangoHud показував ~{med:.0f}. "
+                             "Лишаю як є; збери діагностику й надішли Claude")
+            return False
+        cal = dict(self.settings.get("fps_calib") or {})
+        cal[self._calib_key()] = {"generated": verdict, "median": round(med, 1),
+                                  "cap": int(cap), "t": int(now), "appid": self.appid}
+        self.settings["fps_calib"] = cal
+        _save_json(SETTINGS_FILE, self.settings)
+        if verdict and not self.settings["fps_counts_generated"]:
+            self._reset_measurements("MangoHud рахував і згенеровані кадри — графіку буде підібрано заново")
+        self._notify("AutoFPS: MangoHud перевірено",
+                     f"З генерацією ×{m} MangoHud показує "
+                     + ("кадри на екрані — ділю на множник, щоб бачити справжні FPS гри"
+                        if verdict else "лише справжні кадри гри — ділити не треба")
+                     + f" (ліміт {cap:.0f} → MangoHud {med:.0f})")
+        return False
+
     # ---------------- decision logic
 
     def _choose(self, p10):
@@ -1203,6 +1311,9 @@ class Plugin:
         if self.phase == "disabled":
             self.phase, self.phase_t = "warmup", now
 
+        if self._calib_tick(now):
+            return
+
         # Підбір за кнопкою: поки гравець у меню/заставці, нічого не міряємо й не обмежуємо
         # Кнопка потрібна лише там, де міряємо FPS гри: «Авто» або крок підбору графіки.
         # Фіксований ліміт / VRR без підбору графіки — ліміт і живлення одразу, без кнопки.
@@ -1231,7 +1342,7 @@ class Plugin:
             return
 
         for fps, gpu in self.reader.read(self.game_started):
-            if self.sfg >= 2 and self.settings["fps_counts_generated"]:
+            if self._counts_generated():
                 fps = fps / max(2, self.mult)  # MangoHud бачить і згенеровані кадри
             self.samples.append((now, fps, gpu))
             self.tdp_samples.append((now, fps))
