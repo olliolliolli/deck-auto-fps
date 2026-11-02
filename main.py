@@ -542,6 +542,7 @@ class Plugin:
         self.ac = P.on_ac()
         self.ac_checked = 0.0
         self.pw = P.PowerCtl(self.device, decky.logger.info)
+        self.started_t = time.time()
         self.tdp_orig = None
         self.telemetry = {}
         decky.logger.info(f"живлення: {self.pw.kind or 'немає керування'} "
@@ -929,7 +930,23 @@ class Plugin:
                 return
             self._tdp_set(nxt, f"(тримає {p10:.0f} FPS)")
 
+    def _power_retry(self, now):
+        """steamos-manager після завантаження системи може відповісти не одразу — тоді плагін
+        лишався без керування живленням до перезапуску. Пробуємо ще раз (перші 10 хв)."""
+        if self.pw.available or now - self.started_t > 600 or now - getattr(self, "pw_retry_t", 0) < 30:
+            return
+        self.pw_retry_t = now
+        pw = P.PowerCtl(self.device, decky.logger.info)
+        if not pw.available:
+            return
+        self.pw = pw
+        decky.logger.info(f"живлення (повторна спроба): {pw.kind} "
+                          f"[{', '.join(pw.label(i) for i in range(len(pw.levels)))}]")
+        if self.appid is not None and self.phase in ("locked", "manual"):
+            self._tdp_begin()
+
     def _power_tick(self, now):
+        self._power_retry(now)
         if now - self.ac_checked < 5:
             return
         self.ac_checked = now
@@ -1187,13 +1204,21 @@ class Plugin:
             self.phase, self.phase_t = "warmup", now
 
         # Підбір за кнопкою: поки гравець у меню/заставці, нічого не міряємо й не обмежуємо
-        vrr_idle = self._vrr() and not self.tuning   # VRR без підбору графіки — міряти нічого
-        if self.settings.get("start_on_button", True) and not self.user_started and not vrr_idle:
+        # Кнопка потрібна лише там, де міряємо FPS гри: «Авто» або крок підбору графіки.
+        # Фіксований ліміт / VRR без підбору графіки — ліміт і живлення одразу, без кнопки.
+        no_measure = self._mode() != "auto" and not self.tuning
+        if self.settings.get("start_on_button", True) and not self.user_started and not no_measure:
             for _ in self.reader.read(self.game_started):
                 pass                      # вичитуємо лог, щоб не накопичувати кадри меню
             self.samples = []
             if self.phase != "waiting":
                 self.phase, self.phase_t = "waiting", now
+            # фіксований ліміт діє й у меню, поки чекаємо на замір графіки
+            fixed = self._mode()
+            if fixed.isdigit() and now - self.last_apply > 5:
+                m = self.sfg if self.sfg >= 2 else 1
+                self.base, self.mult = max(1, int(fixed) // m), m
+                self._apply()
             # підбір графіки без кнопки стояв би вічно — через 3 хв гри починаємо самі
             if self.tuning and now - self.phase_t > 180:
                 self.user_started = True
