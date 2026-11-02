@@ -514,7 +514,7 @@ class Plugin:
             tune = _load_json(TUNE_FILE, {})
             for e in tune.values():
                 if isinstance(e, dict) and not e.get("from_community"):
-                    for k in ("last", "history", "failed", "converged", "ineffective",
+                    for k in ("last", "history", "failed", "ok", "converged", "ineffective",
                               "native_result", "lowres_done", "track"):
                         e.pop(k, None)
                     e["note"] = "Заміри FPS виправлено — графіку буде підібрано заново"
@@ -603,6 +603,7 @@ class Plugin:
         self.tdp_ref = None       # VRR: p10 на повному живленні
         self.hot, self.hot_since, self.hot_warned = False, 0, False
         self.calib, self.calib_tries, self.calib_next = None, 0, 0.0
+        self.tm_raw, self.tm_windows, self.tm_t, self.tm_saved_n = [], [], 0.0, 0
 
     def _restore_display(self):
         try:
@@ -831,9 +832,12 @@ class Plugin:
             self.tdp_state = "off"
             return
         top = len(self.pw.levels) - 1
+        if want == "auto" and self.tuning:
+            want = "max"          # графіка міряється на повній потужності, тихіше — після підбору
         if want == "max":
             self.tdp_state = "max"
-            self._tdp_set(top, "(зарядка — повна потужність)")
+            self._tdp_set(top, "(підбір графіки — повна потужність)" if self.tuning
+                          else "(зарядка — повна потужність)")
             return
         self.tdp_key = self._tdp_saved_key()
         saved = (self.games.get(str(self.appid)) or {}).get("tdp", {}).get(self.tdp_key)
@@ -982,7 +986,7 @@ class Plugin:
         tune = _load_json(TUNE_FILE, {})
         for e in tune.values():
             if isinstance(e, dict) and not e.get("from_community"):
-                for k in ("last", "history", "failed", "converged", "ineffective",
+                for k in ("last", "history", "failed", "ok", "converged", "ineffective",
                           "native_result", "lowres_done", "track"):
                     e.pop(k, None)
                 e["note"] = note
@@ -1071,6 +1075,67 @@ class Plugin:
                         if verdict else "лише справжні кадри гри — ділити не треба")
                      + f" (ліміт {cap:.0f} → MangoHud {med:.0f})")
         return False
+
+    # ---------------- фоновий замір для підбору графіки
+    #
+    # Раніше крок підбору міряв 20 с без ліміту й лише після кнопки або 3 хв гри — у коротких
+    # сесіях заміру не було зовсім і підбір стояв. Тепер: усю сесію збираємо 10-секундні вікна,
+    # оцінюємо «скільки гра тягне» і кожні 30 с зберігаємо в tune.json (вихід з гри нічого не губить).
+
+    TM_SKIP_S = 45          # завантаження/логотипи після старту гри
+    TM_MIN_WINDOWS = 4      # ≥ 40 с гри до першого запису
+
+    def _tm_cap(self):
+        """Скільки справжніх FPS зараз дозволяє ліміт (None — без ліміту)."""
+        if self.phase == "probe":
+            return None
+        if self.phase in ("manual", "locked"):
+            if self._vrr():
+                return self.device["max_hz"] / max(1, self.mult)
+            return float(self.base) if self.base else None
+        return None
+
+    def _tm_tick(self, now):
+        if not self.tuning or self.calib is not None:
+            self.tm_raw = []
+            return
+        if now - self.game_started < self.TM_SKIP_S:
+            self.tm_raw = []
+            return
+        if now - self.tm_t < 10:
+            return
+        self.tm_t = now
+        raw, self.tm_raw = self.tm_raw, []
+        if len(raw) < 20:
+            return
+        fps = [x[1] for x in raw]
+        gpus = [x[2] for x in raw if x[2] is not None]
+        gpu = sum(gpus) / len(gpus) if gpus else None
+        p10, med = percentile(fps, 0.10), percentile(fps, 0.5)
+        cap = self._tm_cap()
+        if cap and med >= cap * 0.95:
+            # тримає ліміт: запас оцінюємо за навантаженням GPU (99% — запасу немає)
+            if gpu is None:
+                est = p10
+            else:
+                est = p10 * min(1.8, 97.0 / max(gpu, 40.0))
+        else:
+            est = p10
+        self.tm_windows.append(round(est, 1))
+        del self.tm_windows[:-60]
+        n = len(self.tm_windows)
+        if n < self.TM_MIN_WINDOWS or (n - self.tm_saved_n < 3 and self.tm_saved_n):
+            return
+        # обережна оцінка: нижня чверть вікон (меню/легкі сцени не завищують)
+        value = percentile(self.tm_windows, 0.25)
+        self._record_tune(value)
+        first = self.tm_saved_n == 0
+        self.tm_saved_n = n
+        if first:
+            target = C.quality_target(self.settings, self.device)
+            self._notify("AutoFPS: графіку заміряно",
+                         f"На цих налаштуваннях гра тягне ≈{value:.0f} FPS (ціль {target}). "
+                         "Наступного запуску підберу графіку; замір уточнюється, поки граєш")
 
     # ---------------- decision logic
 
@@ -1296,8 +1361,10 @@ class Plugin:
                     nxt = "застосую рівень з минулого разу після розігріву (~20 с)"
                 else:
                     nxt = "заміряю FPS після розігріву (~20–40 с)"
-                if self.settings.get("start_on_button", True) and not (self._vrr() and not self.tuning):
+                if self.settings.get("start_on_button", True) and self._mode() == "auto":
                     nxt = "коли почнеш грати (не в меню), відкрий AutoFPS і натисни «▶ Почати підбір»"
+                if self.tuning:
+                    nxt += ". Графіка міряється фоном, поки граєш (досить ~1 хв гри)"
                 extra = self._mode_report(cur) + self._start_notes(now)
                 body = "\n".join([self._graphics_report(), *extra, f"Далі: {nxt}"])
                 self._notify("AutoFPS підключено", body)
@@ -1317,7 +1384,7 @@ class Plugin:
         # Підбір за кнопкою: поки гравець у меню/заставці, нічого не міряємо й не обмежуємо
         # Кнопка потрібна лише там, де міряємо FPS гри: «Авто» або крок підбору графіки.
         # Фіксований ліміт / VRR без підбору графіки — ліміт і живлення одразу, без кнопки.
-        no_measure = self._mode() != "auto" and not self.tuning
+        no_measure = self._mode() != "auto"
         if self.settings.get("start_on_button", True) and not self.user_started and not no_measure:
             for _ in self.reader.read(self.game_started):
                 pass                      # вичитуємо лог, щоб не накопичувати кадри меню
@@ -1346,7 +1413,10 @@ class Plugin:
                 fps = fps / max(2, self.mult)  # MangoHud бачить і згенеровані кадри
             self.samples.append((now, fps, gpu))
             self.tdp_samples.append((now, fps))
+            if self.tuning:
+                self.tm_raw.append((now, fps, gpu))
         self._tdp_tick(now)
+        self._tm_tick(now)
 
         # фіксований рівень вибрано вручну
         mode = self._mode()
@@ -1357,7 +1427,7 @@ class Plugin:
             base = self.device["max_hz"] if vrr else int(mode)
             # Крок автопідбору графіки при фіксованому FPS: спершу ~20 с замір без обмеження
             # (з обмеженням не видно запасу), потім — вибраний рівень. Без цього підбір стояв.
-            if self.tuning and not self.manual_measured:
+            if False and self.tuning and not self.manual_measured:   # замінено фоновим заміром (_tm_tick)
                 if self.phase not in ("warmup", "probe"):
                     self.phase, self.phase_t = "warmup", now
                 if self.phase == "warmup":
@@ -1562,18 +1632,19 @@ class Plugin:
             return {"ok": False, "message": "Спершу запусти гру з AutoFPS"}
 
         def fn(e):
-            for k in ("history", "failed", "converged", "ineffective", "last",
+            for k in ("history", "failed", "ok", "converged", "ineffective", "last",
                       "user_override", "applied_values", "start_scaled", "track",
                       "native_result", "lowres_done", "from_community",
                       "disabled", "restore_pending"):
                 e.pop(k, None)
             e["level"] = self.device["start_level"]
-            e["note"] = "Підбір почнеться з наступного запуску гри"
+            e["start_from_user"] = True   # старт — від того, що зараз стоїть у меню гри
+            e["note"] = "Підбір почнеться з наступного запуску гри — від твоїх налаштувань у меню"
         if not self._modify_tune(appid, fn):
             return {"ok": False, "message": "Цю гру ще не запускали з AutoFPS — підбір почнеться при першому запуску"}
         running = str(self.appid) == appid
         return {"ok": True, "message": ("Перезапусти гру: графіка змінюється лише при старті. " if running else "") +
-                "Після запуску натисни «▶ Почати підбір», коли почнеш грати (або підбір почнеться сам за 3 хв)"}
+                "Далі просто грай: FPS міряється фоном, графіка змінюється з кожним запуском, поки не досягне цілі"}
 
     async def restore_original(self):
         """Повернути оригінальні налаштування гри (при наступному запуску)."""
@@ -1625,7 +1696,7 @@ class Plugin:
         tune = _load_json(TUNE_FILE, {})
         for k in list(tune):
             if k.startswith(f"{a}:"):
-                for f in ("history", "failed", "converged", "ineffective", "last", "start_scaled", "ladder_sig"):
+                for f in ("history", "failed", "ok", "converged", "ineffective", "last", "start_scaled", "ladder_sig"):
                     tune[k].pop(f, None)
         _save_json(TUNE_FILE, tune)
         self.games.pop(a, None)

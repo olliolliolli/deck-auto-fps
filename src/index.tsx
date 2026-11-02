@@ -1219,7 +1219,7 @@ function Content() {
         <PanelSectionRow>
           <ToggleField
             label="Режим «Авто»: починати за кнопкою"
-            description="Щоб не міряти FPS у меню гри: замір стартує після «▶ Почати підбір» на вкладці «Гра» (підбір графіки — сам через 3 хв)"
+            description="Щоб не міряти FPS у меню гри: у режимі «Авто» замір FPS стартує після «▶ Почати підбір» на вкладці «Гра». Графіка й фіксований ліміт кнопки не потребують"
             checked={s.start_on_button ?? true}
             onChange={(v: boolean) => update("start_on_button", v)}
           />

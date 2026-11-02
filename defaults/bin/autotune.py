@@ -600,8 +600,20 @@ ADAPTERS = [UnrealAdapter, UnityAdapter, REEngineAdapter]
 
 # ------------------------------------------------------------------ decision
 
+STEP_GAIN = 0.09   # одна сходинка драбини дає приблизно +9% FPS (оцінка для стрибка)
+
+
+def _steps_for(ratio):
+    """Скільки сходинок треба пройти, щоб змінити FPS у ratio разів (≥ 1)."""
+    import math
+    return max(1, int(math.ceil(math.log(ratio) / math.log(1 + STEP_GAIN) - 0.25)))
+
+
 def decide(entry, target, n):
-    """Повертає (нова_сходинка, пояснення). Змінює entry на місці."""
+    """Повертає (нова_сходинка, пояснення). Змінює entry на місці.
+
+    Не по одній сходинці за запуск: за виміряним FPS оцінюємо, на скільки сходинок стрибнути,
+    і звужуємо межі (ok — тягнули ціль, failed — ні), як у бінарному пошуку."""
     lvl = max(0, min(int(entry.get("level", 0)), n - 1))
     last = entry.pop("last", None)
     if entry.get("converged") or entry.get("ineffective"):
@@ -623,21 +635,51 @@ def decide(entry, target, n):
 
     r = p10 / target
     failed = set(entry.get("failed", []))
+    ok = set(entry.get("ok", []))
     if r < 0.97:
         failed.add(lvl)
         entry["failed"] = sorted(failed)
         if lvl >= n - 1:
             entry["converged"] = True
-            return lvl, f"Мінімум налаштувань: {target} FPS недосяжні, лишаю нижчий рівень FPS"
-        step = 1 if r >= 0.88 else 2 if r >= 0.75 else 3
-        new = min(n - 1, lvl + step)
-        return new, f"p10 {p10:.0f} < {target}: знижую до сходинки {new + 1}/{n}"
-    if r > 1.25 and lvl > 0 and (lvl - 1) not in failed:
-        step = 2 if r > 1.6 and lvl > 1 and (lvl - 2) not in failed else 1
-        new = lvl - step
-        return new, f"p10 {p10:.0f} — є запас, підвищую якість до сходинки {new + 1}/{n}"
+            return lvl, (f"Навіть на мінімумі ≈{p10:.0f} FPS — ціль {target} недосяжна. "
+                         "Знизь ліміт FPS або ввімкни генерацію кадрів")
+        new = min(n - 1, lvl + _steps_for(target / max(p10, 1.0)))
+        ok_below = [x for x in ok if x > lvl]           # нижча якість, що вже тягнула ціль
+        if ok_below and new >= min(ok_below):
+            new = min(ok_below)
+            entry["converged"] = True
+            return new, f"Готово: сходинка {new + 1}/{n} — вища вже не тягне {target} FPS"
+        return new, f"≈{p10:.0f} FPS при цілі {target}: знижую до сходинки {new + 1}/{n}"
+    ok.add(lvl)
+    entry["ok"] = sorted(ok)
+    if r > 1.15 and lvl > 0:
+        new = max(0, lvl - _steps_for(r / 1.05))
+        fail_above = [x for x in failed if x < lvl]     # вища якість, що вже не тягнула
+        if fail_above:
+            new = max(new, max(fail_above) + 1)
+        if new < lvl:
+            return new, f"≈{p10:.0f} FPS при цілі {target} — є запас, підвищую якість до сходинки {new + 1}/{n}"
     entry["converged"] = True
-    return lvl, f"Готово: сходинка {lvl + 1}/{n}, p10 {p10:.0f} при цілі {target}"
+    return lvl, f"Готово: сходинка {lvl + 1}/{n}, ≈{p10:.0f} FPS при цілі {target}"
+
+
+def nearest_level(values, ladder):
+    """Сходинка драбини, найближча до поточних налаштувань гри (None — не порівняти)."""
+    best, best_d = None, None
+    for i, st in enumerate(ladder):
+        common = [k for k in st if k in values]
+        if not common:
+            continue
+        d = 0.0
+        for k in common:
+            try:
+                diff = abs(float(st[k]) - float(values[k]))
+            except (TypeError, ValueError):
+                diff = 0.0 if str(st[k]) == str(values[k]) else 1.0
+            d += diff / 15.0 if "Resolution" in k or k == "scale" else diff
+        if best_d is None or d < best_d - 1e-9:
+            best, best_d = i, d
+    return best
 
 
 # ------------------------------------------------------------------ main
@@ -745,7 +787,7 @@ def run(appid, args, device=None, log=print):
                 except ValueError:
                     pass
             if raised:
-                for k in ("history", "failed", "converged", "ineffective", "last",
+                for k in ("history", "failed", "ok", "converged", "ineffective", "last",
                           "start_scaled", "track", "native_result", "lowres_done"):
                     entry.pop(k, None)
                 manual_note = "Ти підвищив графіку в меню — це нова стеля, підбираю від неї. "
@@ -766,7 +808,7 @@ def run(appid, args, device=None, log=print):
     target = C.quality_target(settings, device)
     allow_low = bool(settings.get("lowres_for_quality", True))
     if entry.get("target") != target or (not allow_low and entry.get("track") == "lowres"):
-        for k in ("history", "failed", "converged", "ineffective", "last", "track",
+        for k in ("history", "failed", "ok", "converged", "ineffective", "last", "track",
                   "native_result", "lowres_done"):
             entry.pop(k, None)
         entry["target"] = target
@@ -780,7 +822,7 @@ def run(appid, args, device=None, log=print):
     # Драбина змінилась (напр. увімкнено міст FSR 4 — з'явились кроки роздільності): підбір заново
     sig = f"{len(ladder)}:{RE_FSR2_KEY in ladder[0]}:hh2:{device.get('res')}"
     if entry.get("ladder_sig") != sig and (entry.get("ladder_sig") or RE_FSR2_KEY in ladder[0]):
-        for k in ("history", "failed", "converged", "ineffective", "last", "start_scaled"):
+        for k in ("history", "failed", "ok", "converged", "ineffective", "last", "start_scaled"):
             entry.pop(k, None)
     entry["ladder_sig"] = sig
     if RE_FSR2_KEY in ladder[0] and not entry.get("start_scaled") and not entry.get("history"):
@@ -790,9 +832,18 @@ def run(appid, args, device=None, log=print):
         entry.pop("last", None)
         entry["start_scaled"] = True
     if not entry.get("start_scaled") and not entry.get("history"):
-        entry["level"] = min(len(ladder) - 1,
-                             int(round(device["start_level"] * (len(ladder) - 1) / 11.0)))
+        # старт — від того, що стоїть у меню гри (напр. ти виставив максимум і натиснув
+        # «Підібрати заново»); не вдалося порівняти — типова стартова сходинка пристрою
+        near = None
+        try:
+            near = nearest_level(adapter.read(cfg), ladder)
+        except Exception:  # noqa: BLE001
+            near = None
+        if near is None:
+            near = min(len(ladder) - 1, int(round(device["start_level"] * (len(ladder) - 1) / 11.0)))
+        entry["level"] = near
         entry.pop("last", None)
+        entry.pop("start_from_user", None)
     entry["start_scaled"] = True
     level, note = decide(entry, target, len(ladder))
 
@@ -805,7 +856,7 @@ def run(appid, args, device=None, log=print):
         if r_nat >= min_gain and adapter.res_scale(nat) >= scale + 15:
             entry["native_result"] = {"level": level, "rank": r_nat,
                                       "res": adapter.res_scale(nat), "note": note}
-            for k in ("history", "failed", "converged", "last"):
+            for k in ("history", "failed", "ok", "converged", "last"):
                 entry.pop(k, None)
             track = entry["track"] = "lowres"
             ladder = adapter.ladder(entry["original"], scale)
