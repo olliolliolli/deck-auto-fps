@@ -37,6 +37,7 @@ type Settings = {
   warmup_s: number;
   probe_s: number;
   fg_mode: "external" | "off" | "auto" | "always";
+  fg_tool?: "lsfg" | "mako" | "none";
   fg_min_base: number;
   fg_allow_3x: boolean;
   fg_flow_scale: number;
@@ -68,6 +69,7 @@ type Tune = {
 
 type Status = {
   lsfg_launcher: string;
+  fg_launchers?: { lsfg?: string; mako?: string };
   device: {
     id: string;
     label: string;
@@ -326,7 +328,7 @@ const GameLaunchSection = memo(function GameLaunchSection() {
   const optsKey = useMemo(() => opts.map((o) => o.label).join("|").length + ":" + opts.length, [opts]);
   const enabled = options !== null && hasWrapper(options);
   // AutoFPS увімкнено, але без лаунчера Decky LSFG-VK — пропонуємо оновити параметр
-  const needsLsfg = options !== null && hasWrapper(options) && fgExternal && !!lsfgLauncher && !hasLsfg(options);
+  const needsLsfg = options !== null && hasWrapper(options) && fgExternal && !!lsfgLauncher && !hasLsfg(options, lsfgLauncher);
   const outdated = options !== null && (isOldWrapper(options) || needsLsfg);
   // параметрами гри керує Decky Launch Options — не чіпаємо, щоб не зламати запуск
   const dlo = options !== null && /\.dlo\/run/.test(options);
@@ -483,7 +485,7 @@ const GameLaunchSection = memo(function GameLaunchSection() {
       const current = await readLaunchOptions(appid);
       // стара форма — оновлюємо на новий лаунчер, а не вимикаємо
       const turnOn = !hasWrapper(current) || isOldWrapper(current) ||
-        (fgExternal && !!lsfgLauncher && !hasLsfg(current));
+        (fgExternal && !!lsfgLauncher && !hasLsfg(current, lsfgLauncher));
       const next = turnOn ? addWrapper(current, fgExternal ? lsfgLauncher : "") : removeWrapper(current);
       const ok = await writeLaunchOptions(appid, next);
       if (ok) await setGameEnabled(appid, turnOn);
@@ -947,7 +949,7 @@ function Content() {
 
       <OptiSection settings={s} update={update} />
 
-      <PanelSection title="Фрейм-генерація (Lossless)">
+      <PanelSection title="Фрейм-генерація">
         <PanelSectionRow>
           <DropdownItem
             label="Хто керує генерацією кадрів"
@@ -957,16 +959,36 @@ function Content() {
           />
         </PanelSectionRow>
         {s.fg_mode === "external" ? (
-          <PanelSectionRow>
-            <Field
-              label={st.lsfg_launcher ? `✓ Лаунчер ${st.lsfg_launcher}` : "⚠ Decky LSFG-VK не знайдено"}
-              description={
-                st.lsfg_launcher
-                  ? "Кнопка «Увімкнути AutoFPS у цій грі» додає в параметри запуску і його лаунчер. Множник і налаштування — у плагіні Decky LSFG-VK; AutoFPS лише враховує їх при підборі FPS"
-                  : "Встанови плагін Decky LSFG-VK і ввімкни його — тоді AutoFPS додаватиме його лаунчер разом зі своїм"
-              }
-            />
-          </PanelSectionRow>
+          <>
+            <PanelSectionRow>
+              <DropdownItem
+                label="Чиї параметри FG додавати"
+                description="Лаунчер окремого плагіна додається в параметри запуску разом з AutoFPS"
+                rgOptions={[
+                  { data: "lsfg", label: `Lossless (Decky LSFG-VK)${st.fg_launchers?.lsfg ? "" : " — не встановлено"}` },
+                  { data: "mako", label: `MAKO${st.fg_launchers?.mako ? "" : " — не встановлено"}` },
+                  { data: "none", label: "Не додавати" },
+                ]}
+                selectedOption={s.fg_tool || "lsfg"}
+                onChange={(o: { data: string }) => update("fg_tool", o.data)}
+              />
+            </PanelSectionRow>
+            {(s.fg_tool || "lsfg") !== "none" && (
+              <PanelSectionRow>
+                <Field
+                  label={st.lsfg_launcher ? `✓ Лаунчер ${st.lsfg_launcher}` :
+                    (s.fg_tool === "mako" ? "⚠ MAKO не знайдено" : "⚠ Decky LSFG-VK не знайдено")}
+                  description={
+                    st.lsfg_launcher
+                      ? "Кнопка «Увімкнути AutoFPS у цій грі» додає і цей лаунчер (інший — прибирає). Множник і налаштування — в його плагіні; AutoFPS лише враховує їх при підборі FPS"
+                      : s.fg_tool === "mako"
+                        ? "Встанови плагін MAKO Decky і натисни в ньому «Install MAKO Renderer» (з'явиться ~/.local/bin/mako-run)"
+                        : "Встанови плагін Decky LSFG-VK і ввімкни його — тоді AutoFPS додаватиме його лаунчер разом зі своїм"
+                  }
+                />
+              </PanelSectionRow>
+            )}
+          </>
         ) : (
           <>
             <PanelSectionRow>

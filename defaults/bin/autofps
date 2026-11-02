@@ -110,7 +110,9 @@ if [ "$FG_MODE" = "external" ]; then
   if [ -z "$DISABLE_LSFGVK" ] && { [ -n "$LSFGVK_PROFILE$LSFGVK_CONFIG$LSFG_PROCESS$LSFG_CONFIG" ] || [ "$ENABLE_LSFG" = "1" ]; }; then
     EXT_FG=1
   fi
-  log "генерація кадрів: окремий плагін Decky LSFG-VK (активна: $EXT_FG)"
+  # MAKO (окремий плагін MAKO Decky, лаунчер ~/.local/bin/mako-run)
+  if env | grep -qiE '^MAKO_|^[A-Z_]*LAYER[A-Z_]*=.*mako'; then EXT_FG=1; fi
+  log "генерація кадрів: окремий плагін (Decky LSFG-VK / MAKO), активна: $EXT_FG"
 fi
 if [ "$FG_MODE" = "external" ]; then
   :

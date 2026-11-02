@@ -66,6 +66,7 @@ DEFAULT_SETTINGS = {
     "warmup_s": 20,            # пропустити завантаження/шейдери
     "probe_s": 20,             # скільки секунд міряти без ліміту
     "start_on_button": True,   # підбір FPS починається лише після кнопки «Почати підбір» (не в меню гри)
+    "fg_tool": "lsfg",         # чий лаунчер FG додавати в параметри запуску: lsfg | mako | none
     "fg_mode": "external",     # "external" (окремий плагін Decky LSFG-VK) | "off" | "auto" | "always"
     "fg_min_base": 40,         # мінімальний базовий FPS для фрейм-генерації
     "fg_allow_3x": False,
@@ -150,15 +151,28 @@ LSFG_LAUNCHERS = [("~/.lsfg", os.path.join(HOME, ".lsfg")), ("~/lsfg", os.path.j
                   ("~/.local/bin/lsfg", os.path.join(HOME, ".local", "bin", "lsfg"))]
 
 
-def lsfg_launcher():
-    for token, path in LSFG_LAUNCHERS:
-        if os.path.isfile(path):
-            return token
-    return ""
+MAKO_LAUNCHERS = [("~/.local/bin/mako-run", os.path.join(HOME, ".local", "bin", "mako-run"))]
+
+
+def fg_launchers():
+    """Знайдені лаунчери окремих плагінів генерації кадрів: {"lsfg": "~/.lsfg", "mako": "…"}."""
+    out = {}
+    for tool, lst in (("lsfg", LSFG_LAUNCHERS), ("mako", MAKO_LAUNCHERS)):
+        out[tool] = next((tok for tok, path in lst if os.path.isfile(path)), "")
+    return out
+
+
+def lsfg_launcher(tool="lsfg"):
+    """Лаунчер, який AutoFPS додає в параметри запуску разом зі своїм (за вибором fg_tool)."""
+    if tool == "none":
+        return ""
+    return fg_launchers().get(tool, "")
 
 
 def their_multiplier():
     """Множник генерації кадрів у поточному профілі Decky LSFG-VK (типово 2)."""
+    if _load_json(SETTINGS_FILE, {}).get("fg_tool") == "mako":
+        return 2   # MAKO: множник у його плагіні, типово ×2
     text = _read(THEIR_CONF)
     cur = re.search(r'^\s*current_profile\s*=\s*"([^"]+)"', text, re.M)
     blocks = re.split(r"^\s*\[\[(?:game|profile)\]\]\s*$", text, flags=re.M)[1:]
@@ -1046,7 +1060,8 @@ class Plugin:
             "tune": self._tune_status(),
             "events": list(reversed(getattr(self, "events", []))),
             "launch_option": LAUNCH_OPTION,
-            "lsfg_launcher": lsfg_launcher(),
+            "lsfg_launcher": lsfg_launcher(self.settings.get("fg_tool", "lsfg")),
+            "fg_launchers": fg_launchers(),
         }
 
     def _lsfg_cached(self):

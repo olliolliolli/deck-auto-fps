@@ -21,8 +21,15 @@ export function isOldWrapper(options: string): boolean {
 // лаунчери Decky LSFG-VK (0.14+ — ~/.lsfg, старіші — ~/lsfg) і MAKO
 const LSFG_RE = /(^|\s)(~\/\.lsfg|~\/lsfg|~\/\.local\/bin\/lsfg\S*|\/home\/[^/\s]+\/(?:\.lsfg|lsfg)|\S*mako-(?:run|launch))(?=\s)/;
 
-export function hasLsfg(options: string): boolean {
+export function hasLsfg(options: string, launcher = ""): boolean {
+  if (launcher) return ` ${options} `.includes(` ${launcher} `);   // саме цей лаунчер (Lossless чи MAKO)
   return LSFG_RE.test(` ${options} `);
+}
+
+const LSFG_RE_G = new RegExp(LSFG_RE.source, "g");
+/** Прибирає лаунчери генерації кадрів (Decky LSFG-VK, MAKO). */
+export function removeFgLaunchers(options: string): string {
+  return ` ${options} `.replace(LSFG_RE_G, "$1").replace(/\s+/g, " ").trim();
 }
 
 /** Вставляє лаунчер перед %command%; змінні середовища та інші обгортки лишаються.
@@ -35,7 +42,8 @@ export function addWrapper(options: string, lsfgLauncher = ""): string {
     // без %command% Steam вважає параметри аргументами гри — зберігаємо їх після
     else t = `${WRAPPER} ${CMD}${t ? " " + t : ""}`;
   }
-  if (lsfgLauncher && !hasLsfg(t)) {
+  if (lsfgLauncher && !hasLsfg(t, lsfgLauncher)) {
+    t = removeFgLaunchers(t);   // інший лаунчер FG (напр. перемкнули Lossless → MAKO)
     const j = t.indexOf(WRAPPER);
     t = `${t.slice(0, j)}${lsfgLauncher} ${t.slice(j)}`.trim();
   }
