@@ -1147,8 +1147,9 @@ class Plugin:
     # сесіях заміру не було зовсім і підбір стояв. Тепер: усю сесію збираємо 10-секундні вікна,
     # оцінюємо «скільки гра тягне» і кожні 30 с зберігаємо в tune.json (вихід з гри нічого не губить).
 
-    TM_SKIP_S = 45          # завантаження/логотипи після старту гри
-    TM_MIN_WINDOWS = 5      # ≥ 50 с гри до першого запису
+    TM_SKIP_S = 90          # завантаження, логотипи, меню, перша компіляція шейдерів
+    TM_MIN_WINDOWS = 6      # ≥ 60 с чистої гри до першого запису
+    TM_FORECAST_WINDOWS = 9 # ≥ 90 с — лише тоді радимо перезапуск
 
     def _tm_cap(self):
         """Скільки справжніх FPS зараз дозволяє ліміт (None — без ліміту)."""
@@ -1161,6 +1162,9 @@ class Plugin:
         return None
 
     def _tm_tick(self, now):
+        """Вікна по 10 с. Беремо лише «чисту гру»: GPU завантажений (≥ 80%) або гра впирається
+        в ліміт; без сильних ривків. Завантаження, заставки, меню й компіляція шейдерів
+        (FPS падає до одиниць на десятки секунд) — відкидаються, а з решти береться медіана."""
         if not self.tuning or self.calib is not None:
             self.tm_raw = []
             return
@@ -1178,21 +1182,25 @@ class Plugin:
         gpu = sum(gpus) / len(gpus) if gpus else None
         p10, med = percentile(fps, 0.10), percentile(fps, 0.5)
         cap = self._tm_cap()
-        if cap and med >= cap * 0.95:
+        capped = bool(cap and med >= cap * 0.95)
+        if not capped and gpu is not None and gpu < 80:
+            return                                   # меню / завантаження / процесор
+        if p10 < med * 0.5:
+            return                                   # ривки: шейдери, підвантаження
+        if capped:
             # тримає ліміт: запас оцінюємо за навантаженням GPU (99% — запасу немає)
-            if gpu is None:
-                est = p10
-            else:
-                est = p10 * min(1.8, 97.0 / max(gpu, 40.0))
+            est = p10 * (min(1.8, 97.0 / max(gpu, 40.0)) if gpu is not None else 1.0)
         else:
             est = p10
-        self.tm_windows.append(round(est, 1))
+        self.tm_windows.append((round(med, 1), round(est, 1)))
         del self.tm_windows[:-60]
-        n = len(self.tm_windows)
+        # провали відносно звичного рівня цієї сесії (перехід між рівнями, заставка) — геть
+        typical = percentile([w[0] for w in self.tm_windows], 0.5)
+        good = [w[1] for w in self.tm_windows if 0.6 * typical <= w[0] <= 1.6 * typical]
+        n = len(good)
         if n < self.TM_MIN_WINDOWS or (n - self.tm_saved_n < 3 and self.tm_saved_n):
             return
-        # обережна оцінка: нижня чверть вікон (меню/легкі сцени не завищують)
-        value = percentile(self.tm_windows, 0.25)
+        value = percentile(good, 0.5)
         self._record_tune(value)
         self.tm_saved_n = n
         self._tm_forecast(value)
@@ -1212,6 +1220,8 @@ class Plugin:
         except Exception as ex:  # noqa: BLE001
             decky.logger.warning(f"прогноз графіки: {ex}")
             return
+        if self.tm_saved_n < self.TM_FORECAST_WINDOWS:
+            return                                   # ще замало чистої гри для поради
         key = (new, bool(e.get("converged")))
         if key == getattr(self, "tm_forecast", None):
             return
