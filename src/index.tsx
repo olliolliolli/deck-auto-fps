@@ -44,6 +44,7 @@ type Settings = {
   ue5_tweak?: boolean;
   unity_tweak?: boolean;
   auto_tdp?: "battery" | "always" | "off";
+  auto_gpu_clock?: boolean;
   power_profiles?: boolean;
   bat_mode?: string;
   ac_mode?: string;
@@ -116,6 +117,7 @@ type Status = {
     hot?: boolean;
     tdp_error: string;
     mode: string;
+    gpu?: { available: boolean; state: string; clock: number | null; min: number | null; max: number | null; error: string };
   };
   game_update?: { appid: string; old: string; new: string; t: number } | null;
   graphics_target?: number;
@@ -1053,6 +1055,23 @@ function Content() {
             ]}
             selectedOption={s.auto_tdp ?? "always"}
             onChange={(o: { data: string }) => update("auto_tdp", o.data)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="Частота GPU"
+            description={
+              !st.power?.gpu?.available
+                ? st.power?.gpu?.error || "Недоступно"
+                : (st.power.gpu.clock ? `${st.power.gpu.clock} МГц` : "Авто") +
+                  (({ ref: " · еталонний замір", descending: " · підбираю", settled: " · підібрано" } as Record<string, string>)[
+                    st.power.gpu.state
+                  ] ?? "") +
+                  " — найнижча фіксована частота, з якою FPS і кадри рівні (як «Ручна частота GPU» у Steam)"
+            }
+            disabled={!st.power?.gpu?.available}
+            checked={s.auto_gpu_clock ?? true}
+            onChange={(v: boolean) => update("auto_gpu_clock", v)}
           />
         </PanelSectionRow>
       </PanelSection>

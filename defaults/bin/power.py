@@ -254,3 +254,70 @@ class PowerCtl:
     def current_profile(self):
         out = (self.tdp._run("get-performance-profile") or "").split()
         return out[-1] if out else None
+
+
+# ------------------------------------------------------------------ частота GPU
+
+class GpuClock:
+    """Фіксована частота GPU через steamos-manager — те саме, що повзунок «Ручна частота GPU»
+    у швидкому меню Steam. Частота, що весь час «стрибає», дає нерівний фреймтайм; фіксована
+    найнижча достатня — рівні кадри, менше нагріву й шуму."""
+
+    def __init__(self, tdp, log=print):
+        self.tdp, self.log = tdp, log
+        self.min = self.max = None
+        self.available = False
+        self.error = ""
+        if not tdp.cli:
+            self.error = "немає steamosctl"
+            return
+        props = tdp._run("get-all-properties") or ""
+        levels = ""
+        for line in props.splitlines():
+            key, _, val = line.partition(":")
+            num = "".join(ch for ch in val if ch.isdigit())
+            if key.strip().endswith("ManualGpuClockMin") and num:
+                self.min = int(num)
+            elif key.strip().endswith("ManualGpuClockMax") and num:
+                self.max = int(num)
+            elif key.strip().endswith("AvailableGpuPerformanceLevels"):
+                levels = val
+        if not (self.min and self.max and self.max > self.min and "manual" in levels):
+            self.error = "steamos-manager не дає ручну частоту GPU"
+            return
+        self.available = True
+
+    def level(self):
+        out = (self.tdp._run("get-gpu-performance-level") or "").split()
+        return out[-1].strip("\"'") if out else None
+
+    def clock(self):
+        out = (self.tdp._run("get-manual-gpu-clock") or "").split()
+        try:
+            return int("".join(ch for ch in out[-1] if ch.isdigit()))
+        except (IndexError, ValueError):
+            return None
+
+    def set_clock(self, mhz):
+        mhz = int(max(self.min, min(self.max, mhz)))
+        if self.level() != "manual" and self.tdp._run("set-gpu-performance-level", "manual") is None:
+            self.log(f"GPU: не вдалося ввімкнути ручну частоту: {self.tdp.error}")
+            return False
+        if self.tdp._run("set-manual-gpu-clock", str(mhz)) is None:
+            self.log(f"GPU: не вдалося поставити {mhz} МГц: {self.tdp.error}")
+            return False
+        return True
+
+    def set_auto(self):
+        return self.tdp._run("set-gpu-performance-level", "auto") is not None
+
+    def snapshot(self):
+        return {"level": self.level(), "clock": self.clock()}
+
+    def restore(self, snap):
+        if not snap:
+            return
+        if snap.get("level") == "manual" and snap.get("clock"):
+            self.set_clock(snap["clock"])
+        elif snap.get("level"):
+            self.tdp._run("set-gpu-performance-level", snap["level"])

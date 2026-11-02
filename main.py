@@ -62,7 +62,8 @@ percentile, detect_device = C.percentile, C.detect_device
 DEFAULT_SETTINGS = {
     "enabled": True,
     "mode": "auto",            # "auto" | "vrr" (VRR, без обмеження до частоти екрана) | фіксований рівень, напр. "60"
-    "auto_tdp": "always",      # найтихіше живлення, що тримає FPS: always | battery (лише від батареї) | off
+    "auto_tdp": "always",
+    "auto_gpu_clock": True,    # найнижча фіксована частота GPU, з якою FPS і фреймтайм рівні      # найтихіше живлення, що тримає FPS: always | battery (лише від батареї) | off
     "power_profiles": True,    # окремі рівні FPS від батареї й від зарядки
     "bat_mode": "same",        # FPS від батареї: same (як «mode») | auto | 30 | 40 | …
     "ac_mode": "same",         # FPS від зарядки
@@ -542,6 +543,9 @@ class Plugin:
         self.ac = P.on_ac()
         self.ac_checked = 0.0
         self.pw = P.PowerCtl(self.device, decky.logger.info)
+        self.gc = P.GpuClock(self.pw.tdp, decky.logger.info)
+        self.gpu_orig = None
+        decky.logger.info(f"частота GPU: {'%s–%s МГц' % (self.gc.min, self.gc.max) if self.gc.available else self.gc.error}")
         self.started_t = time.time()
         self.tdp_orig = None
         self.telemetry = {}
@@ -566,6 +570,7 @@ class Plugin:
             self.task.cancel()
         self._restore_display()
         self._tdp_restore()
+        self._gpu_restore()
 
     async def _uninstall(self):
         self._restore_display()
@@ -604,6 +609,11 @@ class Plugin:
         self.hot, self.hot_since, self.hot_warned = False, 0, False
         self.calib, self.calib_tries, self.calib_next = None, 0, 0.0
         self.tm_raw, self.tm_windows, self.tm_t, self.tm_saved_n = [], [], 0.0, 0
+        self.gpu_state = "off"    # off | ref | descending | settled
+        self.gpu_cur = None       # МГц (None — авто)
+        self.gpu_ok = None        # остання частота, що тримала
+        self.gpu_ref = None       # (p10, p5) на авто-частоті
+        self.gpu_samples, self.gpu_t, self.gpu_key, self.gpu_bad = [], 0.0, None, 0
 
     def _restore_display(self):
         try:
@@ -921,9 +931,12 @@ class Plugin:
         if self._vrr() and self.tdp_ref is None:
             self.tdp_ref = p10                 # VRR: скільки гра дає на повному живленні
             return
+        if self.gpu_state in ("ref", "descending"):
+            return                             # зараз підбирається частота GPU
         thr = self._tdp_threshold()
         if thr and p10 < thr:
-            self._tdp_rescue()
+            if not self._gpu_rescue("FPS просів"):
+                self._tdp_rescue()
             return
         if self.tdp_state == "descending":
             nxt = self.tdp_cur - 1
@@ -938,9 +951,17 @@ class Plugin:
     def _power_retry(self, now):
         """steamos-manager після завантаження системи може відповісти не одразу — тоді плагін
         лишався без керування живленням до перезапуску. Пробуємо ще раз (перші 10 хв)."""
-        if self.pw.available or now - self.started_t > 600 or now - getattr(self, "pw_retry_t", 0) < 30:
+        if (self.pw.available and self.gc.available) or now - self.started_t > 600 \
+                or now - getattr(self, "pw_retry_t", 0) < 30:
             return
         self.pw_retry_t = now
+        if not self.gc.available:
+            gc = P.GpuClock(self.pw.tdp, decky.logger.info)
+            if gc.available:
+                self.gc = gc
+                decky.logger.info(f"частота GPU (повторна спроба): {gc.min}–{gc.max} МГц")
+        if self.pw.available:
+            return
         pw = P.PowerCtl(self.device, decky.logger.info)
         if not pw.available:
             return
@@ -1075,6 +1096,131 @@ class Plugin:
                         if verdict else "лише справжні кадри гри — ділити не треба")
                      + f" (ліміт {cap:.0f} → MangoHud {med:.0f})")
         return False
+
+    # ---------------- частота GPU: найнижча фіксована, з якою FPS і кадри рівні
+    #
+    # Після підбору живлення: замір на авто-частоті (еталон рівності кадрів), потім фіксуємо
+    # частоту від максимуму вниз по 200 МГц, поки гра тримає ліміт і p5 FPS не гірший за еталон.
+    # Перша, що не тримає, — повертаємо останню робочу й запам'ятовуємо (гра + ліміт + живлення).
+
+    GPU_STEP = 200
+    GPU_WIN_S = 12
+
+    def _gpu_wanted(self):
+        return (self.gc.available and self.settings.get("auto_gpu_clock", True)
+                and self.phase in ("locked", "manual") and not self.tuning
+                and self.calib is None and self.tdp_state != "descending")
+
+    def _gpu_key(self):
+        lvl = self.pw.key(self.tdp_cur) if (self.pw.available and self.tdp_cur is not None) else "-"
+        return f"{self._tdp_saved_key()}|{lvl}"
+
+    def _gpu_set(self, mhz, why=""):
+        if self.gpu_orig is None:
+            self.gpu_orig = self.gc.snapshot()
+        if mhz is None:
+            self.gc.set_auto()
+            decky.logger.info(f"GPU → авто {why}")
+        elif mhz != self.gpu_cur and self.gc.set_clock(mhz):
+            decky.logger.info(f"GPU → {mhz} МГц {why}")
+        self.gpu_cur = mhz
+        self.gpu_samples, self.gpu_t, self.gpu_bad = [], time.time(), 0
+
+    def _gpu_restore(self):
+        if self.gpu_orig is not None and self.gc.available:
+            self.gc.restore(self.gpu_orig)
+            decky.logger.info(f"частоту GPU повернуто: {self.gpu_orig}")
+        self.gpu_orig = None
+        self.gpu_cur = None
+        self.gpu_state = "off"
+
+    def _gpu_save(self):
+        if not self.appid or not self.gpu_key:
+            return
+        g = self.games.setdefault(str(self.appid), {})
+        g.setdefault("gpu", {})[self.gpu_key] = self.gpu_cur or "auto"
+        _save_json(GAMES_FILE, self.games)
+
+    def _gpu_threshold(self):
+        if self._vrr():
+            ref = self.gpu_ref[0] if self.gpu_ref else None
+            if not ref:
+                return None
+            q = C.quality_target(self.settings, self.device)
+            return max(ref * 0.92, q * 0.97)
+        return self.base * 0.93
+
+    def _gpu_rescue(self, why):
+        """Просідання при зниженій частоті — спершу +100 МГц (живлення не чіпаємо)."""
+        if self.gpu_state != "settled" or self.gpu_cur is None:
+            return False
+        if self.gpu_cur >= self.gc.max:
+            self._gpu_set(None, f"({why} навіть на максимумі)")
+        else:
+            self._gpu_set(min(self.gc.max, self.gpu_cur + 100), f"({why})")
+        self._gpu_save()
+        self.tdp_samples = []
+        return True
+
+    def _gpu_tick(self, now):
+        if not self._gpu_wanted():
+            if self.gpu_state != "off" or self.gpu_cur is not None:
+                if self.gpu_cur is not None:
+                    self._gpu_set(None, "(підбір частоти призупинено)")
+                self.gpu_state = "off"
+            return
+        key = self._gpu_key()
+        if self.gpu_state == "off" or key != self.gpu_key:
+            self.gpu_key = key
+            saved = (self.games.get(str(self.appid)) or {}).get("gpu", {}).get(key)
+            if saved:
+                self.gpu_state = "settled"
+                self._gpu_set(None if saved == "auto" else int(saved), "(збережене для цієї гри)")
+            else:
+                self.gpu_state, self.gpu_ref, self.gpu_ok = "ref", None, None
+                self._gpu_set(None, "(еталон на авто-частоті)")
+            return
+        self.gpu_samples = [x for x in self.gpu_samples if now - x[0] <= self.GPU_WIN_S]
+        if now - self.gpu_t < self.GPU_WIN_S or len(self.gpu_samples) < 20:
+            return
+        fps = [x[1] for x in self.gpu_samples]
+        self.gpu_samples, self.gpu_t = [], now
+        p10, p5 = percentile(fps, 0.10), percentile(fps, 0.05)
+        if self.gpu_state == "ref":
+            self.gpu_ref = (p10, p5)
+            self.gpu_state = "descending"
+            self._gpu_set(self.gc.max - self.GPU_STEP if self.gc.max - self.GPU_STEP >= self.gc.min
+                          else self.gc.max, f"(старт підбору, еталон p10 {p10:.0f})")
+            return
+        thr = self._gpu_threshold()
+        ref_p5 = self.gpu_ref[1] if self.gpu_ref else p5
+        holds = (thr is None or p10 >= thr) and p5 >= min(ref_p5, thr or ref_p5) * 0.95
+        if self.gpu_state == "descending":
+            if holds:
+                self.gpu_ok = self.gpu_cur
+                nxt = self.gpu_cur - self.GPU_STEP
+                if nxt < self.gc.min:
+                    self.gpu_state = "settled"
+                    self._gpu_save()
+                    self._notify(f"AutoFPS: GPU {self.gpu_cur} МГц",
+                                 f"Навіть на мінімальній частоті гра тримає {self._fps_goal_text()} рівно")
+                    return
+                self._gpu_set(nxt, f"(тримає: p10 {p10:.0f}, p5 {p5:.0f})")
+                return
+            self.gpu_state = "settled"
+            if self.gpu_ok:
+                self._gpu_set(self.gpu_ok, f"(на {self.gpu_cur} не тримало: p10 {p10:.0f}, p5 {p5:.0f})")
+                msg = f"Найнижча частота GPU, з якою кадри рівні: {self.gpu_ok} МГц. Запам'ятав для цієї гри"
+            else:
+                self._gpu_set(None, "(фіксована частота не тримає — лишаю авто)")
+                msg = "Гра потребує повної частоти — лишаю авто"
+            self._gpu_save()
+            self._notify(f"AutoFPS: GPU {self.gpu_cur or 'авто'}" + (" МГц" if self.gpu_cur else ""), msg)
+            return
+        # settled: два вікна поспіль не тримає — додаємо частоту
+        self.gpu_bad = self.gpu_bad + 1 if not holds else 0
+        if self.gpu_bad >= 2:
+            self._gpu_rescue("кадри нерівні")
 
     # ---------------- фоновий замір для підбору графіки
     #
@@ -1217,7 +1363,9 @@ class Plugin:
             return
         base = self.base if base is None else base
         mult = self.mult if mult is None else mult
+        old = self.games.get(str(self.appid)) or {}
         self.games[str(self.appid)] = {
+            **{k: old[k] for k in ("tdp", "gpu") if k in old},
             "base": base, "mult": mult,
             "native_p10": round(self.native_p10, 1),
             "device": self.device["id"], "updated": int(time.time()),
@@ -1324,6 +1472,7 @@ class Plugin:
                 self._report_crash()
                 self._restore_display()
                 self._tdp_restore()
+                self._gpu_restore()
                 self._reset_game_state()
                 self.reader.reset()
             self._power_tick(now)
@@ -1413,9 +1562,11 @@ class Plugin:
                 fps = fps / max(2, self.mult)  # MangoHud бачить і згенеровані кадри
             self.samples.append((now, fps, gpu))
             self.tdp_samples.append((now, fps))
+            self.gpu_samples.append((now, fps))
             if self.tuning:
                 self.tm_raw.append((now, fps, gpu))
         self._tdp_tick(now)
+        self._gpu_tick(now)
         self._tm_tick(now)
 
         # фіксований рівень вибрано вручну
@@ -1544,7 +1695,10 @@ class Plugin:
                 self.bad_windows += 1
             else:
                 self.bad_windows = 0
-            if self.bad_windows >= 2 and self._tdp_rescue():
+            if self.bad_windows >= 2 and self.gpu_state in ("ref", "descending"):
+                self.bad_windows = 0      # просідання від підбору частоти GPU — він сам поверне
+                return
+            if self.bad_windows >= 2 and (self._gpu_rescue("FPS просів") or self._tdp_rescue()):
                 self.bad_windows = 0      # спершу повертаємо потужність, FPS не чіпаємо
                 return
             if self.bad_windows >= 2:
@@ -1590,7 +1744,10 @@ class Plugin:
                       "levels": len(self.pw.levels), "level_i": self.tdp_cur,
                       "tdp_state": self.tdp_state, "tdp_error": self.pw.error,
                       "telemetry": self.telemetry, "hot": bool(getattr(self, "hot", False)),
-                      "mode": self._mode()},
+                      "mode": self._mode(),
+                      "gpu": {"available": self.gc.available, "state": self.gpu_state,
+                              "clock": self.gpu_cur, "min": self.gc.min, "max": self.gc.max,
+                              "error": self.gc.error}},
             "game_update": getattr(self, "game_update", None),
             "graphics_target": C.quality_target(self.settings, self.device),
         }
@@ -1915,6 +2072,10 @@ class Plugin:
             out.append(json.dumps({"kind": self.pw.kind, "levels": [self.pw.label(i) for i in range(len(self.pw.levels))],
                                    "error": self.pw.error, "cli": self.pw.tdp.cli, "state": self.tdp_state,
                                    "level": self.tdp_cur, "ac": self.ac, "telemetry": P.telemetry(),
+                                   "gpu": {"available": self.gc.available, "range": [self.gc.min, self.gc.max],
+                                           "error": self.gc.error, "state": self.gpu_state,
+                                           "clock": self.gpu_cur, "ref": self.gpu_ref,
+                                           "now": self.gc.snapshot() if self.gc.available else None},
                                    "props": (self.pw.tdp._run("get-all-properties") or "")[:1500]},
                                   ensure_ascii=False, indent=2))
         except Exception as e:  # noqa: BLE001
