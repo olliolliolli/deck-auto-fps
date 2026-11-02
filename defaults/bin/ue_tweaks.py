@@ -53,12 +53,22 @@ TWEAKS = [
 ]
 
 
+UE5_MARKERS = [
+    "Engine/Plugins/NNE",                          # Neural Network Engine — з UE 5.2
+    "Engine/Binaries/ThirdParty/MsQuic",           # UE5
+]
+
+
 def is_ue5(install):
     """UE5 — за рядком версії рушія в *-Shipping.exe (результат кешується)."""
     exes = glob.glob(os.path.join(install, "*", "Binaries", "Win64", "*Shipping*.exe")) + \
         glob.glob(os.path.join(install, "*", "Binaries", "WinGDK", "*Shipping*.exe"))
     if not exes:
         return False
+    # теки, які є лише в UE5 (рядок версії в exe буває зашифрований/змінений, як у LEGO Batman)
+    for m in UE5_MARKERS:
+        if glob.glob(os.path.join(install, m)):
+            return True
     state = C.load_json(STATE_FILE, {})
     cache = state.setdefault("_ue5", {})
     for exe in exes:
