@@ -61,7 +61,7 @@ percentile, detect_device = C.percentile, C.detect_device
 
 DEFAULT_SETTINGS = {
     "enabled": True,
-    "mode": "auto",            # "auto" або фіксований рівень, напр. "60"
+    "mode": "auto",            # "auto" | "vrr" (VRR, без обмеження до частоти екрана) | фіксований рівень, напр. "60"
     "auto_tdp": "battery",     # мінімальний TDP, що тримає FPS: battery (лише від батареї) | always | off
     "power_profiles": True,    # окремі рівні FPS від батареї й від зарядки
     "bat_mode": "same",        # FPS від батареї: same (як «mode») | auto | 30 | 40 | …
@@ -134,7 +134,9 @@ def set_root_atom(name, value):
         return False
 
 
-def apply_display(device, fps_limit, refresh):
+def apply_display(device, fps_limit, refresh, vrr=None):
+    if vrr is not None and device.get("vrr"):
+        set_root_atom("GAMESCOPE_VRR_ENABLED", 1 if vrr else 0)
     set_root_atom("GAMESCOPE_FPS_LIMIT", fps_limit)
     if refresh:
         set_root_atom("GAMESCOPE_DYNAMIC_REFRESH", refresh)
@@ -504,6 +506,10 @@ class Plugin:
         if not self.settings.get("fg_external_migrated"):
             self.settings.update(fg_mode="external", fg_external_migrated=True)
             _save_json(SETTINGS_FILE, self.settings)
+        # екран з VRR (Legion Go S): за замовчуванням — VRR без обмеження до 120 FPS (одноразово)
+        if self.device.get("vrr") and not self.settings.get("vrr_migrated"):
+            self.settings.update(mode="vrr", vrr_migrated=True)
+            _save_json(SETTINGS_FILE, self.settings)
         self.games = _load_json(GAMES_FILE, {})
         self.reader = LogReader()
         self.ac = P.on_ac()
@@ -557,6 +563,7 @@ class Plugin:
         self.cur_info = {}
         self.sfg = 0              # множник генерації кадрів, увімкненої обгорткою в цій сесії
         self.message = "Гра не запущена через AutoFPS"
+        self.manual_key = None
         self.tdp_state = "off"    # off | max | descending | settled
         self.tdp_cur = None
         self.tdp_last = 0.0
@@ -666,6 +673,11 @@ class Plugin:
 
     def _apply(self):
         out = self._out_fps()
+        if self._vrr():
+            # VRR: частота екрана йде за грою, обмежуємо лише зверху — частотою панелі
+            apply_display(self.device, self.device["max_hz"], None, vrr=True)
+            self.last_apply = time.time()
+            return
         limit = 0 if self.phase == "probe" else out
         refresh = best_refresh(self.device,
                                self.device["max_hz"] if self.phase == "probe" else out)
@@ -731,10 +743,13 @@ class Plugin:
                 return m
         return str(self.settings["mode"])
 
+    def _vrr(self):
+        return bool(self.device.get("vrr")) and self._mode() == "vrr"
+
     def _tdp_wanted(self):
         """off — не керуємо; max — повна потужність; auto — шукаємо мінімальний TDP."""
-        if not self.tdp.available:
-            return "off"
+        if not self.tdp.available or self._vrr():
+            return "off"      # VRR без цілі FPS: TDP лишаємо, як у Steam
         a = self.settings.get("auto_tdp", "battery")
         if a == "always":
             return "auto"
@@ -1062,13 +1077,15 @@ class Plugin:
             self.message = "Розігрів (завантаження, шейдери)…"
             if self.settings["enabled"]:
                 saved = self.games.get(self.appid) or {}
-                if self._mode() != "auto":
+                if self._mode() == "vrr" and self.device.get("vrr"):
+                    nxt = f"VRR до {self.device['max_hz']} FPS — без жорсткого ліміту"
+                elif self._mode() != "auto":
                     nxt = f"фіксовано {self._mode()} FPS"
                 elif saved.get("device") == self.device["id"] and not self.tuning:
                     nxt = "застосую рівень з минулого разу після розігріву (~20 с)"
                 else:
                     nxt = "заміряю FPS після розігріву (~20–40 с)"
-                if self.settings.get("start_on_button", True):
+                if self.settings.get("start_on_button", True) and not (self._vrr() and not self.tuning):
                     nxt = "коли почнеш грати (не в меню), відкрий AutoFPS і натисни «▶ Почати підбір»"
                 extra = self._mode_report(cur) + self._start_notes(now)
                 body = "\n".join([self._graphics_report(), *extra, f"Далі: {nxt}"])
@@ -1084,7 +1101,8 @@ class Plugin:
             self.phase, self.phase_t = "warmup", now
 
         # Підбір за кнопкою: поки гравець у меню/заставці, нічого не міряємо й не обмежуємо
-        if self.settings.get("start_on_button", True) and not self.user_started:
+        vrr_idle = self._vrr() and not self.tuning   # VRR без підбору графіки — міряти нічого
+        if self.settings.get("start_on_button", True) and not self.user_started and not vrr_idle:
             for _ in self.reader.read(self.game_started):
                 pass                      # вичитуємо лог, щоб не накопичувати кадри меню
             self.samples = []
@@ -1102,8 +1120,11 @@ class Plugin:
 
         # фіксований рівень вибрано вручну
         mode = self._mode()
+        if mode == "vrr" and not self.device.get("vrr"):
+            mode = "auto"
         if mode != "auto":
-            base = int(mode)
+            vrr = mode == "vrr"
+            base = self.device["max_hz"] if vrr else int(mode)
             # Крок автопідбору графіки при фіксованому FPS: спершу ~20 с замір без обмеження
             # (з обмеженням не видно запасу), потім — вибраний рівень. Без цього підбір стояв.
             if self.tuning and not self.manual_measured:
@@ -1125,12 +1146,21 @@ class Plugin:
                     self._notify("AutoFPS: графіку заміряно",
                                  f"Гра тримає щонайменше {p10:.0f} FPS на цих налаштуваннях. "
                                  f"Наступного запуску підберу графіку; зараз — фіксовано {base} FPS")
-            if self.phase != "manual" or self.base != base:
+            if self.phase != "manual" or getattr(self, "manual_key", None) != (mode, self.sfg):
+                self.manual_key = (mode, self.sfg)
                 self.base, self.mult = base, (self.sfg if self.sfg >= 2 else 1)
-                self.phase, self.message = "manual", f"Вручну: {base} FPS"
+                if vrr:
+                    self.base = max(1, base // self.mult)   # на екрані — до частоти панелі
+                    self.phase, self.message = "manual", f"VRR: до {base} FPS, частота екрана йде за грою"
+                else:
+                    self.phase, self.message = "manual", f"Вручну: {base} FPS"
                 self._apply()
                 self._tdp_begin()
-                self._notify(f"AutoFPS: {base} FPS", "Фіксований рівень, вибраний вручну")
+                if vrr:
+                    self._notify(f"AutoFPS: VRR до {base} FPS",
+                                 "Без жорсткого ліміту: екран підлаштовується під FPS гри, картинка плавна")
+                else:
+                    self._notify(f"AutoFPS: {base} FPS", "Фіксований рівень, вибраний вручну")
             elif now - self.last_apply > 5:
                 self._apply()
             return

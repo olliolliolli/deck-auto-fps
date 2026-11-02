@@ -87,6 +87,7 @@ type Status = {
     max_hz: number;
     quality_target: number;
     res: [number, number];
+    vrr?: boolean;
   };
   settings: Settings;
   appid: string | null;
@@ -867,6 +868,7 @@ function Content() {
   };
 
   const modeOptions = [
+    ...(st.device.vrr ? [{ data: "vrr", label: `VRR до ${st.device.max_hz} (без ліміту)` }] : []),
     { data: "auto", label: "Авто" },
     ...st.device.tiers.map((t) => ({ data: String(t), label: `${t} FPS` })),
   ];
@@ -983,6 +985,7 @@ function Content() {
         <PanelSectionRow>
           <DropdownItem
             label="Рівень FPS"
+            description={st.device.vrr ? "VRR: екран підлаштовує частоту під FPS гри — плавно без жорсткого ліміту. Для економії батареї вибери 40/60 у профілі батареї (тоді працює автоTDP)" : undefined}
             rgOptions={modeOptions}
             selectedOption={s.mode}
             onChange={(o: { data: string }) => update("mode", o.data)}
