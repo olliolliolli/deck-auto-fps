@@ -539,8 +539,13 @@ def choose_method(appid, install, settings, gpu):
         return forced
     if gpu.get("vendor") not in ("amd", "unknown"):
         return "optiscaler"
-    if GAME_PROFILES.get(str(appid), {}).get("bridge") and bridge_dll():
+    prof = GAME_PROFILES.get(str(appid), {})
+    if prof.get("bridge") and bridge_dll():
         return "bridge"                # FSR 2 гри → FSR 4 нашим мостом
+    # інші ігри RE Engine (Capcom): міст сам знаходить кроки FSR 2 у кадрі, без хешів конкретної гри
+    if bridge_dll() and not prof.get("max_upscaler") and install and not find_ffx(install) \
+            and detect_engine(install) == "re_engine":
+        return "bridge"
     if (settings or {}).get("opti_upscaler", "auto") not in ("auto", "fsr4"):
         return "optiscaler"            # FSR 3.1 / XeSS / FSR 4.0 — це вміє лише OptiScaler
     if (settings or {}).get("opti_fg"):
@@ -1360,9 +1365,9 @@ def analyze_bridge(appid, game, started, duration, crashed, log=print):
                    message=f"Міст: {st.get('version', 'FSR')} замість FSR 2, інтерфейс чіткий "
                            f"({st.get('bridged')} кадрів)")
     elif state == "no_fsr2_shaders":
-        res.update(status="error", title="FSR 4: міст не впізнав гру",
-                   message="Кроків FSR 2 цієї версії гри не знайдено — схоже, гру оновили. "
-                           "Працював рідний FSR 2. Надішли діагностику, щоб оновити міст")
+        res.update(status="error", title="FSR 4: міст не зміг підмінити FSR 2",
+                   message="FSR 2 у грі знайдено автоматично, але кадри не вдалося передати в FSR 4 — "
+                           "працював рідний FSR 2. Надішли діагностику")
     elif state == "fsr2_off":
         res.update(status="no_dlss", title="FSR 4: увімкни FSR 2 у грі",
                    message="Міст готовий, але гра не використовує FSR 2. Налаштування графіки → "

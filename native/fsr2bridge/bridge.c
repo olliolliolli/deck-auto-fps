@@ -86,7 +86,7 @@ static const known_pso g_known[] = {
     {0xc7e4d3dc11696abfULL, "fsr2-10 RCAS(display)"},
     {0x7cd9e63795fb23f6ULL, "post-1 (після FSR)"},
 };
-static volatile LONG g_known_psos;   /* скільки кроків FSR 2 гри знайдено при створенні шейдерів */
+static volatile LONG g_known_psos;   /* скільки кроків накопичення FSR 2 знайдено (автоматично або за відомим хешем) */
 static const char *known_name(uint64_t h)
 {
     for (size_t i = 0; i < sizeof(g_known) / sizeof(g_known[0]); i++)
@@ -110,32 +110,51 @@ static uint64_t fnv1a(const void *p, size_t n)
     return h;
 }
 
-/* PSO → хеш шейдера */
-typedef struct { void *key; uint64_t hash; } pso_ent;
+/* PSO → хеш шейдера + клас кроку FSR 2 (визначається автоматично під час гри) */
+enum { PC_UNKNOWN = 0, PC_OTHER, PC_ACCUM, PC_RCAS, PC_LUMA, PC_PREP, PC_MV, PC_DCONV };
+static const char *const g_pc_name[] = {"?", "інше", "накопичення", "RCAS", "яскравість/колір", "підготовка", "вектори руху", "глибина"};
+typedef struct { void *key; uint64_t hash; uint8_t cls, checks; } pso_ent;
 #define PSO_CAP (1u << 18)
+#define PSO_MAX_CHECKS 24
 static pso_ent *g_pso;
 static SRWLOCK g_pso_lock = SRWLOCK_INIT;
 
-static void pso_put(void *k, uint64_t h)
+static void pso_put(void *k, uint64_t h, uint8_t cls)
 {
     AcquireSRWLockExclusive(&g_pso_lock);
     uint32_t i = mix((uint64_t)(uintptr_t)k, PSO_CAP);
     for (uint32_t n = 0; n < PSO_CAP; n++, i = (i + 1) & (PSO_CAP - 1))
-        if (!g_pso[i].key || g_pso[i].key == k) { g_pso[i].key = k; g_pso[i].hash = h; break; }
+        if (!g_pso[i].key || g_pso[i].key == k) { g_pso[i].key = k; g_pso[i].hash = h; g_pso[i].cls = cls; g_pso[i].checks = 0; break; }
     ReleaseSRWLockExclusive(&g_pso_lock);
 }
 
-static uint64_t pso_hash(void *k)
+static int pso_get(void *k, pso_ent *out)
 {
-    uint64_t h = 0;
+    int ok = 0;
     AcquireSRWLockShared(&g_pso_lock);
     uint32_t i = mix((uint64_t)(uintptr_t)k, PSO_CAP);
     for (uint32_t n = 0; n < 64; n++, i = (i + 1) & (PSO_CAP - 1)) {
-        if (g_pso[i].key == k) { h = g_pso[i].hash; break; }
+        if (g_pso[i].key == k) { *out = g_pso[i]; ok = 1; break; }
         if (!g_pso[i].key) break;
     }
     ReleaseSRWLockShared(&g_pso_lock);
-    return h;
+    return ok;
+}
+
+/* cls >= 0 — встановити клас; cls < 0 — ще одна невдала перевірка (після PSO_MAX_CHECKS → «інше») */
+static void pso_mark(void *k, int cls)
+{
+    AcquireSRWLockExclusive(&g_pso_lock);
+    uint32_t i = mix((uint64_t)(uintptr_t)k, PSO_CAP);
+    for (uint32_t n = 0; n < 64; n++, i = (i + 1) & (PSO_CAP - 1)) {
+        if (g_pso[i].key == k) {
+            if (cls >= 0) g_pso[i].cls = (uint8_t)cls;
+            else if (g_pso[i].cls == PC_UNKNOWN && ++g_pso[i].checks >= PSO_MAX_CHECKS) g_pso[i].cls = PC_OTHER;
+            break;
+        }
+        if (!g_pso[i].key) break;
+    }
+    ReleaseSRWLockExclusive(&g_pso_lock);
 }
 
 /* дескриптор (CPU-адреса) → що в ньому */
@@ -309,9 +328,17 @@ static void register_pso(void *pso, const D3D12_SHADER_BYTECODE *cs)
 {
     if (!pso || !cs || !cs->pShaderBytecode || !cs->BytecodeLength) return;
     uint64_t h = fnv1a(cs->pShaderBytecode, cs->BytecodeLength);
-    pso_put(pso, h);
-    const char *nm = known_name(h);
-    if (nm) InterlockedIncrement(&g_known_psos);
+    uint8_t cls = PC_UNKNOWN;
+    switch (h) {   /* RE4: відомі кроки — одразу; решту ігор/версій визначаємо під час гри */
+    case 0x77501c64360b3290ULL: cls = PC_PREP; break;
+    case 0xfacf8f57b36f482fULL: cls = PC_MV; break;
+    case 0x373b42588c9e5f23ULL: cls = PC_DCONV; break;
+    case 0x6c5793de6ada1e41ULL: cls = PC_LUMA; break;
+    case 0xc669a9db25ea4759ULL: cls = PC_ACCUM; break;
+    case 0xc7e4d3dc11696abfULL: cls = PC_RCAS; break;
+    default: break;
+    }
+    pso_put(pso, h, cls);
 }
 
 static HRESULT STDMETHODCALLTYPE h_CreateComputePSO(ID3D12Device *dev, const D3D12_COMPUTE_PIPELINE_STATE_DESC *d, REFIID riid, void **out)
@@ -656,8 +683,8 @@ static DWORD WINAPI cfg_watch_thread(void *arg)
         Sleep(2000);
         if (!warned && GetTickCount() - g_t0 > 120000 && g_bridged == 0) {
             warned = 1;
-            if (g_known_psos == 0) { LOG("кроки FSR 2 цієї версії гри не знайдено (оновлення гри?) — працює рідний FSR 2"); write_status("no_fsr2_shaders"); }
-            else { LOG("FSR 2 у грі не використовується (увімкни FSR 2 у налаштуваннях графіки)"); write_status("fsr2_off"); }
+            if (g_known_psos == 0) { LOG("FSR 2 у кадрі не знайдено (увімкни FSR 2 у налаштуваннях графіки гри)"); write_status("fsr2_off"); }
+            else { LOG("FSR 2 знайдено, але кадри не вдалося передати в FFX — працює рідний FSR 2"); write_status("no_fsr2_shaders"); }
         }
         WIN32_FILE_ATTRIBUTE_DATA fa;
         if (GetFileAttributesExW(path, GetFileExInfoStandard, &fa) &&
@@ -793,7 +820,10 @@ typedef struct {
     uint32_t cb[64];
     int have_cb;
     int accumulate_skipped;
+    ID3D12Resource *mv_cand;     /* останній кандидат у вектори руху до кроку яскравості */
 } frame_state;
+/* розміри FSR 2, вивчені з констант накопичення (для автовизначення інших кроків) */
+static volatile uint32_t g_rw, g_rh, g_dw, g_dh;
 /* стан FSR 2 — окремо для кожного командного списку: рушій записує кілька кадрів паралельно */
 #define FR_CAP 64
 static frame_state g_frs[FR_CAP];
@@ -845,6 +875,39 @@ static ID3D12Resource *find_depth(cl_state *st)
     return r;
 }
 
+/* ресурс потрібного виду/формату/розміру в будь-якій таблиці дескрипторів (fmts == NULL — будь-який формат) */
+static ID3D12Resource *find_res(cl_state *st, int kind, const DXGI_FORMAT *fmts, int nf, uint32_t w, uint32_t h)
+{
+    rs_info *ri = rs_find(st->rs);
+    if (!ri) return NULL;
+    for (int f = 0; f < (fmts ? nf : 1); f++)
+        for (uint32_t p = 0; p < ri->nparams && p < 16; p++) {
+            param_info *pi = &ri->p[p];
+            if (pi->type != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE || !st->tables[p]) continue;
+            for (uint32_t i = 0; i < 32; i++) {
+                ID3D12Resource *r = table_res(st, p, i, kind);
+                if (!r) continue;
+                D3D12_RESOURCE_DESC d;
+                ID3D12Resource_GetDesc(r, &d);
+                if (d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) continue;
+                if (fmts && d.Format != fmts[f]) continue;
+                if (w && (d.Width != w || d.Height != h)) continue;
+                return r;
+            }
+        }
+    return NULL;
+}
+
+static const DXGI_FORMAT k_depth_fmts[] = {DXGI_FORMAT_R32G8X24_TYPELESS, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT_S8X24_UINT, DXGI_FORMAT_D32_FLOAT};
+static const DXGI_FORMAT k_color_fmts[] = {DXGI_FORMAT_R11G11B10_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM};
+static const DXGI_FORMAT k_mv_fmts[] = {DXGI_FORMAT_R16G16_FLOAT};
+
+static ID3D12Resource *find_depth_any(cl_state *st, uint32_t w, uint32_t h)
+{
+    ID3D12Resource *r = w ? find_res(st, D_SRV, k_depth_fmts, 4, w, h) : NULL;
+    return r ? r : find_depth(st);
+}
+
 static int table_cbv(cl_state *st, uint32_t param, uint32_t reg_index, uint32_t *out, uint32_t n)
 {
     rs_info *ri = rs_find(st->rs);
@@ -858,6 +921,32 @@ static int table_cbv(cl_state *st, uint32_t param, uint32_t reg_index, uint32_t 
     if (!p) return 0;
     memcpy(out, p, n * 4);
     return 1;
+}
+
+/* константи FSR 2 (розкладка Capcom/FSR 2.0): [0,1] рендер, [2,3] екран (int), [8,9] = 1/екран (float);
+   крок накопичення запускається групами 8x8 на розмір екрана */
+static int fsr2_cb_ok(const uint32_t *cb, UINT x, UINT y)
+{
+    uint32_t rw = cb[0], rh = cb[1], dw = cb[2], dh = cb[3];
+    if (rw < 64 || rh < 64 || dw > 8192 || dh > 8192 || dw < rw || dh < rh) return 0;
+    if (x != (dw + 7) / 8 || y != (dh + 7) / 8) return 0;
+    float f8, f9;
+    memcpy(&f8, &cb[8], 4); memcpy(&f9, &cb[9], 4);
+    return fabsf(f8 * (float)dw - 1.0f) < 1e-3f && fabsf(f9 * (float)dh - 1.0f) < 1e-3f;
+}
+
+static int fsr2_cb_find(cl_state *st, UINT x, UINT y, uint32_t *cb)
+{
+    rs_info *ri = rs_find(st->rs);
+    if (!ri) return 0;
+    for (uint32_t p = 0; p < ri->nparams && p < 16; p++) {
+        param_info *pi = &ri->p[p];
+        if (pi->type != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE || pi->nranges < 1 || !st->tables[p]) continue;
+        if (pi->r[0].type != D3D12_DESCRIPTOR_RANGE_TYPE_CBV) continue;
+        for (uint32_t i = 0; i < 2 && i < pi->r[0].num; i++)
+            if (table_cbv(st, p, i, cb, 64) && fsr2_cb_ok(cb, x, y)) return 1;
+    }
+    return 0;
 }
 
 static struct FfxApiResource ffx_res(ID3D12Resource *r, uint32_t state)
@@ -878,7 +967,7 @@ static struct FfxApiResource ffx_res(ID3D12Resource *r, uint32_t state)
     case DXGI_FORMAT_R11G11B10_FLOAT: x.description.format = FFX_API_SURFACE_FORMAT_R11G11B10_FLOAT; break;
     case DXGI_FORMAT_R16G16B16A16_FLOAT: x.description.format = FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT; break;
     case DXGI_FORMAT_R16G16_FLOAT: x.description.format = FFX_API_SURFACE_FORMAT_R16G16_FLOAT; break;
-    case DXGI_FORMAT_R32_FLOAT: case DXGI_FORMAT_D32_FLOAT: x.description.format = FFX_API_SURFACE_FORMAT_R32_FLOAT; break;
+    case DXGI_FORMAT_R32_FLOAT: case DXGI_FORMAT_D32_FLOAT: case DXGI_FORMAT_R32_TYPELESS: x.description.format = FFX_API_SURFACE_FORMAT_R32_FLOAT; break;
     case DXGI_FORMAT_R32G8X24_TYPELESS: case DXGI_FORMAT_D32_FLOAT_S8X24_UINT: case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS:
         x.description.format = FFX_API_SURFACE_FORMAT_R32_FLOAT; break;
     case DXGI_FORMAT_R8_UNORM: x.description.format = FFX_API_SURFACE_FORMAT_R8_UNORM; break;
@@ -889,7 +978,7 @@ static struct FfxApiResource ffx_res(ID3D12Resource *r, uint32_t state)
     x.description.usage = FFX_API_RESOURCE_USAGE_READ_ONLY;
     if (d.Format == DXGI_FORMAT_R32G8X24_TYPELESS || d.Format == DXGI_FORMAT_D32_FLOAT_S8X24_UINT)
         x.description.usage = FFX_API_RESOURCE_USAGE_DEPTHTARGET | FFX_API_RESOURCE_USAGE_STENCILTARGET;
-    else if (d.Format == DXGI_FORMAT_D32_FLOAT)
+    else if (d.Format == DXGI_FORMAT_D32_FLOAT || d.Format == DXGI_FORMAT_R32_TYPELESS)
         x.description.usage = FFX_API_RESOURCE_USAGE_DEPTHTARGET;
     if (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) x.description.usage |= FFX_API_RESOURCE_USAGE_UAV;
     if (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) x.description.usage |= FFX_API_RESOURCE_USAGE_RENDERTARGET;
@@ -959,6 +1048,11 @@ static int bridge_rcas(ID3D12GraphicsCommandList *cl, cl_state *st)
     frame_state fr;
     AcquireSRWLockExclusive(&g_fr_lock); fr = *fr_get(cl); ReleaseSRWLockExclusive(&g_fr_lock);
     ID3D12Resource *out = table_res(st, 2, 0, D_UAV);
+    if (fr.have_cb) {   /* вихід — UAV розміру екрана; у RE4 це u0 таблиці 2, в інших іграх шукаємо */
+        D3D12_RESOURCE_DESC dout;
+        if (out) ID3D12Resource_GetDesc(out, &dout);
+        if (!out || dout.Width != fr.cb[2] || dout.Height != fr.cb[3]) out = find_res(st, D_UAV, NULL, 0, fr.cb[2], fr.cb[3]);
+    }
     ID3D12Resource *depth = g_cfg.depth_conv ? fr.depth_conv : fr.depth;
     const char *why = NULL;
     if (fr.cl != cl) why = "інший командний список";
@@ -1093,6 +1187,31 @@ static void STDMETHODCALLTYPE h_Reset(ID3D12GraphicsCommandList *cl, ID3D12Comma
     o_Reset(cl, a, pso);
 }
 
+/* визначає, яким кроком FSR 2 є невідомий шейдер — за даними самого виклику, без хешів конкретної гри */
+static int classify(ID3D12GraphicsCommandList *cl, cl_state *st, UINT x, UINT y, uint64_t hash)
+{
+    uint32_t cb[64];
+    int cls = -1;
+    if (fsr2_cb_find(st, x, y, cb)) cls = PC_ACCUM;
+    else {
+        int prev = 0; uint32_t dw = 0, dh = 0;
+        AcquireSRWLockExclusive(&g_fr_lock);
+        frame_state *F = fr_get(cl);
+        if (F->have_cb) { prev = 1; dw = F->cb[2]; dh = F->cb[3]; }
+        ReleaseSRWLockExclusive(&g_fr_lock);
+        uint32_t rw = g_rw, rh = g_rh;
+        if (prev && x == (dw + 15) / 16 && y == (dh + 15) / 16 && find_res(st, D_UAV, NULL, 0, dw, dh))
+            cls = PC_RCAS;
+        else if (rw && x == (rw + 63) / 64 && y == (rh + 63) / 64 && find_res(st, D_SRV, k_color_fmts, 4, rw, rh))
+            cls = PC_LUMA;
+    }
+    pso_mark(st->pso, cls);
+    if (cls < 0) return PC_UNKNOWN;
+    if (cls == PC_ACCUM) InterlockedIncrement(&g_known_psos);
+    LOG("автовизначення FSR 2: шейдер %016llx — %s (групи %ux%u)", (unsigned long long)hash, g_pc_name[cls], x, y);
+    return cls;
+}
+
 static void STDMETHODCALLTYPE h_Dispatch(ID3D12GraphicsCommandList *cl, UINT x, UINT y, UINT z)
 {
     if (t_in_ffx || !g_cfg.enable || g_ffx_state < 0) { o_Dispatch(cl, x, y, z); return; }
@@ -1100,38 +1219,57 @@ static void STDMETHODCALLTYPE h_Dispatch(ID3D12GraphicsCommandList *cl, UINT x, 
     AcquireSRWLockShared(&g_cl_lock);
     st = *cl_get(cl);
     ReleaseSRWLockShared(&g_cl_lock);
-    uint64_t h = st.pso ? pso_hash(st.pso) : 0;
-    switch (h) {
-    case 0x77501c64360b3290ULL:   /* крок 1: глибина (t2), маска (u0) — початок кадру FSR 2 */
+    pso_ent pe;
+    if (!st.pso || !pso_get(st.pso, &pe)) { o_Dispatch(cl, x, y, z); return; }
+    int cls = pe.cls;
+    if (cls == PC_UNKNOWN) cls = classify(cl, &st, x, y, pe.hash);
+    uint32_t rw = g_rw, rh = g_rh;
+    switch (cls) {
+    case PC_PREP:    /* RE4 крок 1: глибина (t2), маска (u0) — початок кадру FSR 2 */
         AcquireSRWLockExclusive(&g_fr_lock);
-        { frame_state *F = fr_get(cl); memset(F, 0, sizeof(*F)); F->cl = cl; }
-        fr_get(cl)->depth = find_depth(&st);
-        fr_get(cl)->reactive = table_res(&st, 2, 0, D_UAV);
+        { frame_state *F = fr_get(cl); memset(F, 0, sizeof(*F)); F->cl = cl;
+          F->depth = find_depth(&st); F->reactive = table_res(&st, 2, 0, D_UAV); }
         ReleaseSRWLockExclusive(&g_fr_lock);
         break;
-    case 0xfacf8f57b36f482fULL:   /* крок 2: вектори руху для FSR (u0) */
+    case PC_MV:      /* RE4 крок 2: вектори руху для FSR (u0) */
         AcquireSRWLockExclusive(&g_fr_lock);
-        fr_get(cl)->mv = table_res(&st, 2, 0, D_UAV);
-        if (!fr_get(cl)->depth) fr_get(cl)->depth = find_depth(&st);
+        { frame_state *F = fr_get(cl);
+          F->mv_cand = table_res(&st, 2, 0, D_UAV);
+          if (!F->depth) F->depth = find_depth(&st); }
         ReleaseSRWLockExclusive(&g_fr_lock);
         break;
-    case 0x373b42588c9e5f23ULL:   /* крок 3: перетворена глибина (u0, R32_FLOAT) */
+    case PC_DCONV:   /* RE4 крок 3: перетворена глибина (u0, R32_FLOAT) */
         AcquireSRWLockExclusive(&g_fr_lock);
-        fr_get(cl)->depth_conv = table_res(&st, 2, 0, D_UAV);
-        if (!fr_get(cl)->depth) fr_get(cl)->depth = find_depth(&st);
+        { frame_state *F = fr_get(cl);
+          F->depth_conv = table_res(&st, 2, 0, D_UAV);
+          if (!F->depth) F->depth = find_depth(&st); }
         ReleaseSRWLockExclusive(&g_fr_lock);
         break;
-    case 0x6c5793de6ada1e41ULL:   /* крок 4: колір кадру в рендер-роздільності (t0) */
-        AcquireSRWLockExclusive(&g_fr_lock);
-        fr_get(cl)->color = table_find(&st, 1, DXGI_FORMAT_R11G11B10_FLOAT, 0, 0, D_SRV);
-        ReleaseSRWLockExclusive(&g_fr_lock);
-        break;
-    case 0xc669a9db25ea4759ULL: { /* крок 9: накопичення — константи FSR 2 (b0) */
-        uint32_t cb[64];
-        int ok = table_cbv(&st, 0, 0, cb, 64);
+    case PC_LUMA: {  /* піраміда яскравості: читає колір кадру в рендер-роздільності */
+        ID3D12Resource *c = rw ? find_res(&st, D_SRV, k_color_fmts, 4, rw, rh) : NULL;
+        if (!c) c = table_find(&st, 1, DXGI_FORMAT_R11G11B10_FLOAT, 0, 0, D_SRV);
+        ID3D12Resource *d = find_depth_any(&st, rw, rh);
         AcquireSRWLockExclusive(&g_fr_lock);
         frame_state *F = fr_get(cl);
-        if (!F->depth) F->depth = find_depth(&st);
+        F->color = c;
+        if (F->mv_cand) F->mv = F->mv_cand;   /* вектори — останні перед цим кроком (пізніші — внутрішні FSR 2) */
+        if (!F->depth && d) F->depth = d;
+        ReleaseSRWLockExclusive(&g_fr_lock);
+        break;
+    }
+    case PC_ACCUM: { /* накопичення — константи FSR 2 */
+        uint32_t cb[64];
+        int ok = fsr2_cb_find(&st, x, y, cb);
+        if (ok) { g_rw = cb[0]; g_rh = cb[1]; g_dw = cb[2]; g_dh = cb[3]; }
+        ID3D12Resource *d = ok ? find_depth_any(&st, cb[0], cb[1]) : NULL;
+        AcquireSRWLockExclusive(&g_fr_lock);
+        frame_state *F = fr_get(cl);
+        if (d) {
+            D3D12_RESOURCE_DESC dd;
+            int bad = 1;
+            if (F->depth) { ID3D12Resource_GetDesc(F->depth, &dd); bad = dd.Width != cb[0] || dd.Height != cb[1]; }
+            if (bad) F->depth = d;
+        }
         if (ok) { memcpy(F->cb, cb, sizeof(cb)); F->have_cb = 1; }
         int skip = g_cfg.skip_accumulate && g_ffx_state == 1 && ok && F->color && F->mv && F->depth;
         if (skip) {   /* ті самі перевірки, що й на кроці RCAS — інакше вийде кадр без зображення */
@@ -1144,14 +1282,25 @@ static void STDMETHODCALLTYPE h_Dispatch(ID3D12GraphicsCommandList *cl, UINT x, 
         if (skip) return;
         break;
     }
-    case 0xc7e4d3dc11696abfULL: { /* крок 10: RCAS → тут FSR 4 */
-        if (bridge_rcas(cl, &st)) return;
+    case PC_RCAS: {  /* RCAS → тут FSR 4 */
+        int done = bridge_rcas(cl, &st);
         int skipped;
-        AcquireSRWLockExclusive(&g_fr_lock); skipped = fr_get(cl)->accumulate_skipped; ReleaseSRWLockExclusive(&g_fr_lock);
+        AcquireSRWLockExclusive(&g_fr_lock);
+        { frame_state *F = fr_get(cl); skipped = F->accumulate_skipped;
+          memset(F, 0, sizeof(*F)); F->cl = cl; }   /* кадр FSR 2 завершено */
+        ReleaseSRWLockExclusive(&g_fr_lock);
+        if (done) return;
         if (skipped) return;   /* накопичення FSR 2 пропущено — рідний RCAS дав би чорний кадр; лишаємо попередній */
         break;
     }
     default:
+        /* кандидат у вектори руху: R16G16_FLOAT рендер-розміру, групи 8x8 по рендер-роздільності */
+        if (rw && x == (rw + 7) / 8 && y == (rh + 7) / 8) {
+            ID3D12Resource *m = find_res(&st, D_UAV, k_mv_fmts, 1, rw, rh);
+            AcquireSRWLockExclusive(&g_fr_lock);
+            { frame_state *F = fr_get(cl); if (m) F->mv_cand = m; }
+            ReleaseSRWLockExclusive(&g_fr_lock);
+        }
         break;
     }
     o_Dispatch(cl, x, y, z);
