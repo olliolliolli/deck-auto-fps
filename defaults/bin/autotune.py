@@ -28,7 +28,14 @@ import autofps_common as C  # noqa: E402
 UE_KEYS = ["sg.ResolutionQuality", "sg.ViewDistanceQuality", "sg.AntiAliasingQuality",
            "sg.ShadowQuality", "sg.GlobalIlluminationQuality", "sg.ReflectionQuality",
            "sg.PostProcessQuality", "sg.TextureQuality", "sg.EffectsQuality",
-           "sg.FoliageQuality", "sg.ShadingQuality"]
+           "sg.FoliageQuality", "sg.ShadingQuality", "sg.LandscapeQuality", "sg.StreamingQuality"]
+
+# Налаштування поза [ScalabilityGroups], які багато ігор UE тримають у своєму розділі
+# GameUserSettings.ini (напр. [LotDKLocalSettings]). Пишемо лише ті, що є у файлі, і не вище
+# найбільшого значення, яке там колись стояло (максимум самої гри).
+UE_EXTRA_FOLLOW = {"MeshQuality": "ShadingQuality", "MaterialQuality": "ShadingQuality",
+                   "DistanceFieldAmbientOcclusion": "GlobalIlluminationQuality"}
+UE_EXTRA_KEYS = list(UE_EXTRA_FOLLOW) + ["Anisotropy"]
 
 # Кожна наступна сходинка = попередня + ці зміни.
 # Порядок: спершу дорогі для GPU й малопомітні ефекти, роздільна здатність і
@@ -57,6 +64,7 @@ def ue_ladder(lowres=None):
     ladder = [dict(cur)]
     for d in UE_DELTAS:
         cur.update({k: v for k, v in d.items() if not (lowres and k == "ResolutionQuality")})
+        cur["LandscapeQuality"] = cur["ViewDistanceQuality"]
         ladder.append(dict(cur))
     return [{f"sg.{k}": str(v) for k, v in step.items()} for step in ladder]
 
@@ -227,17 +235,46 @@ class UnrealAdapter:
         names = self.projects()
         named = [c for c in cands if any(f"/{n}/" in c for n in names)]
         pool = named or cands
-        return max(pool, key=os.path.getmtime)
+        self.cfg = max(pool, key=os.path.getmtime)
+        return self.cfg
+
+    def _extra_where(self, cfg):
+        """{ключ: розділ} для додаткових налаштувань якості, знайдених у файлі."""
+        where, cur = {}, None
+        for line in C.read_text(cfg).splitlines():
+            st = line.strip()
+            if st.startswith("[") and st.endswith("]"):
+                cur = st[1:-1]
+            elif cur and cur != self.SECTION and "=" in st and not st.startswith((";", "#")):
+                k = st.split("=", 1)[0].strip()
+                if k in UE_EXTRA_KEYS and k not in where:
+                    where[k] = cur
+        return where
 
     def read(self, cfg):
         vals = read_ini_section(cfg, self.SECTION)
-        return {k: vals[k] for k in UE_KEYS if k in vals}
+        out = {k: vals[k] for k in UE_KEYS if k in vals}
+        for k, sec in self._extra_where(cfg).items():
+            v = read_ini_section(cfg, sec).get(k)
+            if v is not None:
+                out[f"x.{k}"] = v
+        return out
 
     def ladder(self, original, lowres=None):
         steps = ue_ladder(lowres)
-        if (self.device or {}).get("id") in HANDHELDS:
-            for st in steps:
+        handheld = (self.device or {}).get("id") in HANDHELDS
+        extra_max = getattr(self, "extra_max", {}) or {}
+        n = len(steps)
+        for i, st in enumerate(steps):
+            if handheld:
                 st["sg.TextureQuality"] = str(min(int(st["sg.TextureQuality"]), UE_HANDHELD_TEXTURE_MAX))
+            st["sg.StreamingQuality"] = st["sg.TextureQuality"]
+            for k, cap in extra_max.items():
+                if k == "Anisotropy":
+                    want = 16 if i <= n * 0.3 else 8 if i <= n * 0.65 else 4
+                else:
+                    want = int(st[f"sg.{UE_EXTRA_FOLLOW[k]}"])
+                st[f"x.{k}"] = str(int(min(want, cap)))
         return steps
 
     def rank(self, values, ladder):
@@ -254,7 +291,12 @@ class UnrealAdapter:
         backup_once(cfg)
         with open(cfg, encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
-        new = patch_ini(lines, {self.SECTION: values})
+        changes = {self.SECTION: {k: v for k, v in values.items() if not k.startswith("x.")}}
+        where = self._extra_where(cfg)
+        for k, v in values.items():
+            if k.startswith("x.") and k[2:] in where:
+                changes.setdefault(where[k[2:]], {})[k[2:]] = v
+        new = patch_ini(lines, changes)
         with open(cfg, "w", encoding="utf-8") as f:
             f.writelines(new)
 
@@ -276,7 +318,7 @@ class UnrealAdapter:
                 return "?"
         return (f"роздільність {values.get('sg.ResolutionQuality', '?')}%, тіні {q('ShadowQuality')}, "
                 f"освітлення {q('GlobalIlluminationQuality')}, ефекти {q('PostProcessQuality')}, "
-                f"текстури {q('TextureQuality')}")
+                f"шейдинг {q('ShadingQuality')}, текстури {q('TextureQuality')}")
 
 
 def unity_hash(name):
@@ -600,67 +642,103 @@ ADAPTERS = [UnrealAdapter, UnityAdapter, REEngineAdapter]
 
 # ------------------------------------------------------------------ decision
 
-STEP_GAIN = 0.09   # одна сходинка драбини дає приблизно +9% FPS (оцінка для стрибка)
+STEP_GAIN = 0.09   # одна сходинка драбини ≈ +9% FPS, поки замірів гри мало
+MARGIN = 1.04      # ціль + 4% запасу: важчі сцени не мають провалювати ліміт
 
 
-def _steps_for(ratio):
-    """Скільки сходинок треба пройти, щоб змінити FPS у ratio разів (≥ 1)."""
+def _gain(hist):
+    """Приріст FPS на сходинку з замірів цієї гри (лог-лінійна регресія), інакше типовий."""
     import math
-    return max(1, int(math.ceil(math.log(ratio) / math.log(1 + STEP_GAIN) - 0.25)))
+    pts = {}
+    for h in hist:
+        pts.setdefault(int(h["level"]), []).append(float(h["p10"]))
+    if len(pts) < 2:
+        return 1 + STEP_GAIN
+    xs = sorted(pts)
+    ys = [math.log(max(1.0, sum(pts[x]) / len(pts[x]))) for x in xs]
+    mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
+    sxx = sum((x - mx) ** 2 for x in xs)
+    b = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx if sxx else math.log(1 + STEP_GAIN)
+    return min(1.25, max(1.03, math.exp(b)))
+
+
+def predict_level(hist, target, n, fallback):
+    """Сходинка, на якій гра (за замірами) тягне target·MARGIN; без замірів — fallback."""
+    import math
+    if not hist:
+        return fallback
+    g = _gain(hist)
+    best = None
+    for lv in range(n):
+        # прогноз від найближчого заміру
+        h = min(hist, key=lambda h: abs(int(h["level"]) - lv))
+        p = float(h["p10"]) * g ** (lv - int(h["level"]))
+        if p >= target * MARGIN:
+            best = lv
+            break
+    return n - 1 if best is None else best
+
+
+def first_guess(target, device, n):
+    """Перший запуск без замірів: типова сходинка для цілі на цьому пристрої."""
+    frac = 0.15 if target <= 30 else 0.35 if target <= 40 else 0.5 if target <= 48 else \
+        0.7 if target <= 60 else 0.95
+    if (device or {}).get("id") in ("deck_lcd", "deck_oled"):
+        frac += 0.15
+    return max(0, min(n - 1, int(round(frac * (n - 1)))))
 
 
 def decide(entry, target, n):
     """Повертає (нова_сходинка, пояснення). Змінює entry на місці.
 
-    Не по одній сходинці за запуск: за виміряним FPS оцінюємо, на скільки сходинок стрибнути,
-    і звужуємо межі (ok — тягнули ціль, failed — ні), як у бінарному пошуку."""
+    Усі заміри гри (на будь-якій сходинці й за будь-якої цілі) — це модель «FPS від сходинки».
+    Новий замір уточнює модель, і одразу стрибаємо на сходинку, що за прогнозом тягне ціль.
+    Межі: failed — сходинки, що ціль не тягнули, ok — що тягнули (для поточної цілі)."""
     lvl = max(0, min(int(entry.get("level", 0)), n - 1))
     last = entry.pop("last", None)
     if entry.get("converged") or entry.get("ineffective"):
         return lvl, entry.get("decision_note") or entry.get("note", "")
-    if not last or last.get("level") != lvl or last.get("target") != target:
-        return lvl, f"Сходинка {lvl + 1}/{n}: вимірюю"
-
-    p10 = float(last["p10"])
     hist = entry.setdefault("history", [])
-    hist.append({"level": lvl, "p10": round(p10, 1)})
-    del hist[:-12]
+    if last and last.get("level") == lvl:
+        hist.append({"level": lvl, "p10": round(float(last["p10"]), 1)})
+        del hist[:-16]
+    elif not hist or all(int(h["level"]) != lvl for h in hist):
+        return lvl, f"Сходинка {lvl + 1}/{n}: вимірюю"
+    here = [float(h["p10"]) for h in hist if int(h["level"]) == lvl]
+    p10 = sum(here[-2:]) / len(here[-2:])
 
-    # Якщо сходинки відрізняються на 2+, а FPS той самий — налаштування не діють
-    for h in hist[:-1]:
-        if abs(h["level"] - lvl) >= 2 and abs(h["p10"] - p10) / max(h["p10"], 1) < 0.04:
+    # Сходинки відрізняються на 2+, а FPS той самий — налаштування не діють
+    for h in hist:
+        if abs(int(h["level"]) - lvl) >= 2 and abs(float(h["p10"]) - p10) / max(float(h["p10"]), 1) < 0.04:
             entry["ineffective"] = True
             return lvl, ("Налаштування не впливають на FPS: гра впирається в процесор "
                          "або зберігає графіку деінде")
 
-    r = p10 / target
     failed = set(entry.get("failed", []))
     ok = set(entry.get("ok", []))
-    if r < 0.97:
-        failed.add(lvl)
-        entry["failed"] = sorted(failed)
-        if lvl >= n - 1:
-            entry["converged"] = True
+    r = p10 / target
+    (ok if r >= 0.97 else failed).add(lvl)
+    entry["failed"], entry["ok"] = sorted(failed), sorted(ok)
+
+    want = predict_level(hist, target, n, lvl)
+    lo = max(failed) + 1 if failed else 0           # вище за якістю — вже не тягнули
+    hi = min(ok) if ok else n - 1                   # нижче за якістю — вже тягнули
+    want = max(lo, min(hi, want))
+    if lvl in ok and 0.97 <= r <= 1.2 and want < lvl:
+        want = lvl                                  # малий запас — не ганяємось
+    if want == lvl and lvl in failed:
+        want = min(n - 1, lvl + 1)
+    if want == lvl:
+        entry["converged"] = True
+        if lvl in failed:
             return lvl, (f"Навіть на мінімумі ≈{p10:.0f} FPS — ціль {target} недосяжна. "
                          "Знизь ліміт FPS або ввімкни генерацію кадрів")
-        new = min(n - 1, lvl + _steps_for(target / max(p10, 1.0)))
-        ok_below = [x for x in ok if x > lvl]           # нижча якість, що вже тягнула ціль
-        if ok_below and new >= min(ok_below):
-            new = min(ok_below)
-            entry["converged"] = True
-            return new, f"Готово: сходинка {new + 1}/{n} — вища вже не тягне {target} FPS"
-        return new, f"≈{p10:.0f} FPS при цілі {target}: знижую до сходинки {new + 1}/{n}"
-    ok.add(lvl)
-    entry["ok"] = sorted(ok)
-    if r > 1.15 and lvl > 0:
-        new = max(0, lvl - _steps_for(r / 1.05))
-        fail_above = [x for x in failed if x < lvl]     # вища якість, що вже не тягнула
-        if fail_above:
-            new = max(new, max(fail_above) + 1)
-        if new < lvl:
-            return new, f"≈{p10:.0f} FPS при цілі {target} — є запас, підвищую якість до сходинки {new + 1}/{n}"
-    entry["converged"] = True
-    return lvl, f"Готово: сходинка {lvl + 1}/{n}, ≈{p10:.0f} FPS при цілі {target}"
+        return lvl, f"Готово: сходинка {lvl + 1}/{n}, ≈{p10:.0f} FPS при цілі {target}"
+    if want in ok and want == lo:
+        entry["converged"] = True
+        return want, f"Готово: сходинка {want + 1}/{n} — вища не тягне {target} FPS"
+    verb = "підвищую якість" if want < lvl else "знижую"
+    return want, f"≈{p10:.0f} FPS на сходинці {lvl + 1} при цілі {target}: {verb} до сходинки {want + 1}/{n}"
 
 
 def nearest_level(values, ladder):
@@ -750,6 +828,16 @@ def run(appid, args, device=None, log=print):
         C.save_json(C.TUNE_FILE, tune)
         return
     entry["config"] = cfg
+    if hasattr(adapter, "_extra_where"):
+        # максимум кожного додаткового налаштування, що будь-коли стояв у файлі (стеля гри)
+        xm = entry.setdefault("extra_max", {})
+        for k, v in adapter.read(cfg).items():
+            if k.startswith("x."):
+                try:
+                    xm[k[2:]] = max(int(float(v)), int(xm.get(k[2:], 0)))
+                except ValueError:
+                    pass
+        adapter.extra_max = xm
     if "original" not in entry:
         entry["original"] = adapter.read(cfg)
 
@@ -807,10 +895,17 @@ def run(appid, args, device=None, log=print):
 
     target = C.quality_target(settings, device)
     allow_low = bool(settings.get("lowres_for_quality", True))
-    if entry.get("target") != target or (not allow_low and entry.get("track") == "lowres"):
+    if not allow_low and entry.get("track") == "lowres":
         for k in ("history", "failed", "ok", "converged", "ineffective", "last", "track",
                   "native_result", "lowres_done"):
             entry.pop(k, None)
+    if entry.get("target") != target:
+        # заміри FPS від цілі не залежать — лишаємо; межі «тягне / не тягне» — для нової цілі
+        for k in ("failed", "ok", "converged", "native_result", "lowres_done"):
+            entry.pop(k, None)
+        if entry.get("history"):
+            entry["level"] = predict_level(entry["history"], target, int(entry.get("steps") or 12),
+                                           int(entry.get("level", 0)))
         entry["target"] = target
 
     scale = lowres_scale(device) if getattr(adapter, "lowres_supported", True) \
@@ -834,14 +929,7 @@ def run(appid, args, device=None, log=print):
     if not entry.get("start_scaled") and not entry.get("history"):
         # старт — від того, що стоїть у меню гри (напр. ти виставив максимум і натиснув
         # «Підібрати заново»); не вдалося порівняти — типова стартова сходинка пристрою
-        near = None
-        try:
-            near = nearest_level(adapter.read(cfg), ladder)
-        except Exception:  # noqa: BLE001
-            near = None
-        if near is None:
-            near = min(len(ladder) - 1, int(round(device["start_level"] * (len(ladder) - 1) / 11.0)))
-        entry["level"] = near
+        entry["level"] = first_guess(target, device, len(ladder))
         entry.pop("last", None)
         entry.pop("start_from_user", None)
     entry["start_scaled"] = True

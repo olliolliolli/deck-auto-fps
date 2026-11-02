@@ -611,6 +611,7 @@ class Plugin:
         self.hot, self.hot_since, self.hot_warned = False, 0, False
         self.calib = None
         self.tm_raw, self.tm_windows, self.tm_t, self.tm_saved_n = [], [], 0.0, 0
+        self.tm_forecast = None
         self.gpu_state = "off"    # off | ref | descending | settled
         self.gpu_cur = None       # МГц (None — авто)
         self.gpu_ok = None        # остання частота, що тримала
@@ -1145,7 +1146,7 @@ class Plugin:
     # оцінюємо «скільки гра тягне» і кожні 30 с зберігаємо в tune.json (вихід з гри нічого не губить).
 
     TM_SKIP_S = 45          # завантаження/логотипи після старту гри
-    TM_MIN_WINDOWS = 4      # ≥ 40 с гри до першого запису
+    TM_MIN_WINDOWS = 5      # ≥ 50 с гри до першого запису
 
     def _tm_cap(self):
         """Скільки справжніх FPS зараз дозволяє ліміт (None — без ліміту)."""
@@ -1191,13 +1192,36 @@ class Plugin:
         # обережна оцінка: нижня чверть вікон (меню/легкі сцени не завищують)
         value = percentile(self.tm_windows, 0.25)
         self._record_tune(value)
-        first = self.tm_saved_n == 0
         self.tm_saved_n = n
-        if first:
-            target = C.quality_target(self.settings, self.device)
+        self._tm_forecast(value)
+
+    def _tm_forecast(self, value):
+        """Що зміниться при наступному запуску — кажемо одразу, щоб можна було перезапустити гру."""
+        import copy
+        import autotune as AT
+        entry = _load_json(TUNE_FILE, {}).get(self._tune_key())
+        if not entry or not entry.get("steps"):
+            return
+        e = copy.deepcopy(entry)
+        cur = int(e.get("level", 0))
+        target = C.quality_target(self.settings, self.device)
+        try:
+            new, note = AT.decide(e, target, int(e["steps"]))
+        except Exception as ex:  # noqa: BLE001
+            decky.logger.warning(f"прогноз графіки: {ex}")
+            return
+        key = (new, bool(e.get("converged")))
+        if key == getattr(self, "tm_forecast", None):
+            return
+        self.tm_forecast = key
+        if new != cur:
+            self._notify("AutoFPS: графіку підібрано — перезапусти гру",
+                         f"{note}. Гра бере налаштування лише при старті: вийди й запусти знову")
+        elif e.get("converged"):
+            self._notify("AutoFPS: графіка підібрана", note)
+        else:
             self._notify("AutoFPS: графіку заміряно",
-                         f"На цих налаштуваннях гра тягне ≈{value:.0f} FPS (ціль {target}). "
-                         "Наступного запуску підберу графіку; замір уточнюється, поки граєш")
+                         f"На цих налаштуваннях ≈{value:.0f} FPS (ціль {target}). Уточнюю, поки граєш")
 
     # ---------------- decision logic
 

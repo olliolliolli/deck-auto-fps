@@ -275,7 +275,8 @@ class GpuClock:
         levels = ""
         for line in props.splitlines():
             key, _, val = line.partition(":")
-            num = "".join(ch for ch in val if ch.isdigit())
+            last = val.split()[-1] if val.split() else ""   # «uint32 800» → 800
+            num = "".join(ch for ch in last if ch.isdigit())
             if key.strip().endswith("ManualGpuClockMin") and num:
                 self.min = int(num)
             elif key.strip().endswith("ManualGpuClockMax") and num:
