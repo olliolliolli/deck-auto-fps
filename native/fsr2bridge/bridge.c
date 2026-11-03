@@ -266,6 +266,12 @@ static __thread int t_in_ffx;   /* під час виклику FFX не зап�
 static cl_state g_cls[CL_CAP];
 static SRWLOCK g_cl_lock = SRWLOCK_INIT;
 
+/* кореневі аргументи compute (константи, кореневі CBV/SRV/UAV) — для повного відновлення після FFX.
+   Окремо від cl_state: копіюються лише на кроці RCAS, а не на кожному Dispatch. */
+enum { RA_NONE = 0, RA_CBV, RA_SRV, RA_UAV, RA_CONST };
+typedef struct { uint8_t type[16]; uint64_t va[16]; uint32_t c[16][64]; uint64_t cmask[16]; } root_args;
+static root_args *g_cargs;   /* [CL_CAP], VirtualAlloc у DllMain */
+
 static cl_state *cl_get(void *cl)
 {
     uint32_t i = mix((uint64_t)(uintptr_t)cl, CL_CAP);
@@ -295,6 +301,7 @@ typedef void (STDMETHODCALLTYPE *PFN_SetComputeRootSignature)(ID3D12GraphicsComm
 typedef void (STDMETHODCALLTYPE *PFN_SetComputeRootDescriptorTable)(ID3D12GraphicsCommandList *, UINT, D3D12_GPU_DESCRIPTOR_HANDLE);
 typedef void (STDMETHODCALLTYPE *PFN_SetComputeRoot32BitConstants)(ID3D12GraphicsCommandList *, UINT, UINT, const void *, UINT);
 typedef void (STDMETHODCALLTYPE *PFN_SetComputeRootCBV)(ID3D12GraphicsCommandList *, UINT, D3D12_GPU_VIRTUAL_ADDRESS);
+typedef void (STDMETHODCALLTYPE *PFN_SetComputeRoot32BitConstant)(ID3D12GraphicsCommandList *, UINT, UINT, UINT);
 typedef HRESULT (WINAPI *PFN_CreateRSDeserializer)(LPCVOID, SIZE_T, REFIID, void **);
 typedef void (STDMETHODCALLTYPE *PFN_SetDescriptorHeaps)(ID3D12GraphicsCommandList *, UINT, ID3D12DescriptorHeap *const *);
 typedef void (STDMETHODCALLTYPE *PFN_SetGraphicsRootSignature)(ID3D12GraphicsCommandList *, ID3D12RootSignature *);
@@ -318,6 +325,8 @@ static PFN_SetComputeRootSignature o_SetComputeRootSignature;
 static PFN_SetComputeRootDescriptorTable o_SetComputeRootDescriptorTable;
 static PFN_SetComputeRoot32BitConstants o_SetComputeRoot32BitConstants;
 static PFN_SetComputeRootCBV o_SetComputeRootCBV;
+static PFN_SetComputeRootCBV o_SetComputeRootSRV, o_SetComputeRootUAV;   /* та сама сигнатура (VA) */
+static PFN_SetComputeRoot32BitConstant o_SetComputeRoot32BitConstant;
 static PFN_CreateRSDeserializer p_CreateRSDeserializer;
 static PFN_SetDescriptorHeaps o_SetDescriptorHeaps;
 static PFN_Reset o_Reset;
@@ -519,7 +528,16 @@ static void STDMETHODCALLTYPE h_SetPipelineState(ID3D12GraphicsCommandList *cl, 
 
 static void STDMETHODCALLTYPE h_SetComputeRootSignature(ID3D12GraphicsCommandList *cl, ID3D12RootSignature *rs)
 {
-    if (!t_in_ffx) { AcquireSRWLockExclusive(&g_cl_lock); cl_get(cl)->rs = rs; ReleaseSRWLockExclusive(&g_cl_lock); }
+    if (!t_in_ffx) {
+        AcquireSRWLockExclusive(&g_cl_lock);
+        cl_state *s = cl_get(cl);
+        if (s->rs != rs) {   /* нова сигнатура скидає всі кореневі аргументи */
+            memset(s->tables, 0, sizeof(s->tables));
+            if (g_cargs) memset(&g_cargs[s - g_cls], 0, sizeof(root_args));
+        }
+        s->rs = rs;
+        ReleaseSRWLockExclusive(&g_cl_lock);
+    }
     o_SetComputeRootSignature(cl, rs);
 }
 
@@ -529,14 +547,65 @@ static void STDMETHODCALLTYPE h_SetComputeRootDescriptorTable(ID3D12GraphicsComm
     o_SetComputeRootDescriptorTable(cl, idx, h);
 }
 
+static root_args *cargs_get(void *cl)   /* під g_cl_lock */
+{
+    return g_cargs ? &g_cargs[cl_get(cl) - g_cls] : NULL;
+}
+
 static void STDMETHODCALLTYPE h_SetComputeRoot32BitConstants(ID3D12GraphicsCommandList *cl, UINT idx, UINT n, const void *data, UINT off)
 {
+    if (!t_in_ffx && idx < 16 && data && off < 64 && n <= 64 - off) {
+        AcquireSRWLockExclusive(&g_cl_lock);
+        root_args *a = cargs_get(cl);
+        if (a) {
+            if (a->type[idx] != RA_CONST) { a->type[idx] = RA_CONST; a->cmask[idx] = 0; }
+            memcpy(&a->c[idx][off], data, n * 4);
+            a->cmask[idx] |= (n >= 64 ? ~0ULL : ((1ULL << n) - 1)) << off;
+        }
+        ReleaseSRWLockExclusive(&g_cl_lock);
+    }
     o_SetComputeRoot32BitConstants(cl, idx, n, data, off);
+}
+
+static void STDMETHODCALLTYPE h_SetComputeRoot32BitConstant(ID3D12GraphicsCommandList *cl, UINT idx, UINT v, UINT off)
+{
+    if (!t_in_ffx && idx < 16 && off < 64) {
+        AcquireSRWLockExclusive(&g_cl_lock);
+        root_args *a = cargs_get(cl);
+        if (a) {
+            if (a->type[idx] != RA_CONST) { a->type[idx] = RA_CONST; a->cmask[idx] = 0; }
+            a->c[idx][off] = v; a->cmask[idx] |= 1ULL << off;
+        }
+        ReleaseSRWLockExclusive(&g_cl_lock);
+    }
+    o_SetComputeRoot32BitConstant(cl, idx, v, off);
+}
+
+static void rec_root_va(ID3D12GraphicsCommandList *cl, UINT idx, D3D12_GPU_VIRTUAL_ADDRESS va, uint8_t type)
+{
+    if (t_in_ffx || idx >= 16) return;
+    AcquireSRWLockExclusive(&g_cl_lock);
+    root_args *a = cargs_get(cl);
+    if (a) { a->type[idx] = type; a->va[idx] = va; }
+    ReleaseSRWLockExclusive(&g_cl_lock);
 }
 
 static void STDMETHODCALLTYPE h_SetComputeRootCBV(ID3D12GraphicsCommandList *cl, UINT idx, D3D12_GPU_VIRTUAL_ADDRESS va)
 {
+    rec_root_va(cl, idx, va, RA_CBV);
     o_SetComputeRootCBV(cl, idx, va);
+}
+
+static void STDMETHODCALLTYPE h_SetComputeRootSRV(ID3D12GraphicsCommandList *cl, UINT idx, D3D12_GPU_VIRTUAL_ADDRESS va)
+{
+    rec_root_va(cl, idx, va, RA_SRV);
+    o_SetComputeRootSRV(cl, idx, va);
+}
+
+static void STDMETHODCALLTYPE h_SetComputeRootUAV(ID3D12GraphicsCommandList *cl, UINT idx, D3D12_GPU_VIRTUAL_ADDRESS va)
+{
+    rec_root_va(cl, idx, va, RA_UAV);
+    o_SetComputeRootUAV(cl, idx, va);
 }
 
 static const char *dim_name(D3D12_RESOURCE_DIMENSION d)
@@ -1350,22 +1419,56 @@ static int g_san_state(void) { return g_san.state; }
 static uint32_t g_san_tot(int i) { return g_san.tot[i]; }
 
 
+/* Повне відновлення стану гри після наших команд (як RestoreComputeSignature в OptiScaler для
+   ігор Capcom): купи дескрипторів, compute-сигнатура з УСІМА кореневими аргументами (таблиці,
+   константи, кореневі CBV/SRV/UAV), PSO. Графічну сигнатуру НЕ переставляємо (ми її не міняли,
+   а повторне встановлення скинуло б її кореневі константи/CBV) — лише таблиці, які зміна куп
+   дескрипторів зробила недійсними. */
 static void restore_state(ID3D12GraphicsCommandList *cl, const cl_state *st)
 {
+    root_args a;
+    int have_args = 0;
+    if (g_cargs) {
+        AcquireSRWLockShared(&g_cl_lock);
+        a = g_cargs[cl_get(cl) - g_cls];
+        ReleaseSRWLockShared(&g_cl_lock);
+        have_args = 1;
+    }
     if (st->nheaps) o_SetDescriptorHeaps(cl, st->nheaps, st->heaps);
-    if (st->rs) o_SetComputeRootSignature(cl, (ID3D12RootSignature *)st->rs);
-    rs_info *ri = rs_find(st->rs);
-    uint32_t np = ri ? ri->nparams : 16;
-    for (uint32_t i = 0; i < np && i < 16; i++) {
-        if (ri && ri->p[i].type != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) continue;
-        if (st->tables[i]) {
-            D3D12_GPU_DESCRIPTOR_HANDLE h; h.ptr = st->tables[i];
-            o_SetComputeRootDescriptorTable(cl, i, h);
+    if (st->rs) {
+        o_SetComputeRootSignature(cl, (ID3D12RootSignature *)st->rs);
+        rs_info *ri = rs_find(st->rs);
+        uint32_t np = ri ? ri->nparams : 16;
+        for (uint32_t i = 0; i < np && i < 16; i++) {
+            uint8_t pt = ri ? ri->p[i].type : 0xff;
+            if ((pt == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE || pt == 0xff) && st->tables[i]) {
+                D3D12_GPU_DESCRIPTOR_HANDLE h; h.ptr = st->tables[i];
+                o_SetComputeRootDescriptorTable(cl, i, h);
+                continue;
+            }
+            if (!have_args) continue;
+            switch (a.type[i]) {
+            case RA_CBV: o_SetComputeRootCBV(cl, i, a.va[i]); break;
+            case RA_SRV: if (o_SetComputeRootSRV) o_SetComputeRootSRV(cl, i, a.va[i]); break;
+            case RA_UAV: if (o_SetComputeRootUAV) o_SetComputeRootUAV(cl, i, a.va[i]); break;
+            case RA_CONST: {
+                uint64_t m = a.cmask[i];
+                for (uint32_t k = 0; k < 64 && m; ) {   /* суцільними відрізками */
+                    if (!(m >> k & 1)) { k++; continue; }
+                    uint32_t e = k;
+                    while (e < 64 && (m >> e & 1)) e++;
+                    o_SetComputeRoot32BitConstants(cl, i, e - k, &a.c[i][k], k);
+                    m &= ~(((e - k) >= 64 ? ~0ULL : ((1ULL << (e - k)) - 1)) << k);
+                    k = e;
+                }
+                break;
+            }
+            default: break;
+            }
         }
     }
     if (st->pso) o_SetPipelineState(cl, (ID3D12PipelineState *)st->pso);
     if (st->grs) {
-        o_SetGraphicsRootSignature(cl, (ID3D12RootSignature *)st->grs);
         rs_info *gi = rs_find(st->grs);
         for (uint32_t i = 0; i < 16; i++) {
             if (gi && (i >= gi->nparams || gi->p[i].type != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)) continue;
@@ -1537,6 +1640,7 @@ static void STDMETHODCALLTYPE h_Reset(ID3D12GraphicsCommandList *cl, ID3D12Comma
     cl_state *s = cl_get(cl);
     void *keep = s->cl;
     memset(s, 0, sizeof(*s));
+    if (g_cargs) memset(&g_cargs[s - g_cls], 0, sizeof(root_args));
     s->cl = keep;
     s->pso = pso;
     ReleaseSRWLockExclusive(&g_cl_lock);
@@ -1749,6 +1853,9 @@ static DWORD WINAPI init_thread(void *arg)
         hook((void *)cl->lpVtbl->SetComputeRootDescriptorTable, (void *)h_SetComputeRootDescriptorTable, (void **)&o_SetComputeRootDescriptorTable, "SetComputeRootDescriptorTable");
         hook((void *)cl->lpVtbl->SetComputeRoot32BitConstants, (void *)h_SetComputeRoot32BitConstants, (void **)&o_SetComputeRoot32BitConstants, "SetComputeRoot32BitConstants");
         hook((void *)cl->lpVtbl->SetComputeRootConstantBufferView, (void *)h_SetComputeRootCBV, (void **)&o_SetComputeRootCBV, "SetComputeRootConstantBufferView");
+        hook((void *)cl->lpVtbl->SetComputeRootShaderResourceView, (void *)h_SetComputeRootSRV, (void **)&o_SetComputeRootSRV, "SetComputeRootShaderResourceView");
+        hook((void *)cl->lpVtbl->SetComputeRootUnorderedAccessView, (void *)h_SetComputeRootUAV, (void **)&o_SetComputeRootUAV, "SetComputeRootUnorderedAccessView");
+        hook((void *)cl->lpVtbl->SetComputeRoot32BitConstant, (void *)h_SetComputeRoot32BitConstant, (void **)&o_SetComputeRoot32BitConstant, "SetComputeRoot32BitConstant");
     }
     MH_STATUS s = MH_EnableHook(MH_ALL_HOOKS);
     LOG("MH_EnableHook = %d; deserializer=%p; inc srv=%u", (int)s, (void *)p_CreateRSDeserializer, g_inc[0]);
@@ -1804,6 +1911,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         g_desc = (desc_ent *)VirtualAlloc(NULL, sizeof(desc_ent) * DESC_CAP, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         g_rs = (rs_info *)VirtualAlloc(NULL, sizeof(rs_info) * RS_CAP, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         g_maps = (map_info *)VirtualAlloc(NULL, sizeof(map_info) * MAP_CAP, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        g_cargs = (root_args *)VirtualAlloc(NULL, sizeof(root_args) * CL_CAP, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         open_log();
         LOG("AutoFPS FSR2→FSR4 міст, збірка " __DATE__ " " __TIME__);
         load_cfg();
