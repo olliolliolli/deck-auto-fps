@@ -595,7 +595,10 @@ class GvasFmt(_Fmt):
         if _excluded(_name(inner.group(1) if inner else key)):
             return None, False           # Altar.DLSS.Quality, …Audio.Volume тощо
         # стандартні групи якості Unreal: 0 низькі … 3 епічні (4 — кіно, не ставимо)
-        if _norm(leaf) in UE_GROUPS and v in ("0", "1", "2", "3", "4"):
+        nl = _norm(leaf)
+        if nl + "quality" in UE_GROUPS or nl == "groundquality":   # ViewDistance, GroundQuality (DONTNOD)
+            nl = "landscapequality" if nl == "groundquality" else nl + "quality"
+        if nl in UE_GROUPS and v in ("0", "1", "2", "3", "4"):
             return ["0", "1", "2", "3"] if v != "4" else ["0", "1", "2", "3", "4"], True
         sc = scale_of(leaf, value)
         if not sc:

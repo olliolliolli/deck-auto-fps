@@ -66,8 +66,19 @@ class Gvas:
         self.p = 0
         self.leaves = []
         self.new_tags = False
+        self.multi = False        # кілька блоків властивостей поспіль (DONTNOD)
         self._header()
         self._props(len(self.d), "", [])
+        while self.multi and self.p + 8 < len(self.d):
+            # між блоками — i32 (0); далі наступний блок властивостей
+            self.p += 4
+            before = len(self.leaves)
+            try:
+                self._props(len(self.d), "", [])
+            except (GvasError, struct.error, IndexError):
+                break
+            if len(self.leaves) == before:
+                break
 
     # ---------------------------------------------------------------- примітиви
     def _u8(self):
@@ -99,6 +110,15 @@ class Gvas:
 
     # ---------------------------------------------------------------- заголовок
     def _header(self):
+        if self.d[:8] == b"@DNESAV@":
+            # DONTNOD (Banishers, Life is Strange): "@DNESAV@", u32 версія, u32, клас FString,
+            # u32, версія рушія FString — далі звичайні властивості (класичні теги)
+            self.p = 16
+            self._str()
+            self.p += 4
+            self._str()
+            self.multi = True
+            return
         if self.d[:4] != b"GVAS":
             # деякі ігри (Oblivion Remastered) пишуть лише властивості, без заголовка
             return

@@ -1245,6 +1245,13 @@ class Plugin:
         was_tuning, self.tuning = self.tuning, False
         self.tm_raw, self.tm_windows = [], []
         lvl = int(e.get("applied_level", e.get("level", 0))) + 1
+        if now - self.game_started < 75:
+            # так швидко в меню не дійти — гра сама перезаписала файл з іншого джерела
+            decky.logger.warning(f"гра перезаписала налаштування при старті: {diff}")
+            self._notify("AutoFPS: гра перезаписала графіку при запуску",
+                         "Гра тримає налаштування ще в іншому місці й відновила їх звідти. "
+                         "Замір графіки в цій сесії зупинено. Збери діагностику й надішли Claude")
+            return
         if self.settings.get("respect_manual_graphics"):
             body = ("Залишу твої налаштування й далі графіку не чіпатиму "
                     "(увімкнено «Залишати мої ручні налаштування»)")

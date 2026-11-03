@@ -361,7 +361,8 @@ class UnrealAdapter:
                 st = G.GenericAdapter._settings_of(fmt)
             except Exception:  # noqa: BLE001
                 continue
-            n = sum(1 for k in st if G._norm(G.leaf_name(k)) in G.UE_GROUPS)
+            n = sum(1 for k in st if G._norm(G.leaf_name(k)) in G.UE_GROUPS
+                    or G._norm(G.leaf_name(k)) + "quality" in G.UE_GROUPS)
             if n >= 3 and (best is None or n > best[0]):
                 best = (n, p)
         return best[1] if best else None
@@ -389,6 +390,10 @@ class UnrealAdapter:
                 out[k] = orig[k]
                 continue
             n = G._norm(leaf)
+            if n + "quality" in G.UE_GROUPS:          # ViewDistance → ViewDistanceQuality
+                n += "quality"
+            if n == "groundquality":                  # DONTNOD: поверхня/ландшафт
+                n = "landscapequality"
             grp = next((g for g in UE_KEYS if g.lower() == f"sg.{n}"), None)
             if grp is None:
                 grp = f"sg.{ue_follow(leaf)}"
