@@ -629,9 +629,10 @@ static struct {
     int jitter_src;      /* 0 — з констант FSR 2 [10,11] */
     int sanitize;        /* 1 — очищати колір/глибину/вектори від NaN/Inf перед FSR 4 */
     int exposure;        /* 0 — автоекспозиція FFX, 1 — експозиція з FSR 2 гри (1x1) */
+    int repair;          /* 1 — ремонт виходу FSR 4 (NaN/чорне → збільшений вхід), 2 — лише рахувати, 0 — ні */
 } g_cfg = {1, FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_AUTO_EXPOSURE |
               FFX_UPSCALE_ENABLE_DEPTH_INVERTED | FFX_UPSCALE_ENABLE_DEPTH_INFINITE,
-           0, 0, 1, 0.5f, 0.1f, 10000.0f, "4", 1.0f, 1.0f, 1.0f, 1.0f, 0, 1, 0};
+           0, 0, 1, 0.5f, 0.1f, 10000.0f, "4", 1.0f, 1.0f, 1.0f, 1.0f, 0, 1, 0, 1};
 static FILETIME g_cfg_mtime;
 static uint32_t g_ctx_w, g_ctx_h;   /* оголошено тут, визначено нижче (FFX) */
 static volatile LONG g_cfg_changed;
@@ -665,13 +666,14 @@ static void load_cfg(void)
         else if (!strcmp(k, "jitter_x")) g_cfg.jx = (float)atof(v);
         else if (!strcmp(k, "jitter_y")) g_cfg.jy = (float)atof(v);
         else if (!strcmp(k, "sanitize")) g_cfg.sanitize = atoi(v);
+        else if (!strcmp(k, "repair")) g_cfg.repair = atoi(v);
         else if (!strcmp(k, "exposure")) g_cfg.exposure = !strcmp(v, "game") || !strcmp(v, "1");
     }
     fclose(f);
-    LOG("налаштування: enable=%d flags=0x%x depth_conv=%d reactive=%d skip_accumulate=%d sharpness=%.2f near=%g far=%g version=%s mv=(%g,%g) jitter=(%g,%g) sanitize=%d exposure=%s",
+    LOG("налаштування: enable=%d flags=0x%x depth_conv=%d reactive=%d skip_accumulate=%d sharpness=%.2f near=%g far=%g version=%s mv=(%g,%g) jitter=(%g,%g) sanitize=%d exposure=%s repair=%d",
         g_cfg.enable, g_cfg.flags, g_cfg.depth_conv, g_cfg.reactive, g_cfg.skip_accumulate, g_cfg.sharpness,
         g_cfg.cam_near, g_cfg.cam_far, g_cfg.want, g_cfg.mvx, g_cfg.mvy, g_cfg.jx, g_cfg.jy, g_cfg.sanitize,
-        g_cfg.exposure ? "game" : "auto");
+        g_cfg.exposure ? "game" : "auto", g_cfg.repair);
 }
 
 /* перечитує autofps_fsr.ini, якщо файл змінився (налаштування на льоту, під час гри) */
@@ -1017,9 +1019,10 @@ static void write_status(const char *state)
     FILE *f = _wfopen(path, L"w");
     if (!f) return;
     fprintf(f, "{\"state\":\"%s\",\"version\":\"%s\",\"bridged\":%ld,\"fallback\":%ld,\"known_shaders\":%ld,\"uptime_s\":%lu,"
-               "\"sanitize\":%d,\"bad_color\":%u,\"bad_depth\":%u,\"bad_mv\":%u,\"skip_fail\":%ld}\n",
+               "\"sanitize\":%d,\"bad_color\":%u,\"bad_depth\":%u,\"bad_mv\":%u,\"skip_fail\":%ld,"
+               "\"out_nan\":%u,\"out_black\":%u,\"checked_frames\":%u}\n",
             state, g_ffx_version, g_bridged, g_fallback, g_known_psos, (unsigned long)((GetTickCount() - g_t0) / 1000),
-            g_san_state(), g_san_tot(0), g_san_tot(1), g_san_tot(2), g_skip_fail);
+            g_san_state(), g_san_tot(0), g_san_tot(1), g_san_tot(2), g_skip_fail, g_san_tot(4), g_san_tot(5), g_san_tot(6));
     fclose(f);
 }
 
@@ -1041,21 +1044,28 @@ static int g_logged_first;
 #include "sanitize_cs.h"
 #define HAVE_SANITIZE 1
 #endif
+#if __has_include("repair_cs.h")
+#include "repair_cs.h"
+#define HAVE_REPAIR 1
+#endif
+#endif
+#ifndef HAVE_REPAIR
+#define HAVE_REPAIR 0
 #endif
 #ifndef HAVE_SANITIZE
 #define HAVE_SANITIZE 0
 #endif
 
 #define SAN_RING 64     /* наборів дескрипторів (кадрів «у польоті» значно менше) */
-#define SAN_DESC 7      /* 3 SRV + 4 UAV */
+#define SAN_DESC 10     /* очищення: 3 SRV + 4 UAV; ремонт виходу: 1 SRV + 2 UAV */
 #define SAN_RB 8        /* слотів зчитування лічильників */
 #define SAN_EVERY 30    /* копіювати лічильники раз на стільки кадрів */
 #define SAN_GRAVE 8
 
 static struct {
     int state;                          /* 0 — ще не пробували, 1 — готово, -1 — недоступно */
-    ID3D12RootSignature *rs;
-    ID3D12PipelineState *pso;
+    ID3D12RootSignature *rs, *rs2;
+    ID3D12PipelineState *pso, *pso2;      /* 2 — ремонт виходу FSR 4 */
     ID3D12DescriptorHeap *heap;
     D3D12_CPU_DESCRIPTOR_HANDLE cpu0;
     D3D12_GPU_DESCRIPTOR_HANDLE gpu0;
@@ -1066,10 +1076,11 @@ static struct {
     ID3D12Resource *counters, *readback;
     const volatile uint32_t *rb;
     uint32_t rb_slot, copies, frames;
-    uint32_t base[4], seen_base;        /* перші прочитані значення (лічильники накопичувальні) */
-    uint32_t tot[4];                    /* усього з початку гри: колір, глибина, вектори, кадри */
-    uint32_t logged[3];
-    DWORD last_log;
+    uint32_t base[8], seen_base;        /* перші прочитані значення (лічильники накопичувальні) */
+    uint32_t tot[8];                    /* колір, глибина, вектори, кадри очищення; вихід NaN, вихід чорний, кадри ремонту */
+    uint32_t logged[8];
+    DWORD last_log, last_sum;
+    UINT cur_slot;                      /* набір дескрипторів поточного кадру */
     ID3D12Resource *grave[SAN_GRAVE];   /* старі текстури: звільняємо, коли GPU точно їх відпрацював */
     uint32_t grave_frame[SAN_GRAVE];
 } g_san;
@@ -1078,18 +1089,21 @@ static void san_log_counters(void)
 {
     if (!g_san.rb || g_san.copies < SAN_RB) return;
     uint32_t s = (g_san.rb_slot + 1) % SAN_RB;      /* найстаріший слот — GPU вже давно його записав */
-    uint32_t v[4];
-    for (int i = 0; i < 4; i++) v[i] = g_san.rb[s * 64 + i];
+    uint32_t v[8];
+    for (int i = 0; i < 8; i++) v[i] = g_san.rb[s * 64 + i];
     if (!g_san.seen_base) { memcpy(g_san.base, v, sizeof(v)); g_san.seen_base = 1; return; }
-    for (int i = 0; i < 4; i++) g_san.tot[i] = v[i] - g_san.base[i];
+    for (int i = 0; i < 8; i++) g_san.tot[i] = v[i] - g_san.base[i];
     DWORD t = GetTickCount();
-    int fresh = g_san.tot[0] != g_san.logged[0] || g_san.tot[1] != g_san.logged[1] || g_san.tot[2] != g_san.logged[2];
-    if (fresh && t - g_san.last_log > 5000) {
-        LOG("очищення: виправлено пікселів — колір (NaN/Inf) +%u, глибина +%u, вектори руху +%u; усього %u/%u/%u за %u кадрів",
+    int fresh = 0;
+    for (int i = 0; i < 6; i++) if (i != 3 && g_san.tot[i] != g_san.logged[i]) fresh = 1;
+    if ((fresh && t - g_san.last_log > 3000) || t - g_san.last_sum > 30000) {
+        LOG("перевірка кадрів: вхід NaN/Inf колір +%u, глибина +%u, вектори +%u | вихід FSR 4: NaN +%u, чорні +%u "
+            "(замінено на збільшений кадр) | усього %u/%u/%u, вихід %u/%u; кадрів %u/%u",
             g_san.tot[0] - g_san.logged[0], g_san.tot[1] - g_san.logged[1], g_san.tot[2] - g_san.logged[2],
-            g_san.tot[0], g_san.tot[1], g_san.tot[2], g_san.tot[3]);
+            g_san.tot[4] - g_san.logged[4], g_san.tot[5] - g_san.logged[5],
+            g_san.tot[0], g_san.tot[1], g_san.tot[2], g_san.tot[4], g_san.tot[5], g_san.tot[3], g_san.tot[6]);
         memcpy(g_san.logged, g_san.tot, sizeof(g_san.logged));
-        g_san.last_log = t;
+        g_san.last_log = g_san.last_sum = t;
     }
 }
 
@@ -1130,6 +1144,15 @@ static int san_init(ID3D12Device *dev)
     if (FAILED(o_CreateComputePSO(dev, &pd, &IID_ID3D12PipelineState, (void **)&g_san.pso))) {
         LOG("очищення: не вдалося створити PSO — вимкнено"); return 0;
     }
+#if HAVE_REPAIR
+    if (SUCCEEDED(o_CreateRootSignature(dev, 0, g_repair_cs, sizeof(g_repair_cs), &IID_ID3D12RootSignature, (void **)&g_san.rs2))) {
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pd2; memset(&pd2, 0, sizeof(pd2));
+        pd2.pRootSignature = g_san.rs2;
+        pd2.CS.pShaderBytecode = g_repair_cs; pd2.CS.BytecodeLength = sizeof(g_repair_cs);
+        if (FAILED(o_CreateComputePSO(dev, &pd2, &IID_ID3D12PipelineState, (void **)&g_san.pso2))) g_san.pso2 = NULL;
+    }
+    if (!g_san.pso2) LOG("ремонт виходу: не вдалося створити PSO — лише очищення входів");
+#endif
     D3D12_DESCRIPTOR_HEAP_DESC hd; memset(&hd, 0, sizeof(hd));
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.NumDescriptors = SAN_RING * SAN_DESC;
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
@@ -1149,7 +1172,8 @@ static int san_init(ID3D12Device *dev)
             g_san.rb = (const volatile uint32_t *)p;
     }
     g_san.state = 1;
-    LOG("очищення вхідних даних FSR 4: увімкнено (NaN/Inf у кольорі, глибина, вектори руху)");
+    LOG("очищення вхідних даних FSR 4: увімкнено (NaN/Inf у кольорі, глибина, вектори руху); ремонт виходу: %s",
+        g_san.pso2 ? "так" : "ні");
     return 1;
 #else
     (void)dev;
@@ -1226,6 +1250,7 @@ static int san_run(ID3D12GraphicsCommandList *cl, ID3D12Device *dev, ID3D12Resou
     }
 
     UINT slot = (g_san.slot++) % SAN_RING;
+    g_san.cur_slot = slot;
     D3D12_CPU_DESCRIPTOR_HANDLE c = g_san.cpu0; c.ptr += (SIZE_T)slot * SAN_DESC * g_san.inc;
     D3D12_GPU_DESCRIPTOR_HANDLE g = g_san.gpu0; g.ptr += (UINT64)slot * SAN_DESC * g_san.inc;
     ID3D12Resource *src[3] = {color, depth, mv};
@@ -1270,13 +1295,52 @@ static int san_run(ID3D12GraphicsCommandList *cl, ID3D12Device *dev, ID3D12Resou
     if (g_san.readback && g_san.frames % SAN_EVERY == 0) {
         g_san.rb_slot = (g_san.rb_slot + 1) % SAN_RB;
         san_buf_barrier(cl, g_san.counters, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        ID3D12GraphicsCommandList_CopyBufferRegion(cl, g_san.readback, (UINT64)g_san.rb_slot * 256, g_san.counters, 0, 16);
+        ID3D12GraphicsCommandList_CopyBufferRegion(cl, g_san.readback, (UINT64)g_san.rb_slot * 256, g_san.counters, 0, 32);
         san_buf_barrier(cl, g_san.counters, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         g_san.copies++;
         san_log_counters();
     }
     *oc = g_san.color; *od = g_san.depth; *om = g_san.mv;
     return 1;
+}
+
+/* після FFX: вихід FSR 4 з NaN або чорний там, де вхід яскравий, — замінити збільшеним вхідним кадром.
+   Викликати лише після san_run цього ж кадру (той самий набір дескрипторів і очищений колір). */
+static void repair_run(ID3D12GraphicsCommandList *cl, ID3D12Device *dev, ID3D12Resource *out,
+                       uint32_t rw, uint32_t rh, uint32_t dw, uint32_t dh)
+{
+    if (!g_cfg.repair || g_san.state <= 0 || !g_san.pso2 || !g_san.color || !out) return;
+    D3D12_RESOURCE_DESC od; ID3D12Resource_GetDesc(out, &od);
+    if (!(od.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) return;
+    D3D12_CPU_DESCRIPTOR_HANDLE c = g_san.cpu0; c.ptr += ((SIZE_T)g_san.cur_slot * SAN_DESC + 7) * g_san.inc;
+    D3D12_GPU_DESCRIPTOR_HANDLE g = g_san.gpu0; g.ptr += ((UINT64)g_san.cur_slot * SAN_DESC + 7) * g_san.inc;
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd; memset(&sd, 0, sizeof(sd));
+    sd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; sd.Texture2D.MipLevels = 1;
+    o_CreateSRV(dev, g_san.color, &sd, c);
+    D3D12_UNORDERED_ACCESS_VIEW_DESC ud; memset(&ud, 0, sizeof(ud));
+    ud.Format = san_srv_fmt(od.Format, 0); ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    D3D12_CPU_DESCRIPTOR_HANDLE c1 = c; c1.ptr += g_san.inc;
+    o_CreateUAV(dev, out, NULL, &ud, c1);
+    D3D12_UNORDERED_ACCESS_VIEW_DESC bd; memset(&bd, 0, sizeof(bd));
+    bd.Format = DXGI_FORMAT_R32_TYPELESS; bd.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    bd.Buffer.NumElements = 64; bd.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+    D3D12_CPU_DESCRIPTOR_HANDLE c2 = c; c2.ptr += 2 * g_san.inc;
+    o_CreateUAV(dev, g_san.counters, NULL, &bd, c2);
+
+    D3D12_RESOURCE_BARRIER b; memset(&b, 0, sizeof(b));
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV; b.UAV.pResource = out;   /* дочекатися запису FSR 4 */
+    ID3D12GraphicsCommandList_ResourceBarrier(cl, 1, &b);
+    ID3D12DescriptorHeap *hp[1] = {g_san.heap};
+    o_SetDescriptorHeaps(cl, 1, hp);
+    o_SetComputeRootSignature(cl, g_san.rs2);
+    o_SetPipelineState(cl, g_san.pso2);
+    o_SetComputeRootDescriptorTable(cl, 0, g);
+    struct { uint32_t ow, oh; float us, vs, dark, minl, maxc; uint32_t enable; } k = {
+        dw, dh, (float)rw / (float)g_san.w, (float)rh / (float)g_san.h, 0.05f, 0.02f, 65000.0f, (uint32_t)(g_cfg.repair == 1)};
+    o_SetComputeRoot32BitConstants(cl, 1, 8, &k, 0);
+    o_Dispatch(cl, (dw + 7) / 8, (dh + 7) / 8, 1);
+    ID3D12GraphicsCommandList_ResourceBarrier(cl, 1, &b);
 }
 
 static int g_san_state(void) { return g_san.state; }
@@ -1413,10 +1477,14 @@ static int bridge_rcas(ID3D12GraphicsCommandList *cl, cl_state *st)
 
     t_in_ffx = 1;
     ffxReturnCode_t rc = f_dispatch(&g_ctx, &dd.header);
+    if (rc == FFX_API_RETURN_OK && sanitized) {
+        ID3D12Device *dev2 = NULL;
+        ID3D12GraphicsCommandList_GetDevice(cl, &IID_ID3D12Device, (void **)&dev2);
+        if (dev2) { repair_run(cl, dev2, out, rw, rh, dw, dh); ID3D12Device_Release(dev2); }
+    }
     t_in_ffx = 0;
     ReleaseSRWLockExclusive(&g_ffx_lock);
     restore_state(cl, st);
-    (void)sanitized;
 
     if (rc != FFX_API_RETURN_OK) {
         LOG("FFX: ffxDispatch = %u — вимикаю міст", rc);
