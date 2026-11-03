@@ -35,6 +35,28 @@ CFG_DIR, CACHE_DIR, LOG_DIR = C.CFG_DIR, C.CACHE_DIR, C.LOG_DIR
 CURRENT_FILE, SETTINGS_FILE, GAMES_FILE = C.CURRENT_FILE, C.SETTINGS_FILE, C.GAMES_FILE
 TUNE_FILE, LSFG_CONF, PROFILES_DIR = C.TUNE_FILE, C.LSFG_CONF, C.PROFILES_DIR
 APPS_FILE = os.path.join(CFG_DIR, "apps.json")
+# Обмежувач FPS усередині MangoHud (обгортка підключає цей файл; MangoHud стежить за ним через
+# inotify і підхоплює зміну за ~0,1 с). Потрібен, коли ліміт gamescope не діє — напр. із шаром
+# Decky LSFG-VK меню й легкі сцени йшли 120 FPS при CPU 21 Вт. MangoHud бачить лише справжні
+# кадри гри, тож ліміт = базовий FPS, а генерація кадрів множить уже після нього.
+MANGO_LIMIT_FILE = os.path.join(CACHE_DIR, "mangohud_limit.conf")
+_mango_last = [None]
+
+
+def write_mango_limit(fps):
+    """fps = 0 — без обмеження. Пише лише за зміни і лише у файл, створений обгорткою
+    (інакше MangoHud за ним не стежить)."""
+    fps = int(fps or 0)
+    if _mango_last[0] == fps or not os.path.isfile(MANGO_LIMIT_FILE):
+        return False
+    try:
+        with open(MANGO_LIMIT_FILE, "w", encoding="utf-8") as f:   # на місці: inotify IN_MODIFY
+            f.write(f"fps_limit={fps}\n")
+        _mango_last[0] = fps
+        return True
+    except OSError as e:
+        decky.logger.warning(f"MangoHud limit: {e}")
+        return False
 LAUNCHER = os.path.join(HOME, ".local", "bin", "autofps-launch")
 LAUNCH_OPTION = "~/.local/bin/autofps-launch %command%"
 
@@ -79,6 +101,7 @@ DEFAULT_SETTINGS = {
     "fg_allow_3x": False,
     "fg_flow_scale": 0.8,
     "fg_performance_mode": True,
+    "mango_limiter": True,          # обмежувач FPS у MangoHud, коли ліміт gamescope не діє
     "fps_counts_generated": False,  # MangoHud бачить лише справжні кадри гри (перевірено на Legion: 42 у MangoHud = 84 на екрані з Lossless ×2)
     "autotune": True,          # автопідбір графіки гри (Unreal/Unity)
     "ue5_tweak": True,         # твік Engine.ini для ігор на Unreal Engine 5
@@ -619,6 +642,8 @@ class Plugin:
         self.tm_forecast = None
         self.tm_pending = None
         self.tm_over = []
+        self.mango_cap, self.cap_over, self.cap_t = False, 0, 0.0
+        _mango_last[0] = None     # обгортка щойно записала у файл fps_limit=0
         self.menu_t, self.menu_mtime, self.menu_changed = 0.0, None, False
         self.gpu_state = "off"    # off | ref | descending | settled
         self.gpu_cur = None       # МГц (None — авто)
@@ -631,6 +656,7 @@ class Plugin:
         self.gpu_ref_w = []
 
     def _restore_display(self):
+        write_mango_limit(0)
         try:
             apply_display(self.device, 0, self.device["max_hz"]
                           if self.device["refresh_control"] else None)
@@ -733,8 +759,17 @@ class Plugin:
     def _out_fps(self):
         return self.base * self.mult
 
+    def _mango_cap_value(self):
+        """Ліміт для обмежувача MangoHud (справжні кадри гри) або 0."""
+        if not getattr(self, "mango_cap", False) or self.phase == "probe" or not self.base:
+            return 0
+        if self._vrr():
+            return int(self.device["max_hz"] // max(1, self.mult))
+        return int(self.base)
+
     def _apply(self):
         out = self._out_fps()
+        write_mango_limit(self._mango_cap_value())
         if self._vrr():
             # VRR: частота екрана йде за грою, обмежуємо лише зверху — частотою панелі
             apply_display(self.device, self.device["max_hz"], None, vrr=True)
@@ -1174,9 +1209,14 @@ class Plugin:
         key = self._gpu_key()
         if self.gpu_state == "off" or key != self.gpu_key:
             self.gpu_key = key
-            saved = (self.games.get(str(self.appid)) or {}).get("gpu", {}).get(key)
+            g = self.games.get(str(self.appid)) or {}
+            saved = g.get("gpu", {}).get(key)
             if saved and saved != "auto" and not lo <= int(saved) <= hi:
                 saved = None                # старе збереження поза безпечним діапазоном
+            if not saved and (g.get("gpu_fail", 0) >= 2 or g.get("gpu_starved")):
+                # у цій грі фіксована частота вже не тримала (або душила CPU) — не мучимо гру
+                # новими спробами на кожній іншій сходинці графіки/живлення
+                saved = "auto"
             if saved:
                 self.gpu_state = "settled"
                 self._gpu_set(None if saved == "auto" else int(saved), "(збережене для цієї гри)")
@@ -1245,6 +1285,10 @@ class Plugin:
                        "Менше споживання й рівніший кадр. Запам'ятав для цієї гри")
             else:
                 self._gpu_set(None, f"(фіксована частота не тримає — лишаю авто: {detail})")
+                gg = self.games.setdefault(str(self.appid), {})
+                gg["gpu_fail"] = gg.get("gpu_fail", 0) + 1
+                if starved:
+                    gg["gpu_starved"] = True
                 msg = ("Процесор задихався при фіксованій частоті — лишаю авто" if starved
                        else "Гра потребує повної частоти — лишаю авто")
             self._gpu_save()
@@ -1572,7 +1616,7 @@ class Plugin:
         mult = self.mult if mult is None else mult
         old = self.games.get(str(self.appid)) or {}
         self.games[str(self.appid)] = {
-            **{k: old[k] for k in ("tdp", "gpu") if k in old},
+            **{k: old[k] for k in ("tdp", "gpu", "gpu_fail", "gpu_starved") if k in old},
             "base": base, "mult": mult,
             "native_p10": round(self.native_p10, 1),
             "device": self.device["id"], "updated": int(time.time()),
@@ -1654,11 +1698,16 @@ class Plugin:
                     await self._blocking(self._opti_check_bg, False)
                 except Exception as e:  # noqa: BLE001
                     decky.logger.warning(f"OptiScaler check failed: {e}")
+            t0 = time.monotonic()
             try:
                 self._tick()
             except Exception as e:  # noqa: BLE001
                 decky.logger.error(f"tick error: {e}")
-            await asyncio.sleep(1.0)
+            dt = time.monotonic() - t0
+            if dt > 0.5:   # tick іде в циклі подій Decky — довгий tick «підвішує» меню
+                self.slow_ticks = getattr(self, "slow_ticks", 0) + 1
+                decky.logger.warning(f"повільний tick: {dt:.2f} с")
+            await asyncio.sleep(max(0.2, 1.0 - dt))
 
     SETTLE_S = 45          # перші секунди після старту — логотипи/меню/завантаження, не міряємо
 
@@ -1685,6 +1734,26 @@ class Plugin:
         if gpu is not None and gpu >= 80:
             self.perf_typical = med if not typical else 0.8 * typical + 0.2 * med
         return True, med, gpu
+
+    def _cap_check(self, now):
+        """Ліміт gamescope не діє (гра йде помітно вище ліміту 3 вікна по 10 с поспіль) —
+        вмикаємо обмежувач MangoHud. Меню без ліміту — теж марно спалена батарея."""
+        if self.mango_cap or not self.settings.get("mango_limiter", True) or now - self.cap_t < 10:
+            return
+        self.cap_t = now
+        cap = self._tm_cap()
+        w = [x[1] for x in self.samples if now - x[0] <= 10]
+        if not cap or len(w) < 20 or now - self.last_apply < 3:
+            return
+        if percentile(w, 0.5) > cap * 1.15:
+            self.cap_over += 1
+        else:
+            self.cap_over = 0
+        if self.cap_over >= 3 and os.path.isfile(MANGO_LIMIT_FILE):
+            self.mango_cap = True
+            decky.logger.info(f"ліміт gamescope не діє ({percentile(w, 0.5):.0f} FPS при ліміті "
+                              f"{cap:.0f}) — вмикаю обмежувач MangoHud")
+            self._apply()
 
     def _trim(self, now):
         """Буфери замірів — не довше хвилини (сесія може тривати годинами)."""
@@ -1741,6 +1810,8 @@ class Plugin:
             decky.logger.info(f"game start: {json.dumps(cur)}")
             if self.sfg >= 2:
                 self.mult = self.sfg
+            if cur.get("ext_fg") and self.settings.get("mango_limiter", True):
+                self.mango_cap = True     # з шаром Decky LSFG-VK ліміт gamescope не діє
             if self.settings.get("last_fg_mult") != max(1, self.sfg):
                 self.settings["last_fg_mult"] = max(1, self.sfg)   # для цілі підбору графіки
                 _save_json(SETTINGS_FILE, self.settings)
@@ -1814,6 +1885,7 @@ class Plugin:
             self.gpu_hw.append((now, clk, cpu, load))
         self.reader.hw = []
         self._trim(now)
+        self._cap_check(now)
         self._tdp_tick(now)
         self._gpu_tick(now)
         self._menu_tick(now)
@@ -1979,6 +2051,7 @@ class Plugin:
             "base": self.base,
             "mult": self.mult,
             "out": self._out_fps(),
+            "mango_cap": self._mango_cap_value() if self.appid else 0,
             "fps_now": round(sum(last) / len(last), 1) if last else None,
             "native_p10": round(self.native_p10, 1),
             "message": self.message,
@@ -2079,6 +2152,12 @@ class Plugin:
             write_lsfg(self.settings, max(2, self.mult))
         if key == "fg_mode":
             self._write_fg_mode()
+        if key == "mango_limiter" and self.appid:
+            if not value:
+                self.mango_cap = False
+            elif self.cur_info.get("ext_fg"):
+                self.mango_cap = True
+            write_mango_limit(self._mango_cap_value())
         if key == "bridge_version":   # застосувати одразу, навіть посеред гри (міст перечитує ini)
             for fn in glob.glob(os.path.join(O.games_dir(), "*.json")):
                 g = _load_json(fn, {})
@@ -2146,10 +2225,11 @@ class Plugin:
         """Фронтенд повідомляє, що змінив параметри запуску гри."""
         self._mark_app(appid, enabled=enabled)
         if enabled:  # нове увімкнення — знову повний режим
-            try:
-                os.remove(os.path.join(CFG_DIR, f"mode_{appid}"))
-            except OSError:
-                pass
+            for fn in (f"mode_{appid}", f"fast_{appid}"):
+                try:
+                    os.remove(os.path.join(CFG_DIR, fn))
+                except OSError:
+                    pass
         return True
 
     def _installed_games(self):
@@ -2482,6 +2562,7 @@ class Plugin:
         for fn in sorted(glob.glob(os.path.join(CFG_DIR, "mode_*"))):
             add(f"  {os.path.basename(fn)}: {_read(fn)}")
         add("last_crash.json: " + (_read(os.path.join(CACHE_DIR, "last_crash.json")) or "(немає)"))
+        add(f"повільних tick-ів (>0.5 с): {getattr(self, 'slow_ticks', 0)}")
         add(f"launcher: {LAUNCHER} → " + ("є" if os.path.isfile(LAUNCHER) else "НЕМАЄ")
             + f", plugin dir: {_PLUGIN_DIR}")
 

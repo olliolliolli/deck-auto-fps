@@ -45,6 +45,7 @@ type Settings = {
   unity_tweak?: boolean;
   auto_tdp?: "battery" | "always" | "off";
   auto_gpu_clock?: boolean;
+  mango_limiter?: boolean;
   power_profiles?: boolean;
   bat_mode?: string;
   ac_mode?: string;
@@ -79,6 +80,7 @@ type Tune = {
 };
 
 type Status = {
+  mango_cap?: number;
   lsfg_launcher: string;
   fg_launchers?: { lsfg?: string; mako?: string };
   device: {
@@ -1072,6 +1074,17 @@ function Content() {
             disabled={!st.power?.gpu?.available}
             checked={s.auto_gpu_clock ?? true}
             onChange={(v: boolean) => update("auto_gpu_clock", v)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="Ліміт FPS через MangoHud"
+            description={
+              (st.mango_cap ? `Діє: ${st.mango_cap} FPS гри · ` : "") +
+              "Коли ліміт Steam не діє (напр. з Decky LSFG-VK), FPS обмежує MangoHud — меню й легкі сцени не палять батарею"
+            }
+            checked={s.mango_limiter ?? true}
+            onChange={(v: boolean) => update("mango_limiter", v)}
           />
         </PanelSectionRow>
       </PanelSection>

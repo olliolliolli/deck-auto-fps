@@ -70,7 +70,7 @@ class Tdp:
 
     def _run(self, *args):
         try:
-            p = subprocess.run([self.cli, *args], capture_output=True, text=True, timeout=4, env=_env())
+            p = subprocess.run([self.cli, *args], capture_output=True, text=True, timeout=2.5, env=_env())
         except (OSError, subprocess.SubprocessError) as e:
             self.error = str(e)
             return None

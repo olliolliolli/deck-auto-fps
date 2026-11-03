@@ -997,6 +997,17 @@ def run(appid, args, device=None, log=print):
     if "original" not in entry:
         entry["original"] = adapter.read(cfg)
 
+    if os.environ.get("AUTOFPS_SAFE") == "1":
+        # безпечний режим (гра падала на старті): наші зміни графіки теж під підозрою —
+        # повертаємо оригінал гри; підбір продовжиться, коли гру знову ввімкнуть у повний режим
+        if entry.get("applied_values"):
+            adapter.restore(cfg, entry["original"])
+            entry.pop("applied_values", None)
+            entry["note"] = "Безпечний режим: повернуто оригінальні налаштування гри"
+            log("безпечний режим — повернуто оригінальні налаштування")
+        entry.pop("applied_level", None)
+        C.save_json(C.TUNE_FILE, tune)
+        return
     if entry.get("restore_pending"):
         adapter.restore(cfg, entry["original"])
         entry.update(restore_pending=False, disabled=True,

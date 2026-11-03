@@ -60,8 +60,10 @@ export AUTOFPS_EXT_FG
 
 # --- автопідбір графіки (не в безпечному режимі: зміни конфігів теж можуть бути причиною)
 rm -f "$CACHE/tuning_now" 2>/dev/null
-if [ "$MODE" != "safe" ] && [ -f "$DIR/autotune.py" ]; then
-  timeout 15 python3 "$DIR/autotune.py" "$APPID" "$@" >>"$LOG" 2>&1 \
+if [ -f "$DIR/autotune.py" ]; then
+  # у безпечному режимі autotune лише повертає оригінальні налаштування гри (якщо ми їх міняли)
+  AUTOFPS_SAFE=$([ "$MODE" = "safe" ] && echo 1 || echo 0) \
+    timeout 15 python3 "$DIR/autotune.py" "$APPID" "$@" >>"$LOG" 2>&1 \
     || log "autotune завершився з помилкою (ігнорую)"
 fi
 TUNING="$(cat "$CACHE/tuning_now" 2>/dev/null)"
@@ -74,7 +76,7 @@ fi
 
 # --- додаткові бібліотеки з теки гри для цієї гри (напр. міст FSR2→FSR4 як dinput8.dll):
 #     ~/.config/autofps/dlloverride_<appid> — назви через кому (лише літери/цифри/_)
-EXTRA_DLL="$(tr -cd 'a-zA-Z0-9_,' <"$CFG/dlloverride_$APPID" 2>/dev/null)"
+EXTRA_DLL="$(tr -cd 'a-zA-Z0-9_,' 2>/dev/null <"$CFG/dlloverride_$APPID")"
 if [ -n "$EXTRA_DLL" ] && [ "$MODE" != "safe" ]; then
   export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:+$WINEDLLOVERRIDES;}${EXTRA_DLL}=n,b"
   log "додаткові бібліотеки гри: ${EXTRA_DLL}=n,b"
@@ -114,7 +116,11 @@ if [ "$MODE" != "safe" ]; then
   if command -v mangohud >/dev/null 2>&1; then
     USE_MANGO=1
     export MANGOHUD=1
-    export MANGOHUD_CONFIG="autostart_log=1,log_interval=250,log_duration=0,output_folder=$CACHE/logs,alpha=0.0,background_alpha=0.0"
+    # read_cfg + власний файл: у ньому лише fps_limit, який плагін змінює посеред гри
+    #   (MangoHud стежить за файлом); fps_limit=0 — без обмеження
+    printf 'fps_limit=0\n' >"$CACHE/mangohud_limit.conf" 2>/dev/null
+    export MANGOHUD_CONFIGFILE="$CACHE/mangohud_limit.conf"
+    export MANGOHUD_CONFIG="read_cfg,autostart_log=1,log_interval=250,log_duration=0,output_folder=$CACHE/logs,alpha=0.0,background_alpha=0.0"
   else
     log "mangohud не знайдено — FPS не вимірюватиметься"
   fi
@@ -207,9 +213,20 @@ RC=$?
 DUR=$(( $(date +%s) - START ))
 log "гра завершилась через ${DUR} с, код $RC"
 
-if [ "$DUR" -lt "$FAST_EXIT" ]; then
+# Одне швидке закриття — ще не падіння (користувач міг вийти сам: Steam завершує гру
+# сигналом, код 130 буває і при звичайному виході). Знижуємо режим після ДВОХ поспіль.
+FAST_FILE="$CFG/fast_$APPID"
+if [ "$DUR" -ge "$FAST_EXIT" ]; then
+  rm -f "$FAST_FILE" 2>/dev/null
+else
+  FAST_N=$(( $(cat "$FAST_FILE" 2>/dev/null | tr -cd '0-9' | head -c 3 || echo 0) + 1 ))
+  echo "$FAST_N" >"$FAST_FILE"
+  log "швидке закриття №$FAST_N поспіль"
+fi
+if [ "$DUR" -lt "$FAST_EXIT" ] && [ "${FAST_N:-0}" -ge 2 ]; then
+  rm -f "$FAST_FILE" 2>/dev/null
   case "$MODE" in
-    full)   NEXT=nolsfg ;;
+    full)   if [ "$USE_LSFG" = 1 ]; then NEXT=nolsfg; else NEXT=safe; fi ;;  # без lsfg «nolsfg» = те саме
     nolsfg) NEXT=safe ;;
     *)      NEXT=safe ;;
   esac
