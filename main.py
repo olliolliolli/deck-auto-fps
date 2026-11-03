@@ -612,6 +612,7 @@ class Plugin:
         self.calib = None
         self.tm_raw, self.tm_windows, self.tm_t, self.tm_saved_n = [], [], 0.0, 0
         self.tm_forecast = None
+        self.menu_t, self.menu_mtime, self.menu_changed = 0.0, None, False
         self.gpu_state = "off"    # off | ref | descending | settled
         self.gpu_cur = None       # МГц (None — авто)
         self.gpu_ok = None        # остання частота, що тримала
@@ -1142,6 +1143,66 @@ class Plugin:
         if self.gpu_bad >= 2:
             self._gpu_rescue("кадри нерівні")
 
+    # ---------------- графіку змінено в меню гри посеред сесії
+
+    def _menu_values(self, e):
+        """Поточні значення у файлі налаштувань гри (лише ті, що плагін записував)."""
+        import autotune as AT
+        cfg = e.get("config")
+        if not cfg or not os.path.isfile(cfg):
+            return None
+        eng = str(e.get("engine", ""))
+        if eng == "unreal":
+            return AT.read_ini_section(cfg, "ScalabilityGroups")
+        if eng.startswith("generic:") and e.get("generic_fmt"):
+            import generic_settings as G
+            return dict(G.FORMATS[e["generic_fmt"]](cfg).items())
+        return None
+
+    def _menu_tick(self, now):
+        """Гравець змінив графіку в меню, поки гра запущена: гра вже застосувала її, а плагін
+        змінює налаштування лише перед стартом. Кажемо про це й зупиняємо замір — інакше FPS
+        «чужих» налаштувань записався б як результат сходинки плагіна."""
+        if self.menu_changed or now - self.menu_t < 10 or not self.settings["autotune"]:
+            return
+        self.menu_t = now
+        e = self._tune_entry()
+        if not e or not e.get("applied_values") or e.get("disabled") or e.get("user_override"):
+            return
+        try:
+            mt = os.path.getmtime(e["config"])
+        except (OSError, KeyError):
+            return
+        if self.menu_mtime is None:
+            self.menu_mtime = mt
+            return
+        if mt == self.menu_mtime:
+            return
+        self.menu_mtime = mt
+        try:
+            import autotune as AT
+            cur = self._menu_values(e)
+            applied = {k: v for k, v in e["applied_values"].items() if not k.startswith("x.")}
+            if cur is None or not AT.changed_by_user(applied, cur):
+                return
+        except Exception as ex:  # noqa: BLE001
+            decky.logger.warning(f"перевірка меню гри: {ex}")
+            return
+        self.menu_changed = True
+        was_tuning, self.tuning = self.tuning, False
+        self.tm_raw, self.tm_windows = [], []
+        lvl = int(e.get("applied_level", e.get("level", 0))) + 1
+        if self.settings.get("respect_manual_graphics"):
+            body = ("Залишу твої налаштування й далі графіку не чіпатиму "
+                    "(увімкнено «Залишати мої ручні налаштування»)")
+        else:
+            body = (f"Гра вже застосувала їх, а поки вона запущена, AutoFPS їх не змінює. "
+                    f"Після перезапуску поверну підібрану сходинку {lvl}/{e.get('steps', '?')}. "
+                    "Хочеш грати на своїх — увімкни «Залишати мої ручні налаштування» на вкладці «Графіка»")
+        if was_tuning:
+            body += ". Замір графіки в цій сесії зупинено"
+        self._notify("AutoFPS: графіку змінено в меню гри", body)
+
     # ---------------- фоновий замір для підбору графіки
     #
     # Раніше крок підбору міряв 20 с без ліміту й лише після кнопки або 3 хв гри — у коротких
@@ -1517,6 +1578,7 @@ class Plugin:
                 self.tm_raw.append((now, fps, gpu))
         self._tdp_tick(now)
         self._gpu_tick(now)
+        self._menu_tick(now)
         self._tm_tick(now)
 
         # фіксований рівень вибрано вручну
