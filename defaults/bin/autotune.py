@@ -33,7 +33,8 @@ UE_KEYS = ["sg.ResolutionQuality", "sg.ViewDistanceQuality", "sg.AntiAliasingQua
 # Налаштування поза [ScalabilityGroups], які багато ігор UE тримають у своєму розділі
 # GameUserSettings.ini (напр. [LotDKLocalSettings]). Пишемо лише ті, що є у файлі, і не вище
 # найбільшого значення, яке там колись стояло (максимум самої гри).
-UE_EXTRA_FOLLOW = {"MeshQuality": "ShadingQuality", "MaterialQuality": "ShadingQuality",
+UE_EXTRA_FOLLOW = {"MeshQuality": "ViewDistanceQuality",   # геометрія (LEGO: деталі цеглинок) — як LOD
+                   "MaterialQuality": "ShadingQuality",
                    "DistanceFieldAmbientOcclusion": "GlobalIlluminationQuality"}
 UE_EXTRA_KEYS = list(UE_EXTRA_FOLLOW) + ["Anisotropy"]
 UE_NOT_GRAPHICS = ("upscal", "dlss", "fsr", "xess", "tsr", "audio", "sound", "population",
@@ -49,9 +50,10 @@ def ue_follow(name):
              (("motionblur", "dof", "depthoffield", "bloom", "postprocess", "lens"), "PostProcessQuality"),
              (("hair", "fx", "effect", "particle", "water", "destruct"), "EffectsQuality"),
              (("foliage", "grass", "vegetation", "tree"), "FoliageQuality"),
-             (("view", "distance", "lod", "landscape", "terrain"), "ViewDistanceQuality"),
+             (("view", "distance", "lod", "landscape", "terrain", "mesh", "object", "detail",
+               "geometry", "environment"), "ViewDistanceQuality"),
              (("texture", "streaming"), "TextureQuality"),
-             (("mesh", "material", "object", "detail", "environment", "shading", "shader", "geometry"), "ShadingQuality")]
+             (("material", "shading", "shader"), "ShadingQuality")]
     for words, grp in table:
         if any(w in n for w in words):
             return grp
