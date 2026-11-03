@@ -437,6 +437,7 @@ class LogReader:
         self.offset = 0
         self.cols = None
         self.buf = ""
+        self.hw = []      # [(частота GPU МГц, частота CPU МГц, навантаження GPU %)] — забирає _tick
 
     def reset(self):
         self.__init__()
@@ -490,6 +491,9 @@ class LogReader:
                     gpu = float(parts[self.cols["gpu_load"]])
                 if 0 < fps < 1000:
                     out.append((fps, gpu))
+                    clk = float(parts[self.cols["gpu_core_clock"]]) if "gpu_core_clock" in self.cols else None
+                    cpu = float(parts[self.cols["cpu_mhz"]]) if "cpu_mhz" in self.cols else None
+                    self.hw.append((clk, cpu, gpu))
             except (ValueError, IndexError, KeyError):
                 continue
         return out
@@ -619,6 +623,8 @@ class Plugin:
         self.gpu_ok = None        # остання частота, що тримала
         self.gpu_ref = None       # (p10, p5) на авто-частоті
         self.gpu_samples, self.gpu_t, self.gpu_key, self.gpu_bad = [], 0.0, None, 0
+        self.gpu_hw = []          # [(t, частота GPU, частота CPU, навантаження GPU)]
+        self.gpu_ref_clk = None   # частота, яку GPU сам тримав під навантаженням на «авто»
 
     def _restore_display(self):
         try:
@@ -1025,8 +1031,29 @@ class Plugin:
     # частоту від максимуму вниз по 200 МГц, поки гра тримає ліміт і p5 FPS не гірший за еталон.
     # Перша, що не тримає, — повертаємо останню робочу й запам'ятовуємо (гра + ліміт + живлення).
 
-    GPU_STEP = 200
+    GPU_STEP = 100
     GPU_WIN_S = 12
+    # Legion Go S (SteamOS 3.9.5): ручна частота GPU вище ~2300 МГц «душить» процесор до
+    # 1397 МГц (ValveSoftware/SteamOS#2995; на цьому Legion: 2500 МГц → CPU 1397, FPS 38 → 21).
+    # Важкі ігри на «авто» самі тримають 1700–2300 МГц (LEGO Batman: ~1930) — у цих межах і шукаємо.
+    GPU_CPU_STARVED = 1450    # МГц процесора: нижче при ручній частоті — крок невдалий
+
+    def _gpu_range(self):
+        lo, hi = self.gc.min, self.gc.max
+        dr = self.device.get("gpu_manual_range")
+        if dr:
+            lo, hi = max(lo, dr[0]), min(hi, dr[1])
+        return lo, hi
+
+    def _gpu_hw(self, now):
+        """(частота GPU під навантаженням, частота CPU, навантаження GPU) — медіани вікна."""
+        w = [x for x in self.gpu_hw if now - x[0] <= self.GPU_WIN_S]
+        self.gpu_hw = w
+        loaded = [x[1] for x in w if x[1] and x[3] is not None and x[3] >= 85]
+        cpus = [x[2] for x in w if x[2]]
+        loads = [x[3] for x in w if x[3] is not None]
+        med = lambda v: percentile(v, 0.5) if v else None  # noqa: E731
+        return med(loaded), med(cpus), med(loads)
 
     def _gpu_wanted(self):
         return (self.gc.available and self.settings.get("auto_gpu_clock", True)
@@ -1070,16 +1097,21 @@ class Plugin:
                 return None
             q = C.quality_target(self.settings, self.device)
             return max(ref * 0.92, q * 0.97)
-        return self.base * 0.93
+        thr = self.base * 0.93
+        if self.gpu_ref and self.gpu_ref[0]:
+            # гра не дотягує до ліміту (впирається в GPU) — не гірше, ніж на «авто»
+            thr = min(thr, self.gpu_ref[0] * 0.97)
+        return thr
 
     def _gpu_rescue(self, why):
         """Просідання при зниженій частоті — спершу +100 МГц (живлення не чіпаємо)."""
         if self.gpu_state != "settled" or self.gpu_cur is None:
             return False
-        if self.gpu_cur >= self.gc.max:
-            self._gpu_set(None, f"({why} навіть на максимумі)")
+        _lo, hi = self._gpu_range()
+        if self.gpu_cur >= hi:
+            self._gpu_set(None, f"({why} навіть на {hi} МГц)")
         else:
-            self._gpu_set(min(self.gc.max, self.gpu_cur + 100), f"({why})")
+            self._gpu_set(min(hi, self.gpu_cur + self.GPU_STEP), f"({why})")
         self._gpu_save()
         self.tdp_samples = []
         return True
@@ -1091,58 +1123,73 @@ class Plugin:
                     self._gpu_set(None, "(підбір частоти призупинено)")
                 self.gpu_state = "off"
             return
+        lo, hi = self._gpu_range()
         key = self._gpu_key()
         if self.gpu_state == "off" or key != self.gpu_key:
             self.gpu_key = key
             saved = (self.games.get(str(self.appid)) or {}).get("gpu", {}).get(key)
+            if saved and saved != "auto" and not lo <= int(saved) <= hi:
+                saved = None                # старе збереження поза безпечним діапазоном
             if saved:
                 self.gpu_state = "settled"
                 self._gpu_set(None if saved == "auto" else int(saved), "(збережене для цієї гри)")
             else:
-                self.gpu_state, self.gpu_ref, self.gpu_ok = "ref", None, None
+                self.gpu_state, self.gpu_ref, self.gpu_ok, self.gpu_ref_clk = "ref", None, None, None
                 self._gpu_set(None, "(еталон на авто-частоті)")
             return
         self.gpu_samples = [x for x in self.gpu_samples if now - x[0] <= self.GPU_WIN_S]
         if now - self.gpu_t < self.GPU_WIN_S or len(self.gpu_samples) < 20:
             return
         fps = [x[1] for x in self.gpu_samples]
+        clk, cpu, load = self._gpu_hw(now)
         self.gpu_samples, self.gpu_t = [], now
         p10, p5 = percentile(fps, 0.10), percentile(fps, 0.05)
         if self.gpu_state == "ref":
             self.gpu_ref = (p10, p5)
+            self.gpu_ref_clk = clk
+            # старт — та частота, яку GPU сам тримав під навантаженням (та сама продуктивність,
+            # але без «стрибків» частоти й без задушеного процесора), не вище безпечної межі
+            start = hi if not clk else max(lo, min(hi, int(clk // 50 * 50)))
             self.gpu_state = "descending"
-            self._gpu_set(self.gc.max - self.GPU_STEP if self.gc.max - self.GPU_STEP >= self.gc.min
-                          else self.gc.max, f"(старт підбору, еталон p10 {p10:.0f})")
+            self._gpu_set(start, f"(старт: на авто GPU тримав {clk:.0f} МГц, p10 {p10:.0f})" if clk
+                          else f"(старт підбору, p10 {p10:.0f})")
             return
         thr = self._gpu_threshold()
         ref_p5 = self.gpu_ref[1] if self.gpu_ref else p5
         holds = (thr is None or p10 >= thr) and p5 >= min(ref_p5, thr or ref_p5) * 0.95
+        starved = bool(cpu and cpu <= self.GPU_CPU_STARVED and (load is None or load < 85))
+        if starved:
+            holds = False
+        detail = f"p10 {p10:.0f}, p5 {p5:.0f}" + (f", CPU {cpu:.0f} МГц" if cpu else "")
         if self.gpu_state == "descending":
             if holds:
                 self.gpu_ok = self.gpu_cur
                 nxt = self.gpu_cur - self.GPU_STEP
-                if nxt < self.gc.min:
+                if nxt < lo:
                     self.gpu_state = "settled"
                     self._gpu_save()
                     self._notify(f"AutoFPS: GPU {self.gpu_cur} МГц",
-                                 f"Навіть на мінімальній частоті гра тримає {self._fps_goal_text()} рівно")
+                                 f"Навіть на {self.gpu_cur} МГц гра тримає {self._fps_goal_text()} рівно")
                     return
-                self._gpu_set(nxt, f"(тримає: p10 {p10:.0f}, p5 {p5:.0f})")
+                self._gpu_set(nxt, f"(тримає: {detail})")
                 return
             self.gpu_state = "settled"
             if self.gpu_ok:
-                self._gpu_set(self.gpu_ok, f"(на {self.gpu_cur} не тримало: p10 {p10:.0f}, p5 {p5:.0f})")
-                msg = f"Найнижча частота GPU, з якою кадри рівні: {self.gpu_ok} МГц. Запам'ятав для цієї гри"
+                self._gpu_set(self.gpu_ok, f"(на {self.gpu_cur} не тримало: {detail})")
+                ref = f" (на авто тримав ~{self.gpu_ref_clk:.0f})" if self.gpu_ref_clk else ""
+                msg = (f"Найнижча частота GPU, з якою кадри рівні: {self.gpu_ok} МГц{ref}. "
+                       "Менше споживання й рівніший кадр. Запам'ятав для цієї гри")
             else:
-                self._gpu_set(None, "(фіксована частота не тримає — лишаю авто)")
-                msg = "Гра потребує повної частоти — лишаю авто"
+                self._gpu_set(None, f"(фіксована частота не тримає — лишаю авто: {detail})")
+                msg = ("Процесор задихався при фіксованій частоті — лишаю авто" if starved
+                       else "Гра потребує повної частоти — лишаю авто")
             self._gpu_save()
             self._notify(f"AutoFPS: GPU {self.gpu_cur or 'авто'}" + (" МГц" if self.gpu_cur else ""), msg)
             return
         # settled: два вікна поспіль не тримає — додаємо частоту
         self.gpu_bad = self.gpu_bad + 1 if not holds else 0
         if self.gpu_bad >= 2:
-            self._gpu_rescue("кадри нерівні")
+            self._gpu_rescue("процесор задихається" if starved else "кадри нерівні")
 
     # ---------------- графіку змінено в меню гри посеред сесії
 
@@ -1594,6 +1641,9 @@ class Plugin:
             self.gpu_samples.append((now, fps))
             if self.tuning:
                 self.tm_raw.append((now, fps, gpu))
+        for clk, cpu, load in self.reader.hw:
+            self.gpu_hw.append((now, clk, cpu, load))
+        self.reader.hw = []
         self._tdp_tick(now)
         self._gpu_tick(now)
         self._menu_tick(now)

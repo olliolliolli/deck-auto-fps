@@ -112,6 +112,9 @@ def detect_device():
                 # VRR: 47 і 90 теж плавні (екран підлаштовує частоту)
                 "tiers": [30, 40, 47, 60, 90, 120], "res": [1920, 1200],
                 "vrr_range": panel_vrr_range(),
+                # ручна частота GPU: важкі ігри на «авто» тримають 1700–2300 МГц, а вище ~2300
+                # SteamOS 3.9.5 обмежує процесор до 1397 МГц (ValveSoftware/SteamOS#2995)
+                "gpu_manual_range": (1500, 2300),
                 "quality_target": 40, "start_level": 4}   # 60 базових FPS у важких іграх недосяжні
     return {"id": "generic", "label": f"Невідомий пристрій ({name or '?'})",
             "min_hz": 60, "max_hz": 60, "refresh_control": False,
