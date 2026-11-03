@@ -793,7 +793,7 @@ def _gain(hist):
 
 def predict_level(hist, target, n, fallback):
     """Сходинка, на якій гра (за замірами) тягне target·MARGIN; без замірів — fallback."""
-    import math
+
     if not hist:
         return fallback
     g = _gain(hist)

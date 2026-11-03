@@ -52,7 +52,7 @@ def short(k):
 
 
 def audit(appid, install, compat, device):
-    entry = {"level": device["start_level"]}
+
     adapter = None
     for Ad in A.ADAPTERS:
         if Ad.detect(install):

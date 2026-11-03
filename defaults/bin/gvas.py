@@ -316,7 +316,12 @@ class Gvas:
             json.loads(text)
         except ValueError:
             return
+        counts = {}
         for m in self.JSON_KV.finditer(text):
+            counts[m.group(1)] = counts.get(m.group(1), 0) + 1
+        for m in self.JSON_KV.finditer(text):
+            if counts[m.group(1)] != 1:
+                continue                     # ключ повторюється в різних об'єктах — неоднозначно
             raw = m.group(2)
             v = raw[1:-1] if raw.startswith('"') else raw
             self.leaves.append(Leaf(f"{path}{{{m.group(1)}}}", "json", v, off, length, sizes,

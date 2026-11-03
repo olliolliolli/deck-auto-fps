@@ -554,6 +554,7 @@ class Plugin:
         decky.logger.info(f"частота GPU: {'%s–%s МГц' % (self.gc.min, self.gc.max) if self.gc.available else self.gc.error}")
         self.started_t = time.time()
         self.tdp_orig = None
+        self._restore_after_restart()
         self.telemetry = {}
         decky.logger.info(f"живлення: {self.pw.kind or 'немає керування'} "
                           f"[{', '.join(self.pw.label(i) for i in range(len(self.pw.levels)))}] {self.pw.error}")
@@ -617,6 +618,7 @@ class Plugin:
         self.tm_raw, self.tm_windows, self.tm_t, self.tm_saved_n = [], [], 0.0, 0
         self.tm_forecast = None
         self.tm_pending = None
+        self.tm_over = []
         self.menu_t, self.menu_mtime, self.menu_changed = 0.0, None, False
         self.gpu_state = "off"    # off | ref | descending | settled
         self.gpu_cur = None       # МГц (None — авто)
@@ -625,6 +627,8 @@ class Plugin:
         self.gpu_samples, self.gpu_t, self.gpu_key, self.gpu_bad = [], 0.0, None, 0
         self.gpu_hw = []          # [(t, частота GPU, частота CPU, навантаження GPU)]
         self.gpu_ref_clk = None   # частота, яку GPU сам тримав під навантаженням на «авто»
+        self.perf_typical, self.tdp_bad = None, 0
+        self.gpu_ref_w = []
 
     def _restore_display(self):
         try:
@@ -824,9 +828,38 @@ class Plugin:
     def _tdp_label(self):
         return self.pw.label(self.tdp_cur)
 
+    RESTORE_FILE = os.path.join(CFG_DIR, "restore_on_start.json")
+
+    def _remember_orig(self, kind, snap):
+        """Оригінал живлення / частоти GPU — і на диск: якщо плагін перезапуститься посеред
+        гри, при старті він поверне систему як було, а не лишить «тихий» профіль чи 1900 МГц."""
+        d = _load_json(self.RESTORE_FILE, {})
+        d.setdefault(kind, snap)
+        _save_json(self.RESTORE_FILE, d)
+
+    def _forget_orig(self, kind):
+        d = _load_json(self.RESTORE_FILE, {})
+        if d.pop(kind, None) is not None:
+            _save_json(self.RESTORE_FILE, d)
+
+    def _restore_after_restart(self):
+        d = _load_json(self.RESTORE_FILE, {})
+        if not d:
+            return
+        try:
+            if d.get("power") and self.pw.available:
+                self.pw.restore(d["power"])
+            if d.get("gpu") and self.gc.available:
+                self.gc.restore(d["gpu"])
+            decky.logger.info(f"після перезапуску плагіна повернуто: {d}")
+        except Exception as e:  # noqa: BLE001
+            decky.logger.warning(f"відновлення після перезапуску: {e}")
+        _save_json(self.RESTORE_FILE, {})
+
     def _tdp_set(self, i, why=""):
         if self.tdp_orig is None:
             self.tdp_orig = self.pw.snapshot()
+            self._remember_orig("power", self.tdp_orig)
         i = max(0, min(len(self.pw.levels) - 1, int(i)))
         if i != self.tdp_cur and self.pw.apply(i):
             decky.logger.info(f"живлення → {self.pw.label(i)} {why}")
@@ -838,6 +871,7 @@ class Plugin:
             self.pw.restore(self.tdp_orig)
             decky.logger.info(f"живлення повернуто: {self.tdp_orig}")
         self.tdp_orig = None
+        self._forget_orig("power")
 
     def _tdp_saved_key(self):
         out = "vrr" if self._vrr() else self._out_fps()
@@ -932,16 +966,23 @@ class Plugin:
         self._thermal_tick(now)
         if self.tdp_state == "off" or self.phase not in ("locked", "manual"):
             return
+        if now - getattr(self, "tdp_check_t", 0) > 30 and self.tdp_cur is not None:
+            # Steam (або гравець у швидкому меню) міг змінити профіль — повертаємо наш рівень
+            self.tdp_check_t = now
+            lv = self.pw.levels[self.tdp_cur]
+            if "profile" in lv and self.pw.current_profile() not in (None, lv["profile"]):
+                self.pw.apply(self.tdp_cur)
+                decky.logger.info(f"живлення перепідтверджено: {self.pw.label(self.tdp_cur)}")
         if self.tdp_state == "max":
-            if now - self.tdp_last > 30:      # Steam міг змінити профіль
-                self._tdp_set(len(self.pw.levels) - 1)
-                self.tdp_last = now
             return
         self.tdp_samples = [x for x in self.tdp_samples if now - x[0] <= 12]
         if now - self.tdp_last < 12 or len(self.tdp_samples) < 10 or now - self.tdp_samples[0][0] < 10:
             return
         p10 = percentile([x[1] for x in self.tdp_samples], 0.10)
         self.tdp_samples = []
+        ok, _med, _gpu = self._perf_window(now)
+        if not ok:
+            return                              # меню, завантаження, перші секунди — не рішення
         if self._vrr() and self.tdp_ref is None:
             self.tdp_ref = p10                 # VRR: скільки гра дає на повному живленні
             return
@@ -949,9 +990,13 @@ class Plugin:
             return                             # зараз підбирається частота GPU
         thr = self._tdp_threshold()
         if thr and p10 < thr:
-            if not self._gpu_rescue("FPS просів"):
-                self._tdp_rescue()
+            self.tdp_bad = getattr(self, "tdp_bad", 0) + 1
+            if self.tdp_bad >= 2:               # одне вікно — може бути важча сцена
+                self.tdp_bad = 0
+                if not self._gpu_rescue("FPS просів"):
+                    self._tdp_rescue()
             return
+        self.tdp_bad = 0
         if self.tdp_state == "descending":
             nxt = self.tdp_cur - 1
             if nxt <= self.tdp_floor or nxt < 0:
@@ -1067,6 +1112,7 @@ class Plugin:
     def _gpu_set(self, mhz, why=""):
         if self.gpu_orig is None:
             self.gpu_orig = self.gc.snapshot()
+            self._remember_orig("gpu", self.gpu_orig)
         if mhz is None:
             self.gc.set_auto()
             decky.logger.info(f"GPU → авто {why}")
@@ -1080,6 +1126,7 @@ class Plugin:
             self.gc.restore(self.gpu_orig)
             decky.logger.info(f"частоту GPU повернуто: {self.gpu_orig}")
         self.gpu_orig = None
+        self._forget_orig("gpu")
         self.gpu_cur = None
         self.gpu_state = "off"
 
@@ -1091,16 +1138,16 @@ class Plugin:
         _save_json(GAMES_FILE, self.games)
 
     def _gpu_threshold(self):
+        ref = self.gpu_ref[0] if self.gpu_ref else None
         if self._vrr():
-            ref = self.gpu_ref[0] if self.gpu_ref else None
             if not ref:
                 return None
-            q = C.quality_target(self.settings, self.device)
-            return max(ref * 0.92, q * 0.97)
+            # VRR: не гірше ніж на «авто» (−5% — шум між сценами)
+            return ref * 0.95
         thr = self.base * 0.93
-        if self.gpu_ref and self.gpu_ref[0]:
+        if ref:
             # гра не дотягує до ліміту (впирається в GPU) — не гірше, ніж на «авто»
-            thr = min(thr, self.gpu_ref[0] * 0.97)
+            thr = min(thr, ref * 0.95)
         return thr
 
     def _gpu_rescue(self, why):
@@ -1135,6 +1182,7 @@ class Plugin:
                 self._gpu_set(None if saved == "auto" else int(saved), "(збережене для цієї гри)")
             else:
                 self.gpu_state, self.gpu_ref, self.gpu_ok, self.gpu_ref_clk = "ref", None, None, None
+                self.gpu_ref_w = []
                 self._gpu_set(None, "(еталон на авто-частоті)")
             return
         self.gpu_samples = [x for x in self.gpu_samples if now - x[0] <= self.GPU_WIN_S]
@@ -1143,8 +1191,19 @@ class Plugin:
         fps = [x[1] for x in self.gpu_samples]
         clk, cpu, load = self._gpu_hw(now)
         self.gpu_samples, self.gpu_t = [], now
+        ok, _med, _g = self._perf_window(now, self.GPU_WIN_S)
+        if not ok:
+            return                              # меню, завантаження, перші секунди — пропускаємо
         p10, p5 = percentile(fps, 0.10), percentile(fps, 0.05)
         if self.gpu_state == "ref":
+            if load is None or load < 80 or not clk:
+                return                          # еталон — лише справжня гра з навантаженим GPU
+            self.gpu_ref_w.append((p10, p5, clk))
+            if len(self.gpu_ref_w) < 3:
+                return                          # еталон — медіана трьох вікон (~36 с), не одна сцена
+            p10 = percentile([w[0] for w in self.gpu_ref_w], 0.5)
+            p5 = percentile([w[1] for w in self.gpu_ref_w], 0.5)
+            clk = percentile([w[2] for w in self.gpu_ref_w], 0.5)
             self.gpu_ref = (p10, p5)
             self.gpu_ref_clk = clk
             # старт — та частота, яку GPU сам тримав під навантаженням (та сама продуктивність,
@@ -1162,7 +1221,12 @@ class Plugin:
             holds = False
         detail = f"p10 {p10:.0f}, p5 {p5:.0f}" + (f", CPU {cpu:.0f} МГц" if cpu else "")
         if self.gpu_state == "descending":
+            if not holds and self.gpu_bad < 1:
+                # одне погане вікно — може бути важча сцена; перевіряємо ще раз на тій самій частоті
+                self.gpu_bad += 1
+                return
             if holds:
+                self.gpu_bad = 0
                 self.gpu_ok = self.gpu_cur
                 nxt = self.gpu_cur - self.GPU_STEP
                 if nxt < lo:
@@ -1272,7 +1336,6 @@ class Plugin:
             return
         self.menu_mtime = mt
         try:
-            import autotune as AT
             cur = self._menu_values(e)
             applied = {k: v for k, v in e["applied_values"].items() if not k.startswith("x.")}
             if cur is None:
@@ -1361,7 +1424,18 @@ class Plugin:
         if not capped and gpu is not None and gpu < 80:
             return                                   # меню / завантаження / процесор
         if cap and med > cap * 1.15:
-            return                                   # вище ліміту — меню без обмеження FPS
+            # вище ліміту: меню без обмеження FPS — або ліміт узагалі не діє (шар Lossless).
+            # Якщо так уже 2 хв гри з завантаженим GPU — це гра, і вона тягне більше за ліміт
+            if gpu is not None and gpu >= 80:
+                self.tm_over.append(min(p10, cap * 1.6))
+                if len(self.tm_over) >= 12 and len(self.tm_windows) < self.TM_MIN_WINDOWS \
+                        and self.tm_saved_n == 0:
+                    value = percentile(self.tm_over, 0.25)
+                    self._record_tune(value)
+                    self.tm_saved_n = len(self.tm_over)
+                    decky.logger.info(f"замір вище ліміту (ліміт не діє?): {value:.1f} FPS")
+                    self._tm_forecast(value)
+            return
         if p10 < med * 0.5:
             return                                   # ривки: шейдери, підвантаження
         if capped:
@@ -1586,6 +1660,41 @@ class Plugin:
                 decky.logger.error(f"tick error: {e}")
             await asyncio.sleep(1.0)
 
+    SETTLE_S = 45          # перші секунди після старту — логотипи/меню/завантаження, не міряємо
+
+    def _perf_window(self, now, span=12.0):
+        """Чи останні span с — «чиста гра», придатна для рішень про живлення / частоту GPU.
+        Повертає (придатне, медіана FPS, середнє навантаження GPU). Не придатні: перші
+        секунди після старту, меню без обмеження FPS (вище ліміту), завантаження (GPU не
+        завантажений і FPS у рази нижчий за звичний)."""
+        w = [x for x in self.samples if now - x[0] <= span]
+        if now - self.game_started < self.SETTLE_S or len(w) < 10:
+            return False, None, None
+        fps = [x[1] for x in w]
+        gpus = [x[2] for x in w if x[2] is not None]
+        med = percentile(fps, 0.5)
+        gpu = sum(gpus) / len(gpus) if gpus else None
+        cap = self._tm_cap()
+        if cap and med > cap * 1.15:
+            return False, med, gpu                       # меню без ліміту / ліміт не діє
+        if med < 15 or percentile(fps, 0.10) < med * 0.5:
+            return False, med, gpu                       # екран завантаження / сильні ривки
+        typical = getattr(self, "perf_typical", None)
+        if gpu is not None and gpu < 70 and typical and med < typical * 0.6:
+            return False, med, gpu                       # завантаження / заставка
+        if gpu is not None and gpu >= 80:
+            self.perf_typical = med if not typical else 0.8 * typical + 0.2 * med
+        return True, med, gpu
+
+    def _trim(self, now):
+        """Буфери замірів — не довше хвилини (сесія може тривати годинами)."""
+        keep = 60.0
+        self.samples = [x for x in self.samples if now - x[0] <= keep]
+        self.tdp_samples = [x for x in self.tdp_samples if now - x[0] <= keep]
+        self.gpu_samples = [x for x in self.gpu_samples if now - x[0] <= keep]
+        self.gpu_hw = [x for x in self.gpu_hw if now - x[0] <= keep]
+        self.tm_raw = [x for x in self.tm_raw if now - x[0] <= keep]
+
     def _detect_game(self):
         cur = _load_json(CURRENT_FILE, None)
         if not cur:
@@ -1672,6 +1781,7 @@ class Plugin:
         if self.settings.get("start_on_button", True) and not self.user_started and not no_measure:
             for _ in self.reader.read(self.game_started):
                 pass                      # вичитуємо лог, щоб не накопичувати кадри меню
+            self.reader.hw = []
             self.samples = []
             if self.phase != "waiting":
                 self.phase, self.phase_t = "waiting", now
@@ -1703,6 +1813,7 @@ class Plugin:
         for clk, cpu, load in self.reader.hw:
             self.gpu_hw.append((now, clk, cpu, load))
         self.reader.hw = []
+        self._trim(now)
         self._tdp_tick(now)
         self._gpu_tick(now)
         self._menu_tick(now)

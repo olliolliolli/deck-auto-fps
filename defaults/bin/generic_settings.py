@@ -29,7 +29,6 @@ import json
 import os
 import re
 
-import autofps_common as C
 
 STEPS = 12
 
@@ -816,7 +815,13 @@ class GenericAdapter:
     @staticmethod
     def _settings_of(fmt):
         out = {}
-        for k, v in fmt.items():
+        pairs = fmt.items()
+        counts = {}
+        for k, _v in pairs:
+            counts[k] = counts.get(k, 0) + 1
+        for k, v in pairs:
+            if counts[k] > 1:
+                continue                     # ключ повторюється у файлі — неоднозначно, не чіпаємо
             sc, known = fmt.scale(k, v)
             if sc and _core(v) in sc:
                 t = tier_of(k.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]) or tier_of(k) or "B"
