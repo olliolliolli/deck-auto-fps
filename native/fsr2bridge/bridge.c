@@ -630,9 +630,10 @@ static struct {
     int sanitize;        /* 1 — очищати колір/глибину/вектори від NaN/Inf перед FSR 4 */
     int exposure;        /* 0 — автоекспозиція FFX, 1 — експозиція з FSR 2 гри (1x1) */
     int repair;          /* 1 — ремонт виходу FSR 4 (NaN/чорне → збільшений вхід), 2 — лише рахувати, 0 — ні */
+    int native_rcas;     /* 1 — виконати рідний RCAS гри (його допоміжні виходи), потім FSR 4 поверх */
 } g_cfg = {1, FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_AUTO_EXPOSURE |
               FFX_UPSCALE_ENABLE_DEPTH_INVERTED | FFX_UPSCALE_ENABLE_DEPTH_INFINITE,
-           0, 0, 1, 0.5f, 0.1f, 10000.0f, "4", 1.0f, 1.0f, 1.0f, 1.0f, 0, 1, 0, 1};
+           0, 0, 1, 0.5f, 0.1f, 10000.0f, "4", 1.0f, 1.0f, 1.0f, 1.0f, 0, 1, 0, 2, 1};
 static FILETIME g_cfg_mtime;
 static uint32_t g_ctx_w, g_ctx_h;   /* оголошено тут, визначено нижче (FFX) */
 static volatile LONG g_cfg_changed;
@@ -667,13 +668,14 @@ static void load_cfg(void)
         else if (!strcmp(k, "jitter_y")) g_cfg.jy = (float)atof(v);
         else if (!strcmp(k, "sanitize")) g_cfg.sanitize = atoi(v);
         else if (!strcmp(k, "repair")) g_cfg.repair = atoi(v);
+        else if (!strcmp(k, "native_rcas")) g_cfg.native_rcas = atoi(v);
         else if (!strcmp(k, "exposure")) g_cfg.exposure = !strcmp(v, "game") || !strcmp(v, "1");
     }
     fclose(f);
-    LOG("налаштування: enable=%d flags=0x%x depth_conv=%d reactive=%d skip_accumulate=%d sharpness=%.2f near=%g far=%g version=%s mv=(%g,%g) jitter=(%g,%g) sanitize=%d exposure=%s repair=%d",
+    LOG("налаштування: enable=%d flags=0x%x depth_conv=%d reactive=%d skip_accumulate=%d sharpness=%.2f near=%g far=%g version=%s mv=(%g,%g) jitter=(%g,%g) sanitize=%d exposure=%s repair=%d native_rcas=%d",
         g_cfg.enable, g_cfg.flags, g_cfg.depth_conv, g_cfg.reactive, g_cfg.skip_accumulate, g_cfg.sharpness,
         g_cfg.cam_near, g_cfg.cam_far, g_cfg.want, g_cfg.mvx, g_cfg.mvy, g_cfg.jx, g_cfg.jy, g_cfg.sanitize,
-        g_cfg.exposure ? "game" : "auto", g_cfg.repair);
+        g_cfg.exposure ? "game" : "auto", g_cfg.repair, g_cfg.native_rcas);
 }
 
 /* перечитує autofps_fsr.ini, якщо файл змінився (налаштування на льоту, під час гри) */
@@ -1626,7 +1628,7 @@ static void STDMETHODCALLTYPE h_Dispatch(ID3D12GraphicsCommandList *cl, UINT x, 
             if (bad) F->depth = d;
         }
         if (ok) { memcpy(F->cb, cb, sizeof(cb)); F->have_cb = 1; }
-        int skip = g_cfg.skip_accumulate && g_ffx_state == 1 && ok && F->color && F->mv && F->depth;
+        int skip = g_cfg.skip_accumulate && !g_cfg.native_rcas && g_ffx_state == 1 && ok && F->color && F->mv && F->depth;
         if (skip) {   /* ті самі перевірки, що й на кроці RCAS — інакше вийде кадр без зображення */
             D3D12_RESOURCE_DESC dc, dz;
             ID3D12Resource_GetDesc(F->color, &dc); ID3D12Resource_GetDesc(F->depth, &dz);
@@ -1638,13 +1640,22 @@ static void STDMETHODCALLTYPE h_Dispatch(ID3D12GraphicsCommandList *cl, UINT x, 
         break;
     }
     case PC_RCAS: {  /* RCAS → тут FSR 4 */
+        if (g_cfg.native_rcas) {
+            /* Рідний RCAS RE4 пише не лише картинку: ще й допоміжні дані (маску тощо), які далі
+               читає постобробка гри. Без нього постобробка брала застарілі — чорні спалахи.
+               Тож виконуємо його як є, а FSR 4 потім перезаписує саму картинку. */
+            o_Dispatch(cl, x, y, z);
+            D3D12_RESOURCE_BARRIER ub; memset(&ub, 0, sizeof(ub));
+            ub.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV; ub.UAV.pResource = NULL;   /* усі UAV: запис RCAS → запис FSR 4 */
+            ID3D12GraphicsCommandList_ResourceBarrier(cl, 1, &ub);
+        }
         int done = bridge_rcas(cl, &st);
         int skipped;
         AcquireSRWLockExclusive(&g_fr_lock);
         { frame_state *F = fr_get(cl); skipped = F->accumulate_skipped;
           memset(F, 0, sizeof(*F)); F->cl = cl; }   /* кадр FSR 2 завершено */
         ReleaseSRWLockExclusive(&g_fr_lock);
-        if (done) return;
+        if (done || g_cfg.native_rcas) return;   /* рідний RCAS уже виконано */
         if (skipped) {   /* накопичення FSR 2 пропущено — рідний RCAS дав би чорний кадр; лишаємо попередній */
             LONG n = InterlockedIncrement(&g_skip_fail);
             if (n <= 3) LOG("міст: кадр не передано після пропущеного накопичення FSR 2 (%ld)", n);
