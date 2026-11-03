@@ -334,8 +334,77 @@ class UnrealAdapter:
         new = patch_ini(lines, changes)
         with open(cfg, "w", encoding="utf-8") as f:
             f.writelines(new)
+        try:
+            self._sync_sav(cfg, values)
+        except Exception as e:  # noqa: BLE001 — сейв лише доповнення до ini
+            print(f"sav sync: {e!r}")
+
+    # --- графіка в сейві (Saved/SaveGames/*.sav, GVAS): Oblivion Remastered та інші
+    def settings_sav(self, cfg):
+        """Сейв налаштувань гри з групами якості Unreal (≥ 3) або None."""
+        import generic_settings as G
+        root = cfg.split("/Saved/")[0] + "/Saved" if "/Saved/" in cfg else None
+        if not root:
+            return None
+        best = None
+        for p in glob.glob(os.path.join(root, "**", "*.sav"), recursive=True):
+            fn = os.path.basename(p)
+            if not G.NAME_HINT.search(fn) or os.path.getsize(p) > G.SAV_MAX:
+                continue
+            try:
+                fmt = G.GvasFmt(p)
+                st = G.GenericAdapter._settings_of(fmt)
+            except Exception:  # noqa: BLE001
+                continue
+            n = sum(1 for k in st if G._norm(G.leaf_name(k)) in G.UE_GROUPS)
+            if n >= 3 and (best is None or n > best[0]):
+                best = (n, p)
+        return best[1] if best else None
+
+    def _sync_sav(self, cfg, values):
+        import generic_settings as G
+        sav = self.settings_sav(cfg)
+        if not sav:
+            return
+        fmt = G.GvasFmt(sav)
+        cur = dict(fmt.items())
+        st = G.GenericAdapter._settings_of(fmt)
+        entry = getattr(self, "entry", None)
+        orig = entry.setdefault("sav_original", {}) if entry is not None else {}
+        seen = entry.setdefault("sav_max", {}) if entry is not None else {}
+        out = {}
+        restore = "sg.ResolutionQuality" not in values or values is getattr(self, "_original", None)
+        for k, (sc, _tier, known) in st.items():
+            v = G._core(cur[k])
+            orig.setdefault(k, cur[k])
+            if v in sc and (seen.get(k) not in sc or sc.index(v) > sc.index(seen[k])):
+                seen[k] = v
+            leaf = G.leaf_name(k)
+            if restore and k in orig:
+                out[k] = orig[k]
+                continue
+            n = G._norm(leaf)
+            grp = next((g for g in UE_KEYS if g.lower() == f"sg.{n}"), None)
+            if grp is None:
+                grp = f"sg.{ue_follow(leaf)}"
+            try:
+                base = int(float(values.get(grp, 3)))
+            except ValueError:
+                continue
+            idx = int(round(base / 3.0 * (len(sc) - 1)))
+            pref = any(w in G._name(leaf) for w in G.PREFERENCE)
+            if pref or not known:          # не вище за бачене (трасування, розмиття — ніколи)
+                top = max([sc.index(x) for x in (v, seen.get(k)) if x in sc] or [0])
+                idx = min(idx, top)
+            out[k] = G._cased(sc[max(0, min(len(sc) - 1, idx))], cur[k])
+        changed = {k: v for k, v in out.items() if str(cur.get(k)) != str(v)}
+        if changed:
+            backup_once(sav)
+            fmt.write(changed)
+            print(f"сейв налаштувань {os.path.basename(sav)}: {len(changed)} значень")
 
     def restore(self, cfg, original):
+        self._original = original
         self.write(cfg, original)
         drop = [k for k in UE_KEYS if k not in original]
         _drop_lines(cfg, lambda s: s.split("=", 1)[0].strip() in drop)
@@ -878,6 +947,7 @@ def run(appid, args, device=None, log=print):
         C.save_json(C.TUNE_FILE, tune)
         return
     entry["engine"] = adapter.engine
+    adapter.entry = entry
 
     cfg = adapter.locate()
     if not cfg:

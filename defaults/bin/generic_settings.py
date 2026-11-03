@@ -22,6 +22,8 @@
             REDengine 4 (Cyberpunk 2077), Remedy Northlight (Control, Alan Wake 2)
   func      Name(value)   Chrome Engine video.scr (Dying Light 1/2/The Beast)
   winreg    user.reg: HKCU\\Software\\<студія>\\<гра>   порти Nixxes, IOI, Unity PlayerPrefs
+  gvas      бінарні сейви Unreal (.sav): властивості, словники, JSON у рядку (див. gvas.py)
+  unityprefs  PlayerPrefs.data нових Unity (JSON ints/floats/bools/strings) із прапорцями меню
 """
 import json
 import os
@@ -44,7 +46,8 @@ EXCLUDE = ("upscal", "dlss", "fsr", "xess", "sharp", "audio", "sound", "volume",
            "voice", "music", "key", "bind", "controller", "vibration", "rumble", "aim", "speed",
            "timeout", "count", "index", "id", "seed", "time", "date", "playtime", "achievement",
            "fullscreen", "borderless", "refresh", "display", "output", "gpu", "cpu", "thread",
-           "memory", "budget", "cache", "pool", "benchmark", "telemetry", "crash", "debug")
+           "memory", "budget", "cache", "pool", "benchmark", "telemetry", "crash", "debug",
+           "crosshair", "reticle", "marker", "show")
 # «resolution» дозволена, якщо це роздільність ефекту, а не екрана
 RES_OK = ("shadow", "reflect", "volumetric", "cloud", "fog", "texture", "ambientocclusion", "ssao")
 
@@ -61,14 +64,16 @@ TIER_WORDS = {
           "environment", "sky", "clutter", "geometry", "antialias", "msaa", "taa", "smaa",
           "fxaa", "model", "character", "world", "streaming", "visual", "graphics", "render",
           "quality"),
-    "C": ("texture", "anisotrop", "filter"),
+    "C": ("texture", "texquality", "texres", "texdetail", "anisotrop", "filter"),
 }
 # на яких сходинках ряд знижується від максимуму до мінімуму
 TIER_SPAN = {"A": (1, 9), "B": (3, 10), "C": (8, 11)}
 
 # смак гравця, а не якість: вмикати / підвищувати ніколи не будемо, лише знижувати
 PREFERENCE = ("motionblur", "depthoffield", "dof", "chromatic", "vignett", "filmgrain",
-              "lensflare", "lensdirt", "lensdistort", "grain", "blur")
+              "lensflare", "lensdirt", "lensdistort", "grain", "blur",
+              # трасування на портативних — лише вимикаємо, ніколи не вмикаємо
+              "raytrac", "pathtrac", "hardwarert", "rtgi", "rtao")
 
 # шкали від найнижчого до найвищого; порядок — від найпоширенішої
 STRING_SCALES = [
@@ -100,7 +105,8 @@ def _norm(s):
 
 
 def _core(v):
-    """Значення без службових префіксів (RDR2: kSettingLevel_High → high)."""
+    """Значення без службових префіксів (RDR2: kSettingLevel_High → high, EQ::High → high)."""
+    v = str(v).split("::")[-1]
     return re.sub(r"^(ksettinglevel|equality|quality|level|e)(?=(low|medium|high|ultra|off|on|max|normal|veryhigh|verylow|epic|special))",
                   "", _norm(v))
 
@@ -158,17 +164,29 @@ def scale_of(name, value):
     for sc in STRING_SCALES:
         if v in sc:
             return sc
-    if any(w in n for w in TOGGLE_HEAVY):
-        for sc in TOGGLES:
+    if any(w in n for w in TOGGLE_HEAVY) and not ("shadow" in n and "contact" not in n):
+        for sc in TOGGLES:            # тіні цілком не вимикаємо — лише контактні тіні
             if v in sc:
                 return sc
     return None
 
 
+def leaf_name(key):
+    """Остання частина шляху: SavedSettings[Altar.GraphicsOptions.ShadowQuality] → ShadowQuality."""
+    m = re.search(r"[\[{]([^\[\]{}]+)[\]}]$", key)
+    k = m.group(1) if m else key
+    return re.split(r"[./\\]", k)[-1]
+
+
+UE_GROUPS = ("viewdistancequality", "antialiasingquality", "shadowquality", "globalilluminationquality",
+             "reflectionquality", "postprocessquality", "texturequality", "effectsquality",
+             "foliagequality", "shadingquality", "landscapequality")
+
+
 def _cased(val, like):
     """Значення у вигляді, який використовує гра (MAX / Medium / kSettingLevel_High / 2)."""
     like = str(like)
-    m = re.match(r"^(kSettingLevel_|eQuality_|Quality_|Level_)", like)
+    m = re.match(r"^([A-Za-z_]\w*::|kSettingLevel_|eQuality_|Quality_|Level_)", like)
     prefix = m.group(1) if m else ""
     core = like[len(prefix):]
     if core.isupper() and not core.isdigit():
@@ -554,7 +572,124 @@ class WinReg(_Fmt):
         _save(self.path, "".join(out), enc)
 
 
-FORMATS = {c.name: c for c in (FromSoftXml, XmlText, XmlAttr, KvLine, IniFmt, JsonFmt, FuncFmt, WinReg)}
+class GvasFmt(_Fmt):
+    """Сейв Unreal (.sav, GVAS) — властивості, словники, JSON у рядку (див. gvas.py)."""
+    name = "gvas"
+
+    def _g(self):
+        import gvas
+        return gvas.load(self.path)
+
+    def items(self):
+        return self._g().items()
+
+    def scale(self, key, value):
+        leaf = leaf_name(key)
+        v = _core(value)
+        inner = re.search(r"[\[{]([^\[\]{}]+)[\]}]$", key)
+        if _excluded(_name(inner.group(1) if inner else key)):
+            return None, False           # Altar.DLSS.Quality, …Audio.Volume тощо
+        # стандартні групи якості Unreal: 0 низькі … 3 епічні (4 — кіно, не ставимо)
+        if _norm(leaf) in UE_GROUPS and v in ("0", "1", "2", "3", "4"):
+            return ["0", "1", "2", "3"] if v != "4" else ["0", "1", "2", "3", "4"], True
+        sc = scale_of(leaf, value)
+        if not sc:
+            return None, False
+        return sc, (sc in TOGGLES or sc == ANISO)
+
+    def write(self, values):
+        data = self._g().patched(values)
+        tmp = self.path + ".autofps.tmp"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, self.path)
+
+
+OPTION_RANK = ["none", "off", "disabled", "verylow", "lowest", "low", "quarter", "half", "performance",
+               "med", "mid", "medium", "normal", "balanced", "default", "high", "full", "quality",
+               "veryhigh", "ultra", "epic", "max", "maximum", "cinematic"]
+
+
+class UnityPrefsData(_Fmt):
+    """Нові Unity: PlayerPrefs.data — JSON {"ints":{}, "floats":{}, "bools":{}, "strings":{}}.
+    Багато ігор дублюють вибір у меню прапорцями: Vegetation=0 і Vegetation_low=true —
+    шкалу беремо з цих прапорців, а при записі оновлюємо і число, і прапорці."""
+    name = "unityprefs"
+
+    def _load(self):
+        text, self.enc = _read_text(self.path)
+        d = json.loads(text)
+        if not isinstance(d, dict) or not isinstance(d.get("ints"), dict):
+            raise ValueError("не PlayerPrefs.data")
+        return text, d
+
+    def _options(self, d, key):
+        opts = [k[len(key) + 1:] for k in d.get("bools", {}) if k.startswith(key + "_")]
+        ranked = [o for o in opts if _norm(o) in OPTION_RANK]
+        if len(ranked) < 2 or len(ranked) != len(opts):
+            return None
+        return sorted(ranked, key=lambda o: OPTION_RANK.index(_norm(o)))
+
+    def items(self):
+        _t, d = self._load()
+        out = [(f"ints/{k}", str(v)) for k, v in d["ints"].items() if isinstance(v, int)]
+        out += [(f"bools/{k}", "true" if v else "false") for k, v in d.get("bools", {}).items()
+                if isinstance(v, bool) and not self._is_option_flag(d, k)]
+        return out
+
+    def _is_option_flag(self, d, k):
+        base = k.rsplit("_", 1)[0]
+        return "_" in k and base in d["ints"] and self._options(d, base) is not None
+
+    def scale(self, key, value):
+        sec, _, k = key.partition("/")
+        _t, d = self._load()
+        if sec == "ints":
+            opts = self._options(d, k)
+            if opts:
+                chosen = [o for o in opts if d["bools"].get(f"{k}_{o}")]
+                cur = int(d["ints"][k])
+                # число має збігатися з позицією вибраного прапорця — інакше шкала невідома
+                if chosen and opts.index(chosen[0]) == cur and not _excluded(_name(k)) and tier_of(k):
+                    return [str(i) for i in range(len(opts))], False
+                return None, False
+        sc = scale_of(k, value)
+        if not sc:
+            return None, False
+        return sc, sc in TOGGLES
+
+    def write(self, values):
+        text, d = self._load()
+        for key, new in values.items():
+            sec, _, k = key.partition("/")
+            if sec == "ints":
+                text = self._set(text, "ints", k, str(int(float(new))))
+                opts = self._options(d, k)
+                if opts and int(float(new)) < len(opts):
+                    for i, o in enumerate(opts):
+                        text = self._set(text, "bools", f"{k}_{o}", "true" if i == int(float(new)) else "false")
+            elif sec == "bools":
+                text = self._set(text, "bools", k, "true" if _norm(new) in ("true", "1", "on") else "false")
+        json.loads(text)                     # перевірка, що JSON цілий
+        _save(self.path, text, self.enc)
+
+    @staticmethod
+    def _set(text, section, key, value):
+        m = re.search(r'"%s"\s*:\s*\{' % section, text)
+        if not m:
+            return text
+        depth, i = 1, m.end()
+        while i < len(text) and depth:
+            depth += {"{": 1, "}": -1}.get(text[i], 0)
+            i += 1
+        block = text[m.end():i]
+        pat = re.compile(r'("%s"\s*:\s*)(-?\d+(?:\.\d+)?|true|false|True|False)' % re.escape(key))
+        nb, n = pat.subn(lambda mm: mm.group(1) + value, block, count=1)
+        return text[:m.end()] + nb + text[i:] if n else text
+
+
+FORMATS = {c.name: c for c in (FromSoftXml, XmlText, XmlAttr, KvLine, IniFmt, JsonFmt, FuncFmt, WinReg,
+                               GvasFmt, UnityPrefsData)}
 
 # ---------------------------------------------------------------- пошук файлу налаштувань
 
@@ -566,10 +701,12 @@ SKIP_DIRS = ("cache", "shader", "logs", "log", "crash", "temp", "tmp", "webcache
              "music", "videos", "pictures", "my music", "my videos", "my pictures", "downloads",
              "fontconfig", "windows", "sentry", "telemetry", "analytics", "backup", "browser")
 NAME_HINT = re.compile(r"(setting|config|option|pref|profile|video|graphic|render|display|user|system)", re.I)
+# сейви з прогресом гри (великі) — не чіпаємо: лише файли налаштувань
+SAV_MAX = 256 * 1024
 EXT_FORMATS = {
     ".xml": ("fromsoft", "xmltext", "xmlattr"), ".lsx": ("xmlattr",), ".json": ("json",),
     ".ini": ("ini", "json", "kvline"), ".cfg": ("kvline", "ini", "json"), ".txt": ("kvline", "ini", "json"),
-    ".local": ("kvline",), ".scr": ("func",), ".settings": ("ini", "json"), ".config": ("xmlattr", "ini", "json"),
+    ".local": ("kvline",), ".scr": ("func",), ".sav": ("gvas",), ".data": ("unityprefs", "json"), ".settings": ("ini", "json"), ".config": ("xmlattr", "ini", "json"),
     "": ("kvline", "ini", "json", "xmlattr"),
 }
 MAX_SIZE = 512 * 1024
@@ -593,12 +730,13 @@ def _candidates(compat, install):
                 ext = os.path.splitext(fn)[1].lower()
                 if ext not in EXT_FORMATS or fn.endswith((".autofps.bak", ".autofps.tmp")):
                     continue
-                if ext in ("", ".txt", ".cfg", ".json", ".config", ".ini") and not NAME_HINT.search(fn) \
+                if ext in ("", ".txt", ".cfg", ".json", ".config", ".ini", ".sav", ".data") \
+                        and not NAME_HINT.search(fn) \
                         and fn != "PROFSAVE_profile":
                     continue
                 p = os.path.join(cur, fn)
                 try:
-                    if os.path.getsize(p) <= MAX_SIZE:
+                    if os.path.getsize(p) <= (SAV_MAX if ext == ".sav" else MAX_SIZE):
                         yield p, ext
                 except OSError:
                     pass
