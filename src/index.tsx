@@ -80,6 +80,7 @@ type Tune = {
 };
 
 type Status = {
+  profile?: { appid: number | null; name: string; enabled: boolean; running: boolean; keys: string[] };
   mango_cap?: number;
   lsfg_launcher: string;
   fg_launchers?: { lsfg?: string; mako?: string };
@@ -170,7 +171,9 @@ function TabBar({ tab, setTab }: { tab: string; setTab: (t: string) => void }) {
   );
 }
 
-const getStatus = callable<[], Status>("get_status");
+const getStatus = callable<[appid?: number | null], Status>("get_status");
+const setGameProfile = callable<[appid: number, enabled: boolean], boolean>("set_game_profile");
+const setGameSetting = callable<[appid: number, key: string, value: unknown], boolean>("set_game_setting");
 const setSetting = callable<[key: string, value: unknown], boolean>("set_setting");
 const reprobe = callable<[], boolean>("reprobe");
 const forgetAll = callable<[], boolean>("forget_all");
@@ -891,7 +894,7 @@ function Content() {
     let alive = true;
     const poll = async () => {
       try {
-        const s = await getStatus();
+        const s = await getStatus(runningAppId() ?? lastSelected);
         lsfgLauncher = s.lsfg_launcher || "";
         fgExternal = s.settings.fg_mode === "external";
         if (alive) setSt(s);
@@ -918,10 +921,35 @@ function Content() {
   }
 
   const s = st.settings;
+  const prof = st.profile;
+  const perGame = !!(prof?.enabled && prof.appid);
+  // окремі налаштування гри увімкнені — ключі профілю пишемо в гру, решту — загально
   const update = async (key: keyof Settings, value: unknown) => {
-    await setSetting(key, value);
-    setSt({ ...st, settings: { ...s, [key]: value } as Settings });
+    if (perGame && prof!.keys.includes(key as string)) await setGameSetting(prof!.appid!, key as string, value);
+    else await setSetting(key, value);
+    setSt((cur) => (cur ? { ...cur, settings: { ...cur.settings, [key]: value } as Settings } : cur));
   };
+  const profileRow =
+    prof?.appid && (tab === "fps" || tab === "gfx" || tab === "more") ? (
+      <PanelSection>
+        <PanelSectionRow>
+          <ToggleField
+            label={`Окремо для гри${prof.name ? `: ${prof.name}` : ""}`}
+            description={
+              (perGame
+                ? "Ліміт FPS, живлення, частота GPU і ціль графіки — лише для цієї гри"
+                : "Вимкнено — гра йде за загальними налаштуваннями") +
+              (prof.running ? " (гра запущена)" : " (гра вибрана у вкладці «Гра»)")
+            }
+            checked={perGame}
+            onChange={async (v: boolean) => {
+              await setGameProfile(prof.appid!, v);
+              setSt(await getStatus(prof.appid));
+            }}
+          />
+        </PanelSectionRow>
+      </PanelSection>
+    ) : null;
 
   const modeOptions = [
     ...(st.device.vrr ? [{ data: "vrr", label: `VRR до ${st.device.max_hz} (без ліміту)` }] : []),
@@ -948,6 +976,7 @@ function Content() {
       <PanelSection>
         <TabBar tab={tab} setTab={setTab} />
       </PanelSection>
+      {profileRow}
       {tab === "game" && (
         <>
       <PanelSection title="Стан">

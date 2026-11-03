@@ -910,7 +910,7 @@ def find_compat(appid):
 
 
 def run(appid, args, device=None, log=print):
-    settings = C.load_json(C.SETTINGS_FILE, {})
+    settings = C.settings_for(appid)          # загальні + окремі налаштування цієї гри
     if not settings.get("autotune", True) or appid in ("", "0"):
         return
     if os.path.isfile(os.path.join(C.PROFILES_DIR, f"{appid}.json")):

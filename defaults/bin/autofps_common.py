@@ -12,12 +12,17 @@ GAMES_FILE = os.path.join(CFG_DIR, "games.json")
 TUNE_FILE = os.path.join(CFG_DIR, "tune.json")
 LSFG_CONF = os.path.join(CFG_DIR, "lsfg-vk.toml")
 PROFILES_DIR = os.path.join(CFG_DIR, "profiles")
+GAME_SETTINGS_FILE = os.path.join(CFG_DIR, "game_settings.json")
+
+# Налаштування, які можна задати окремо для гри (як «профіль гри» у швидкому меню SteamOS)
+PER_GAME_KEYS = ("bat_mode", "ac_mode", "quality_target", "auto_tdp", "auto_gpu_clock",
+                 "mango_limiter", "respect_manual_graphics")
 
 
 def set_home(home):
     """Бекенд Decky знає домашню теку користувача явно — перевизначаємо шляхи."""
     global HOME, CFG_DIR, CACHE_DIR, LOG_DIR, CURRENT_FILE, SETTINGS_FILE
-    global GAMES_FILE, TUNE_FILE, LSFG_CONF, PROFILES_DIR
+    global GAMES_FILE, TUNE_FILE, LSFG_CONF, PROFILES_DIR, GAME_SETTINGS_FILE
     HOME = home
     CFG_DIR = os.path.join(HOME, ".config", "autofps")
     CACHE_DIR = os.path.join(HOME, ".cache", "autofps")
@@ -28,6 +33,24 @@ def set_home(home):
     TUNE_FILE = os.path.join(CFG_DIR, "tune.json")
     LSFG_CONF = os.path.join(CFG_DIR, "lsfg-vk.toml")
     PROFILES_DIR = os.path.join(CFG_DIR, "profiles")
+    GAME_SETTINGS_FILE = os.path.join(CFG_DIR, "game_settings.json")
+
+
+def game_profile(appid):
+    """Окремі налаштування гри {ключ: значення} або None (гра йде за загальними)."""
+    if not appid:
+        return None
+    d = load_json(GAME_SETTINGS_FILE, {}).get(str(appid))
+    if not isinstance(d, dict) or not d.get("enabled"):
+        return None
+    return {k: v for k, v in d.items() if k in PER_GAME_KEYS}
+
+
+def settings_for(appid, base=None):
+    """Загальні налаштування + окремі налаштування гри поверх них."""
+    s = dict(load_json(SETTINGS_FILE, {}) if base is None else base)
+    s.update(game_profile(appid) or {})
+    return s
 
 
 def read_text(path):

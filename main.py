@@ -524,12 +524,30 @@ class LogReader:
 
 # ---------------------------------------------------------------- plugin
 
+class LayeredSettings(dict):
+    """Загальні налаштування (їх і зберігаємо у settings.json) + окремі налаштування поточної
+    гри поверх них: читання через [] / get бачить значення гри, запис і json — лише загальні."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.overlay = {}
+
+    def __getitem__(self, k):
+        return self.overlay[k] if k in self.overlay else super().__getitem__(k)
+
+    def get(self, k, d=None):
+        return self.overlay[k] if k in self.overlay else super().get(k, d)
+
+    def effective(self, overlay=None):
+        return {**dict(self), **(self.overlay if overlay is None else overlay)}
+
+
 class Plugin:
     async def _main(self):
         os.makedirs(LOG_DIR, exist_ok=True)
         os.makedirs(PROFILES_DIR, exist_ok=True)
         self.device = detect_device()
-        self.settings = {**DEFAULT_SETTINGS, **_load_json(SETTINGS_FILE, {})}
+        self.settings = LayeredSettings({**DEFAULT_SETTINGS, **_load_json(SETTINGS_FILE, {})})
         # генерацією кадрів тепер керує окремий плагін Decky LSFG-VK (одноразовий перехід)
         if not self.settings.get("fg_external_migrated"):
             self.settings.update(fg_mode="external", fg_external_migrated=True)
@@ -608,6 +626,8 @@ class Plugin:
     # ---------------- state
 
     def _reset_game_state(self):
+        if isinstance(getattr(self, "settings", None), LayeredSettings):
+            self.settings.overlay = {}
         self.appid = None
         self.pid = None
         self.game_started = 0.0
@@ -1804,6 +1824,9 @@ class Plugin:
             self.phase, self.phase_t = "warmup", now
             self.last_appid = self.appid
             self.cur_info = cur
+            self.settings.overlay = C.game_profile(self.appid) or {}
+            if self.settings.overlay:
+                decky.logger.info(f"окремі налаштування гри: {self.settings.overlay}")
             self.sfg = int(cur.get("fg", 0) or 0)
             if self.settings["fg_mode"] == "external":
                 self.sfg = their_multiplier() if cur.get("ext_fg") else 0
@@ -2041,11 +2064,20 @@ class Plugin:
 
     # ---------------- API for frontend
 
-    async def get_status(self):
+    async def get_status(self, appid=None):
         last = [s[1] for s in self.samples[-20:]]
+        prof_app = self._profile_app(appid)
+        prof = C.game_profile(prof_app) if prof_app else None
+        if self.appid and prof_app == str(self.appid):
+            prof = self.settings.overlay or None
+        eff = self.settings.effective(prof or {})
         return {
             "device": self.device,
-            "settings": self.settings,
+            "settings": eff,
+            "profile": {"appid": int(prof_app) if prof_app else None,
+                        "name": self._game_name(prof_app) if prof_app else "",
+                        "enabled": bool(prof), "running": bool(self.appid) and prof_app == str(self.appid),
+                        "keys": list(C.PER_GAME_KEYS)},
             "appid": self.appid,
             "phase": self.phase,
             "base": self.base,
@@ -2072,7 +2104,7 @@ class Plugin:
                               "clock": self.gpu_cur, "min": self.gc.min, "max": self.gc.max,
                               "error": self.gc.error}},
             "game_update": getattr(self, "game_update", None),
-            "graphics_target": C.quality_target(self.settings, self.device),
+            "graphics_target": C.quality_target(eff, self.device),
         }
 
     def _lsfg_cached(self):
@@ -2148,6 +2180,63 @@ class Plugin:
             return False
         self.settings[key] = value
         _save_json(SETTINGS_FILE, self.settings)
+        self._after_setting(key, value)
+        return True
+
+    # ---------------- окремі налаштування гри (як «профіль гри» у швидкому меню SteamOS)
+
+    def _game_name(self, appid):
+        cache = getattr(self, "_names", {})
+        if str(appid) not in cache and time.time() - getattr(self, "_names_t", 0) > 30:
+            self._names_t = time.time()
+            try:
+                cache = {a: g["name"] for a, g in self._installed_games().items()}
+            except Exception:  # noqa: BLE001
+                cache = {}
+            self._names = cache
+        return cache.get(str(appid), "")
+
+    def _profile_app(self, appid=None):
+        """Чиї налаштування показує меню: запущена гра, інакше вибрана в меню, інакше остання."""
+        a = self.appid or (str(appid) if appid else None) or self._last_app()
+        return str(a) if a and str(a) != "0" else None
+
+    def _game_settings_changed(self, appid):
+        if self.appid and str(self.appid) == str(appid):
+            before = dict(self.settings.overlay)
+            self.settings.overlay = C.game_profile(appid) or {}
+            for k in C.PER_GAME_KEYS:
+                if before.get(k, dict.get(self.settings, k)) != self.settings.get(k):
+                    self._after_setting(k, self.settings.get(k))
+
+    async def set_game_profile(self, appid, enabled):
+        """Увімкнути/вимкнути окремі налаштування гри. Увімкнення бере поточні загальні значення."""
+        if not appid or str(appid) == "0":
+            return False
+        a = str(appid)
+        gs = _load_json(C.GAME_SETTINGS_FILE, {})
+        e = gs.get(a) if isinstance(gs.get(a), dict) else {}
+        if enabled and not any(k in e for k in C.PER_GAME_KEYS):
+            e.update({k: dict.get(self.settings, k) for k in C.PER_GAME_KEYS})
+        e["enabled"] = bool(enabled)
+        gs[a] = e
+        _save_json(C.GAME_SETTINGS_FILE, gs)
+        self._game_settings_changed(a)
+        return True
+
+    async def set_game_setting(self, appid, key, value):
+        if key not in C.PER_GAME_KEYS or not appid or str(appid) == "0":
+            return False
+        a = str(appid)
+        gs = _load_json(C.GAME_SETTINGS_FILE, {})
+        e = gs.setdefault(a, {"enabled": True})
+        e[key] = value
+        _save_json(C.GAME_SETTINGS_FILE, gs)
+        self._game_settings_changed(a)
+        return True
+
+    def _after_setting(self, key, value):
+        """Що змінити одразу після зміни налаштування (загального чи окремого для гри)."""
         if key in ("fg_flow_scale", "fg_performance_mode"):
             write_lsfg(self.settings, max(2, self.mult))
         if key == "fg_mode":
@@ -2166,7 +2255,6 @@ class Plugin:
                         O.bridge_set_version(g["target"], self.settings)
                     except Exception as e:  # noqa: BLE001
                         decky.logger.warning(f"bridge version: {e}")
-        return True
 
     async def set_game_resolution(self, appid, res):
         """Вибрана в AutoFPS роздільність гри (Steam ставить її сам; тут — для підбору графіки)."""
