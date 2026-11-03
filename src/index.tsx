@@ -20,7 +20,7 @@ import {
   removeEventListener,
   toaster,
 } from "@decky/api";
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { FaTachometerAlt } from "react-icons/fa";
 import {
   addWrapper,
@@ -215,6 +215,53 @@ const PHASE: Record<string, string> = {
   manual: "вручну",
   disabled: "вимкнено",
 };
+
+// Ліміт FPS повзунком, як у швидкому меню SteamOS: крайнє ліве — «Авто» (найвищий рівень,
+// що гра тримає), далі кожен FPS від 15 до частоти екрана, крайнє праве — «Без обмежень» (VRR).
+const FPS_MIN = 15;
+
+function FpsSlider({
+  label,
+  value,
+  maxHz,
+  vrr,
+  onCommit,
+}: {
+  label: string;
+  value: string;
+  maxHz: number;
+  vrr: boolean;
+  onCommit: (mode: string) => void;
+}) {
+  const span = maxHz - FPS_MIN + 1;
+  const last = vrr ? span + 1 : span;
+  const toPos = (m: string) =>
+    m === "auto" ? 0 : m === "vrr" ? last : /^\d+$/.test(m) ? Math.max(1, Math.min(span, Number(m) - FPS_MIN + 1)) : 0;
+  const toMode = (p: number) =>
+    p <= 0 ? "auto" : vrr && p >= last ? "vrr" : String(Math.min(maxHz, FPS_MIN + p - 1));
+  const [pos, setPos] = useState(toPos(value));
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => setPos(toPos(value)), [value, maxHz, vrr]);
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+  const mode = toMode(pos);
+  const text =
+    mode === "auto" ? "Авто — найвищий рівень, що гра тримає" : mode === "vrr" ? "Без обмежень (VRR)" : `${mode} FPS`;
+  return (
+    <SliderField
+      label={`${label}: ${text}`}
+      value={pos}
+      min={0}
+      max={last}
+      step={1}
+      onChange={(p: number) => {
+        setPos(p);
+        // повзунок тягнуть — зберігаємо, коли зупинився (інакше десятки сповіщень і перемикань ліміту)
+        if (timer.current) clearTimeout(timer.current);
+        timer.current = setTimeout(() => onCommit(toMode(p)), 450);
+      }}
+    />
+  );
+}
 
 function hhmm(t: number): string {
   const d = new Date(t * 1000);
@@ -881,7 +928,7 @@ function Content() {
     { data: "auto", label: "Авто (найвищий, що гра тримає)" },
     ...st.device.tiers.map((t) => ({ data: String(t), label: `${t} FPS` })),
   ];
-  const modeLabel = (m: string) => modeOptions.find((o) => o.data === m)?.label ?? m;
+  const modeLabel = (m: string) => modeOptions.find((o) => o.data === m)?.label ?? (/^\d+$/.test(m) ? `${m} FPS` : m);
   const qualityOptions = [
     { data: "auto", label: `Авто — з ліміту від батареї (${st.graphics_target ?? st.device.quality_target})` },
     ...Array.from(new Set([30, 40, 45, ...st.device.tiers]))
@@ -995,19 +1042,21 @@ function Content() {
           />
         </PanelSectionRow>
         <PanelSectionRow>
-          <DropdownItem
+          <FpsSlider
             label="🔋 Від батареї"
-            rgOptions={modeOptions}
-            selectedOption={!s.bat_mode || s.bat_mode === "same" ? s.mode : s.bat_mode}
-            onChange={(o: { data: string }) => update("bat_mode", o.data)}
+            value={!s.bat_mode || s.bat_mode === "same" ? s.mode : s.bat_mode}
+            maxHz={st.device.max_hz}
+            vrr={!!st.device.vrr}
+            onCommit={(m) => update("bat_mode", m)}
           />
         </PanelSectionRow>
         <PanelSectionRow>
-          <DropdownItem
+          <FpsSlider
             label="🔌 Від зарядки"
-            rgOptions={modeOptions}
-            selectedOption={!s.ac_mode || s.ac_mode === "same" ? s.mode : s.ac_mode}
-            onChange={(o: { data: string }) => update("ac_mode", o.data)}
+            value={!s.ac_mode || s.ac_mode === "same" ? s.mode : s.ac_mode}
+            maxHz={st.device.max_hz}
+            vrr={!!st.device.vrr}
+            onCommit={(m) => update("ac_mode", m)}
           />
         </PanelSectionRow>
         <PanelSectionRow>
