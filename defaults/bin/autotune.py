@@ -34,7 +34,7 @@ UE_KEYS = ["sg.ResolutionQuality", "sg.ViewDistanceQuality", "sg.AntiAliasingQua
 # GameUserSettings.ini (напр. [LotDKLocalSettings]). Пишемо лише ті, що є у файлі, і не вище
 # найбільшого значення, яке там колись стояло (максимум самої гри).
 UE_EXTRA_FOLLOW = {"MeshQuality": "ViewDistanceQuality",   # геометрія (LEGO: деталі цеглинок) — як LOD
-                   "MaterialQuality": "ShadingQuality",
+                   "MaterialQuality": "PostProcessQuality",  # складність шейдерів — рано, але не нижче 1
                    "DistanceFieldAmbientOcclusion": "GlobalIlluminationQuality"}
 UE_EXTRA_KEYS = list(UE_EXTRA_FOLLOW) + ["Anisotropy"]
 UE_NOT_GRAPHICS = ("upscal", "dlss", "fsr", "xess", "tsr", "audio", "sound", "population",
@@ -53,7 +53,8 @@ def ue_follow(name):
              (("view", "distance", "lod", "landscape", "terrain", "mesh", "object", "detail",
                "geometry", "environment"), "ViewDistanceQuality"),
              (("texture", "streaming"), "TextureQuality"),
-             (("material", "shading", "shader"), "ShadingQuality")]
+             (("material",), "PostProcessQuality"),
+             (("shading", "shader"), "ShadingQuality")]
     for words, grp in table:
         if any(w in n for w in words):
             return grp
@@ -73,10 +74,10 @@ UE_DELTAS = [
     {"ShadowQuality": 2},
     {"PostProcessQuality": 2, "EffectsQuality": 2},
     {"GlobalIlluminationQuality": 2, "ReflectionQuality": 2, "FoliageQuality": 2},
-    {"ShadowQuality": 1, "ViewDistanceQuality": 2},
+    {"ShadowQuality": 1, "ViewDistanceQuality": 2, "ShadingQuality": 2},
     {"GlobalIlluminationQuality": 1, "ReflectionQuality": 1, "PostProcessQuality": 1},
     {"ResolutionQuality": 85, "EffectsQuality": 1, "FoliageQuality": 1},
-    {"ShadowQuality": 0, "AntiAliasingQuality": 2, "ShadingQuality": 2},
+    {"ShadowQuality": 0, "AntiAliasingQuality": 2},
     {"ResolutionQuality": 75, "GlobalIlluminationQuality": 0, "ReflectionQuality": 0,
      "PostProcessQuality": 0},
     {"ResolutionQuality": 67, "ViewDistanceQuality": 1, "FoliageQuality": 0,
@@ -311,6 +312,8 @@ class UnrealAdapter:
                     want = 16 if i <= n * 0.3 else 8 if i <= n * 0.65 else 4
                 else:
                     want = int(st[f"sg.{UE_EXTRA_FOLLOW.get(name) or ue_follow(name)}"])
+                    if "material" in name.lower():
+                        want = max(1, want)        # «низькі» матеріали — пласка картинка
                 st[k] = str(int(min(want, cap)))
         return steps
 
@@ -596,8 +599,21 @@ class UnityAdapter:
 RE_KEYS = [  # порядок: що дає найбільше FPS за найменшу втрату картинки
     "AppRayTraceOnOff", "AppStrandHair", "AppShadowQuality", "AppVolumeLightQuality",
     "AppAmbientOcclusion", "AppSSRefrection", "AppContactShadow", "AppSSSSSetting",
-    "AppParticleLighting", "AppMeshQuality", "AppTessellation", "AppLensFrare", "AppBloom",
+    "AppParticleLighting", "AppSpecificEffectQuality", "AppSpecificLightQuality", "AppRainQuality",
+    "AppMeshQuality", "AppTessellation", "AppLensFrare", "AppBloom", "AppTextureFilterQuality",
 ]
+# Свідомо не чіпаємо (самоперевірка settings_audit.py їх не позначає):
+NOT_TUNED = {
+    "AppImageQuality": "роздільність рендеру — нею керує режим FSR (міст FSR 4)",
+    "AppAntiAliasQuality": "згладжування замінює апскейлер FSR",
+    "AppShadowCache": "кеш тіней лише економить GPU — лишаємо увімкненим",
+    "AppRagdollQuality": "фізика на процесорі, не графіка",
+    "AppFragileQuality": "руйнування на процесорі, не графіка",
+    "AppRayTraceResolution": "трасування вимкнено зовсім",
+    "QualitySetting": "пресет — плагін ставить «власні»",
+    "UpscalerQuality": "режим апскейлера — не якість графіки",
+    "PopulationQuality": "натовп — навантаження на процесор",
+}
 # ---- Портативна політика: те, чого не видно на 7–8" екрані, але що з'їдає GPU/відеопам'ять,
 # вимикаємо одразу (як «оптимальні» пресети NVIDIA), а не чекаємо, поки FPS впаде.
 HANDHELDS = {"deck_lcd", "deck_oled", "legion_go_s"}

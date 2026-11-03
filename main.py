@@ -612,6 +612,7 @@ class Plugin:
         self.calib = None
         self.tm_raw, self.tm_windows, self.tm_t, self.tm_saved_n = [], [], 0.0, 0
         self.tm_forecast = None
+        self.tm_pending = None
         self.menu_t, self.menu_mtime, self.menu_changed = 0.0, None, False
         self.gpu_state = "off"    # off | ref | descending | settled
         self.gpu_cur = None       # МГц (None — авто)
@@ -1214,9 +1215,10 @@ class Plugin:
     # сесіях заміру не було зовсім і підбір стояв. Тепер: усю сесію збираємо 10-секундні вікна,
     # оцінюємо «скільки гра тягне» і кожні 30 с зберігаємо в tune.json (вихід з гри нічого не губить).
 
-    TM_SKIP_S = 90          # завантаження, логотипи, меню, перша компіляція шейдерів
-    TM_MIN_WINDOWS = 6      # ≥ 60 с чистої гри до першого запису
-    TM_FORECAST_WINDOWS = 9 # ≥ 90 с — лише тоді радимо перезапуск
+    TM_SKIP_S = 45          # логотипи; завантаження й меню далі відсіюються фільтром вікон
+    TM_MIN_WINDOWS = 4      # ≥ 40 с чистої гри до першого запису
+    TM_EXIT_WINDOWS = 3     # вихід з гри раніше — зберігаємо, якщо є хоч 30 с чистої гри
+    TM_FORECAST_WINDOWS = 6 # ≥ 60 с — лише тоді радимо перезапуск
 
     def _tm_cap(self):
         """Скільки справжніх FPS зараз дозволяє ліміт (None — без ліміту)."""
@@ -1252,6 +1254,8 @@ class Plugin:
         capped = bool(cap and med >= cap * 0.95)
         if not capped and gpu is not None and gpu < 80:
             return                                   # меню / завантаження / процесор
+        if cap and med > cap * 1.15:
+            return                                   # вище ліміту — меню без обмеження FPS
         if p10 < med * 0.5:
             return                                   # ривки: шейдери, підвантаження
         if capped:
@@ -1262,9 +1266,13 @@ class Plugin:
         self.tm_windows.append((round(med, 1), round(est, 1)))
         del self.tm_windows[:-60]
         # провали відносно звичного рівня цієї сесії (перехід між рівнями, заставка) — геть
-        typical = percentile([w[0] for w in self.tm_windows], 0.5)
+        # орієнтир — верхня чверть вікон: довгі провали (завантаження рівня, 3–10 FPS
+        # десятки секунд) не стають «нормою», навіть якщо на початку їх половина
+        typical = percentile([w[0] for w in self.tm_windows], 0.75)
         good = [w[1] for w in self.tm_windows if 0.6 * typical <= w[0] <= 1.6 * typical]
         n = len(good)
+        if n >= self.TM_EXIT_WINDOWS:
+            self.tm_pending = (percentile(good, 0.5), n)
         if n < self.TM_MIN_WINDOWS or (n - self.tm_saved_n < 3 and self.tm_saved_n):
             return
         value = percentile(good, 0.5)
@@ -1489,6 +1497,11 @@ class Plugin:
             if self.appid is not None:
                 self._opti_selfcheck(now)
                 self._report_crash()
+                if self.tuning and self.tm_pending and self.tm_saved_n == 0:
+                    # коротка сесія: замір ще не записаний — зберігаємо, що встигли
+                    self._record_tune(self.tm_pending[0])
+                    decky.logger.info(f"замір графіки при виході: {self.tm_pending[0]:.1f} FPS "
+                                      f"({self.tm_pending[1]} вікон)")
                 self._restore_display()
                 self._tdp_restore()
                 self._gpu_restore()
@@ -2168,6 +2181,24 @@ class Plugin:
         for e in getattr(self, "events", []):
             add(f"  {time.strftime('%H:%M:%S', time.localtime(e['t']))} {e['title']} — {e['body']}")
         add("current.json: " + (_read(CURRENT_FILE) or "(немає)"))
+
+        sec("Графіка: самоперевірка (остання гра)")
+        try:
+            import settings_audit as SA
+            aid = str(getattr(self, "last_appid", None) or self.appid or "")
+            te = self._tune_entry(aid) if aid else None
+            if te and te.get("install"):
+                compat = os.path.join(os.path.dirname(os.path.dirname(te["install"])), "compatdata", aid)
+                if not os.path.isdir(compat):
+                    compat = os.path.join(HOME, ".local/share/Steam/steamapps/compatdata", aid)
+                r = SA.audit(aid, te["install"], compat, dict(self.device))
+                add({k: r.get(k) for k in ("engine", "config", "sav", "note", "max_at_7", "unmanaged")})
+                for k, v in (r.get("steps") or {}).items():
+                    add(f"  {k}: {' / '.join(v)}  (сходинки 1/4/7/10)")
+            else:
+                add("немає даних підбору для останньої гри")
+        except Exception as e:  # noqa: BLE001
+            add(f"самоперевірка: {e!r}")
 
         sec("Ігри")
         add({"apps.json": _load_json(APPS_FILE, {}), "games.json": self.games})

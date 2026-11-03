@@ -208,6 +208,11 @@ def _read_text(path):
         return raw.decode("utf-16", errors="replace"), "utf-16"
     if raw[:3] == b"\xef\xbb\xbf":
         return raw[3:].decode("utf-8", errors="replace"), "utf-8-sig"
+    # UTF-16 без BOM (Sekiro GraphicsConfig.xml): кожен другий байт — нуль
+    if len(raw) >= 8 and raw[1::2].count(0) > len(raw) // 2 * 0.9:
+        return raw.decode("utf-16-le", errors="replace"), "utf-16-le"
+    if len(raw) >= 8 and raw[0::2].count(0) > len(raw) // 2 * 0.9:
+        return raw.decode("utf-16-be", errors="replace"), "utf-16-be"
     try:
         return raw.decode("utf-8"), "utf-8"
     except UnicodeDecodeError:
