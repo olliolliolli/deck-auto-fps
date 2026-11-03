@@ -47,6 +47,17 @@ if [ "$MODE" != "safe" ] && [ -f "$DIR/profiles_db.py" ]; then
   timeout 8 python3 "$DIR/profiles_db.py" fetch "$APPID" >>"$LOG" 2>&1 || true
 fi
 
+# --- чи активна генерація кадрів окремого плагіна (Decky LSFG-VK / MAKO) — потрібно ще ДО
+#     підбору графіки: ціль графіки = ліміт ÷ множник саме цього запуску
+AUTOFPS_EXT_FG=0
+if [ "$(cat "$CFG/fg_mode" 2>/dev/null)" = "external" ]; then
+  if [ -z "$DISABLE_LSFGVK" ] && { [ -n "$LSFGVK_PROFILE$LSFGVK_CONFIG$LSFG_PROCESS$LSFG_CONFIG" ] || [ "$ENABLE_LSFG" = "1" ]; }; then
+    AUTOFPS_EXT_FG=1
+  fi
+  if env | grep -qiE '^MAKO_|^[A-Z_]*LAYER[A-Z_]*=.*mako'; then AUTOFPS_EXT_FG=1; fi
+fi
+export AUTOFPS_EXT_FG
+
 # --- автопідбір графіки (не в безпечному режимі: зміни конфігів теж можуть бути причиною)
 rm -f "$CACHE/tuning_now" 2>/dev/null
 if [ "$MODE" != "safe" ] && [ -f "$DIR/autotune.py" ]; then

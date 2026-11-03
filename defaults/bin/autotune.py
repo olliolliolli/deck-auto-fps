@@ -1024,6 +1024,11 @@ def run(appid, args, device=None, log=print):
         log(f"{appid}: ручні налаштування користувача, не чіпаю")
         return
 
+    if "AUTOFPS_EXT_FG" in os.environ:
+        # множник саме цього запуску, а не з минулої сесії (інакше ціль була б хибна:
+        # напр. 47 ÷ 2 = 30 замість 47, коли Lossless уже вимкнено)
+        settings = dict(settings, last_fg_mult=C.fg_multiplier_now(settings))
+        log(f"генерація кадрів при запуску: ×{settings['last_fg_mult']}")
     target = C.quality_target(settings, device)
     allow_low = bool(settings.get("lowres_for_quality", True))
     if not allow_low and entry.get("track") == "lowres":

@@ -1183,7 +1183,12 @@ class Plugin:
             import autotune as AT
             cur = self._menu_values(e)
             applied = {k: v for k, v in e["applied_values"].items() if not k.startswith("x.")}
-            if cur is None or not AT.changed_by_user(applied, cur):
+            if cur is None:
+                return
+            diff = [k for k, v in applied.items() if k in cur and str(cur[k]).strip() != str(v).strip()]
+            # гра сама іноді поправляє одне значення (LEGO Batman: пост-обробка 2 → 3) —
+            # ручна зміна в меню — це щонайменше два налаштування
+            if len(diff) < 2:
                 return
         except Exception as ex:  # noqa: BLE001
             decky.logger.warning(f"перевірка меню гри: {ex}")

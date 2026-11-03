@@ -119,6 +119,24 @@ def detect_device():
             "quality_target": 40, "start_level": 5}
 
 
+def fg_multiplier_now(settings):
+    """Множник генерації кадрів, з яким запускається гра ЗАРАЗ (окремий плагін Decky LSFG-VK
+    або MAKO). Обгортка запуску передає AUTOFPS_EXT_FG=1, якщо їхній шар активний."""
+    if os.environ.get("AUTOFPS_EXT_FG") != "1":
+        return 1
+    if settings.get("fg_tool") == "mako":
+        return 2
+    import re
+    text = read_text(os.path.join(HOME, ".config", "lsfg-vk", "conf.toml"))
+    cur = re.search(r'^\s*current_profile\s*=\s*"([^"]+)"', text, re.M)
+    for b in re.split(r"^\s*\[\[(?:game|profile)\]\]\s*$", text, flags=re.M)[1:]:
+        name = re.search(r'^\s*(?:exe|name)\s*=\s*"([^"]+)"', b, re.M)
+        mult = re.search(r"^\s*multiplier\s*=\s*(\d+)", b, re.M)
+        if mult and (not cur or (name and name.group(1) == cur.group(1))):
+            return max(1, int(mult.group(1)))
+    return 2
+
+
 def quality_target(settings, device):
     """Під скільки справжніх FPS гри підбирати графіку.
     auto — з ліміту від батареї: ліміт на екрані ÷ множник генерації кадрів (не менше 30);
