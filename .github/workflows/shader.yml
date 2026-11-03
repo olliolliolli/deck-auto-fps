@@ -5,7 +5,7 @@ name: shader (FSR2 bridge sanitize)
 # плагіна не залежала від DXC.
 on:
   push:
-    paths: ["native/fsr2bridge/sanitize.hlsl", ".github/workflows/shader.yml"]
+    paths: ["native/fsr2bridge/*.hlsl", ".github/workflows/shader.yml"]
   workflow_dispatch:
 
 permissions:
@@ -30,12 +30,12 @@ jobs:
           export LD_LIBRARY_PATH=$D/lib:$LD_LIBRARY_PATH
           $D/bin/dxc -T cs_6_0 -E main -O3 -Fh sanitize_cs.h -Vn g_sanitize_cs native/fsr2bridge/sanitize.hlsl
           $D/bin/dxc -T cs_6_0 -E main -O3 -Fo sanitize.cso native/fsr2bridge/sanitize.hlsl
-          $D/bin/dxc -dumpbin sanitize.cso | head -80
-          ls -la sanitize_cs.h sanitize.cso
+          $D/bin/dxc -T cs_6_0 -E main -O3 -Fh repair_cs.h -Vn g_repair_cs native/fsr2bridge/repair.hlsl
+          ls -la sanitize_cs.h sanitize.cso repair_cs.h
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view fsr2bridge-dev >/dev/null 2>&1 || \
             gh release create fsr2bridge-dev --prerelease --title "FSR2 bridge (dev)" --notes "dev"
-          gh release upload fsr2bridge-dev sanitize_cs.h --clobber
+          gh release upload fsr2bridge-dev sanitize_cs.h repair_cs.h --clobber
