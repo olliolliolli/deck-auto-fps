@@ -150,7 +150,10 @@ def main():
             if r.get("config"):
                 print(f"   файл: {r['config'].split('steamuser/')[-1].split('common/')[-1]}")
             if r.get("sav"):
-                print(f"   + сейв: {os.path.basename(r['sav'])}")
+                import gvas
+                vals = {k: v for k, v in gvas.load(r["sav"]).items()
+                        if G._norm(G.leaf_name(k)) in G.UE_GROUPS or G._norm(G.leaf_name(k)) + "quality" in G.UE_GROUPS}
+                print(f"   + сейв: {os.path.basename(r['sav'])} — синхронізується: {vals}")
             if r.get("note"):
                 print(f"   {r['note']}")
             if r.get("steps"):
