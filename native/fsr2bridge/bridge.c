@@ -629,7 +629,7 @@ static struct {
     int jitter_src;      /* 0 — з констант FSR 2 [10,11] */
     int sanitize;        /* 1 — очищати колір/глибину/вектори від NaN/Inf перед FSR 4 */
     int exposure;        /* 0 — автоекспозиція FFX, 1 — експозиція з FSR 2 гри (1x1) */
-    int repair;          /* 1 — ремонт виходу FSR 4 (NaN/чорне → збільшений вхід), 2 — лише рахувати, 0 — ні */
+    int repair;          /* виходу FSR 4: біт 1 — NaN/чорне → збільшений вхід, біт 2 — обрізати «світлячки»; 0 — лише рахувати, -1 — вимкнено */
     int native_rcas;     /* 1 — виконати рідний RCAS гри (його допоміжні виходи), потім FSR 4 поверх */
 } g_cfg = {1, FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_AUTO_EXPOSURE |
               FFX_UPSCALE_ENABLE_DEPTH_INVERTED | FFX_UPSCALE_ENABLE_DEPTH_INFINITE,
@@ -1022,9 +1022,9 @@ static void write_status(const char *state)
     if (!f) return;
     fprintf(f, "{\"state\":\"%s\",\"version\":\"%s\",\"bridged\":%ld,\"fallback\":%ld,\"known_shaders\":%ld,\"uptime_s\":%lu,"
                "\"sanitize\":%d,\"bad_color\":%u,\"bad_depth\":%u,\"bad_mv\":%u,\"skip_fail\":%ld,"
-               "\"out_nan\":%u,\"out_black\":%u,\"checked_frames\":%u}\n",
+               "\"out_nan\":%u,\"out_black\":%u,\"checked_frames\":%u,\"out_bright\":%u}\n",
             state, g_ffx_version, g_bridged, g_fallback, g_known_psos, (unsigned long)((GetTickCount() - g_t0) / 1000),
-            g_san_state(), g_san_tot(0), g_san_tot(1), g_san_tot(2), g_skip_fail, g_san_tot(4), g_san_tot(5), g_san_tot(6));
+            g_san_state(), g_san_tot(0), g_san_tot(1), g_san_tot(2), g_skip_fail, g_san_tot(4), g_san_tot(5), g_san_tot(6), g_san_tot(7));
     fclose(f);
 }
 
@@ -1097,13 +1097,13 @@ static void san_log_counters(void)
     for (int i = 0; i < 8; i++) g_san.tot[i] = v[i] - g_san.base[i];
     DWORD t = GetTickCount();
     int fresh = 0;
-    for (int i = 0; i < 6; i++) if (i != 3 && g_san.tot[i] != g_san.logged[i]) fresh = 1;
+    for (int i = 0; i < 8; i++) if (i != 3 && i != 6 && g_san.tot[i] != g_san.logged[i]) fresh = 1;
     if ((fresh && t - g_san.last_log > 3000) || t - g_san.last_sum > 30000) {
-        LOG("перевірка кадрів: вхід NaN/Inf колір +%u, глибина +%u, вектори +%u | вихід FSR 4: NaN +%u, чорні +%u "
-            "(замінено на збільшений кадр) | усього %u/%u/%u, вихід %u/%u; кадрів %u/%u",
+        LOG("перевірка кадрів: вхід NaN/Inf колір +%u, глибина +%u, вектори +%u | вихід FSR 4: NaN +%u, темні +%u, "
+            "світлячки +%u | усього вихід %u/%u/%u; кадрів %u/%u",
             g_san.tot[0] - g_san.logged[0], g_san.tot[1] - g_san.logged[1], g_san.tot[2] - g_san.logged[2],
-            g_san.tot[4] - g_san.logged[4], g_san.tot[5] - g_san.logged[5],
-            g_san.tot[0], g_san.tot[1], g_san.tot[2], g_san.tot[4], g_san.tot[5], g_san.tot[3], g_san.tot[6]);
+            g_san.tot[4] - g_san.logged[4], g_san.tot[5] - g_san.logged[5], g_san.tot[7] - g_san.logged[7],
+            g_san.tot[4], g_san.tot[5], g_san.tot[7], g_san.tot[3], g_san.tot[6]);
         memcpy(g_san.logged, g_san.tot, sizeof(g_san.logged));
         g_san.last_log = g_san.last_sum = t;
     }
@@ -1311,7 +1311,7 @@ static int san_run(ID3D12GraphicsCommandList *cl, ID3D12Device *dev, ID3D12Resou
 static void repair_run(ID3D12GraphicsCommandList *cl, ID3D12Device *dev, ID3D12Resource *out,
                        uint32_t rw, uint32_t rh, uint32_t dw, uint32_t dh)
 {
-    if (!g_cfg.repair || g_san.state <= 0 || !g_san.pso2 || !g_san.color || !out) return;
+    if (g_cfg.repair < 0 || g_san.state <= 0 || !g_san.pso2 || !g_san.color || !out) return;
     D3D12_RESOURCE_DESC od; ID3D12Resource_GetDesc(out, &od);
     if (!(od.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) return;
     D3D12_CPU_DESCRIPTOR_HANDLE c = g_san.cpu0; c.ptr += ((SIZE_T)g_san.cur_slot * SAN_DESC + 7) * g_san.inc;
@@ -1338,9 +1338,10 @@ static void repair_run(ID3D12GraphicsCommandList *cl, ID3D12Device *dev, ID3D12R
     o_SetComputeRootSignature(cl, g_san.rs2);
     o_SetPipelineState(cl, g_san.pso2);
     o_SetComputeRootDescriptorTable(cl, 0, g);
-    struct { uint32_t ow, oh; float us, vs, dark, minl, maxc; uint32_t enable; } k = {
-        dw, dh, (float)rw / (float)g_san.w, (float)rh / (float)g_san.h, 0.05f, 0.02f, 65000.0f, (uint32_t)(g_cfg.repair == 1)};
-    o_SetComputeRoot32BitConstants(cl, 1, 8, &k, 0);
+    struct { uint32_t ow, oh; float us, vs, dark, minl, maxc; uint32_t mode; float iw, ih, bright, pad; } k = {
+        dw, dh, (float)rw / (float)g_san.w, (float)rh / (float)g_san.h, 0.05f, 0.02f, 65000.0f,
+        (uint32_t)(g_cfg.repair & 3), (float)g_san.w, (float)g_san.h, 1.5f, 0.0f};
+    o_SetComputeRoot32BitConstants(cl, 1, 12, &k, 0);
     o_Dispatch(cl, (dw + 7) / 8, (dh + 7) / 8, 1);
     ID3D12GraphicsCommandList_ResourceBarrier(cl, 1, &b);
 }
