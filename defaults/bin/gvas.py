@@ -120,7 +120,14 @@ class Gvas:
             self.multi = True
             return
         if self.d[:4] != b"GVAS":
-            # деякі ігри (Oblivion Remastered) пишуть лише властивості, без заголовка
+            # деякі ігри (Oblivion Remastered) пишуть лише властивості, без заголовка;
+            # інші — свій заголовок студії: шукаємо початок потоку властивостей самі
+            if not self._looks_like_prop(0):
+                start = self._find_props()
+                if start is None:
+                    raise GvasError("не схоже на сейв Unreal")
+                self.p = start
+                self.multi = True
             return
         self.p = 4
         sgv = struct.unpack_from("<I", self.d, 4)[0]
@@ -140,6 +147,32 @@ class Gvas:
         self.new_tags = bool(ue5 and ue5 >= 1012)   # PROPERTY_TAG_COMPLETE_TYPE_NAME (UE 5.4)
         if ue5 and ue5 >= 1012 and self.p < len(self.d) and self.d[self.p] == 0:
             self.p += 1          # UE 5.5+: прапорці після назви класу
+
+    PROP_TYPE = re.compile(rb"[\x05-\x20]\x00\x00\x00[A-Z][A-Za-z0-9]{2,30}Property\x00")
+
+    def _looks_like_prop(self, at):
+        """На позиції at — назва властивості (FString), а за нею тип «…Property»?"""
+        try:
+            n = struct.unpack_from("<i", self.d, at)[0]
+            if not 2 <= n <= 128 or self.d[at + 4 + n - 1] != 0:
+                return False
+            name = self.d[at + 4:at + 4 + n - 1]
+            if not re.fullmatch(rb"[A-Za-z_][A-Za-z0-9_.\-]*", name):
+                return False
+            return bool(self.PROP_TYPE.match(self.d, at + 4 + n))
+        except (struct.error, IndexError):
+            return False
+
+    def _find_props(self):
+        """Невідомий заголовок (власна обгортка студії): перша позиція, з якої
+        читається властивість «Назва + …Property»."""
+        for m in self.PROP_TYPE.finditer(self.d, 0, 4096):
+            end = m.start()                       # тут починається FString типу
+            for n in range(2, 129):               # назва перед ним: i32 n + n байтів
+                at = end - 4 - n
+                if at >= 0 and self._looks_like_prop(at):
+                    return at
+        return None
 
     # ---------------------------------------------------------------- властивості
     def _type_tree(self):

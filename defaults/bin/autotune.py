@@ -352,9 +352,11 @@ class UnrealAdapter:
         if not root:
             return None
         best = None
-        for p in glob.glob(os.path.join(root, "**", "*.sav"), recursive=True):
+        extra = [p for p in (getattr(self, "entry", None) or {}).get("settings_sources", [])
+                 if os.path.isfile(p)]       # знайдені плагіном під час гри (будь-яка назва)
+        for p in glob.glob(os.path.join(root, "**", "*.sav"), recursive=True) + extra:
             fn = os.path.basename(p)
-            if not G.NAME_HINT.search(fn) or os.path.getsize(p) > G.SAV_MAX:
+            if p not in extra and (not G.NAME_HINT.search(fn) or os.path.getsize(p) > G.SAV_MAX):
                 continue
             try:
                 fmt = G.GvasFmt(p)

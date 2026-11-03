@@ -1207,6 +1207,50 @@ class Plugin:
             return dict(G.FORMATS[e["generic_fmt"]](cfg).items())
         return None
 
+    SETTINGS_NAMES = (b"ShadowQuality", b"TextureQuality", b"EffectsQuality", b"FoliageQuality",
+                      b"PostProcessQuality", b"ViewDistance", b"AntiAliasingQuality",
+                      b"ReflectionQuality", b"ShadingQuality", b"GlobalIlluminationQuality")
+
+    def _find_settings_sources(self, e):
+        """Файли гри (текст, бінарні, UTF-16), у яких записані ≥3 налаштування якості —
+        кандидати на справжнє сховище графіки (крім файлу, який ми вже змінюємо)."""
+        cfg = e.get("config") or ""
+        roots = []
+        if "/Saved/" in cfg:
+            roots.append(cfg.split("/Saved/")[0] + "/Saved")
+        user = cfg.split("/drive_c/users/steamuser/")[0] + "/drive_c/users/steamuser" if "/steamuser/" in cfg else None
+        if user:
+            roots += [os.path.join(user, d) for d in ("AppData/Local", "AppData/Roaming",
+                                                      "AppData/LocalLow", "Documents", "Saved Games")]
+        if e.get("install"):
+            roots.append(e["install"])
+        names16 = tuple(n.decode().encode("utf-16-le") for n in self.SETTINGS_NAMES)
+        found, seen, t0 = [], set(), time.time()
+        for root in roots:
+            for cur, dirs, files in os.walk(root):
+                if time.time() - t0 > 8:
+                    break
+                dirs[:] = [d for d in dirs if not re.search(r"(?i)cache|shader|logs?$|crash|temp|nvidia|"
+                                                              r"microsoft|webcache|d3dscache|binaries|content|paks", d)]
+                for fn in files:
+                    p = os.path.join(cur, fn)
+                    if p in seen or p == cfg or fn.endswith((".autofps.bak", ".log", ".pak", ".utoc", ".ucas")):
+                        continue
+                    seen.add(p)
+                    try:
+                        if os.path.getsize(p) > 2 * 1024 * 1024:
+                            continue
+                        with open(p, "rb") as f:
+                            data = f.read()
+                    except OSError:
+                        continue
+                    hits = sum(1 for n in self.SETTINGS_NAMES if n in data) + \
+                        sum(1 for n in names16 if n in data)
+                    if hits >= 3:
+                        found.append(p)
+        decky.logger.info(f"пошук сховища налаштувань: {found}")
+        return found
+
     def _menu_tick(self, now):
         """Гравець змінив графіку в меню, поки гра запущена: гра вже застосувала її, а плагін
         змінює налаштування лише перед стартом. Кажемо про це й зупиняємо замір — інакше FPS
@@ -1248,9 +1292,17 @@ class Plugin:
         if now - self.game_started < 75:
             # так швидко в меню не дійти — гра сама перезаписала файл з іншого джерела
             decky.logger.warning(f"гра перезаписала налаштування при старті: {diff}")
+            found = self._find_settings_sources(e)
+            self._modify_tune(self.appid, lambda x: x.update(settings_sources=found))
+            if found:
+                body = ("Гра відновила графіку з іншого місця. Знайшов, де вона її тримає: "
+                        + ", ".join(os.path.basename(f) for f in found[:3])
+                        + ". З наступного запуску записуватиму й туди")
+            else:
+                body = ("Гра відновила графіку з іншого місця, і я його не знайшов. "
+                        "Збери діагностику й надішли Claude")
             self._notify("AutoFPS: гра перезаписала графіку при запуску",
-                         "Гра тримає налаштування ще в іншому місці й відновила їх звідти. "
-                         "Замір графіки в цій сесії зупинено. Збери діагностику й надішли Claude")
+                         body + ". Замір графіки в цій сесії зупинено")
             return
         if self.settings.get("respect_manual_graphics"):
             body = ("Залишу твої налаштування й далі графіку не чіпатиму "
