@@ -52,8 +52,8 @@ void main(uint3 id : SV_DispatchThreadID)
     float2 m = InMv[p];
     uint badMv = 0;
     if (bad(m.x) || bad(m.y)) { m = float2(0.0, 0.0); badMv = 1; }
-    else if (abs(m.x) > MaxMv || abs(m.y) > MaxMv) { m = clamp(m, -MaxMv, MaxMv); badMv = 1; }
-    OutMv[p] = m;
+    else if (abs(m.x) > MaxMv || abs(m.y) > MaxMv) { badMv = 1; }
+    OutMv[p] = clamp(m, -MaxMv, MaxMv);   // min/max у D3D також прибирають NaN — подвійний захист
 
     if (badColor) Counters.InterlockedAdd(0, 1);
     if (badDepth) Counters.InterlockedAdd(4, 1);
