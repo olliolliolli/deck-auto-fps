@@ -1117,8 +1117,12 @@ BRIDGE_STATUS = "autofps_fsr_status.json"
 BRIDGE_INI = "autofps_fsr.ini"
 BRIDGE_INI_TEXT = """; AutoFPS: міст FSR2→FSR4. Файл перечитується під час гри.
 enable=1
-; HDR | AUTO_EXPOSURE | DEPTH_INVERTED | DEPTH_INFINITE
-flags=0x39
+; HDR | AUTO_EXPOSURE | DEPTH_INVERTED | DEPTH_INFINITE | DEBUG_CHECKING (попередження FFX у журнал)
+flags=0xB9
+; очищення входів FSR 4 від NaN/Inf (сонце, небо: інакше кадр блимає чорним). 0 — вимкнути
+sanitize=1
+; експозиція: auto — автоекспозиція FFX, game — та, яку порахував FSR 2 гри
+exposure=auto
 depth_conv=0
 reactive=0
 skip_accumulate=1
@@ -1364,6 +1368,13 @@ def analyze_bridge(appid, game, started, duration, crashed, log=print):
         res.update(status="ok", title="✓ FSR 4 працює",
                    message=f"Міст: {st.get('version', 'FSR')} замість FSR 2, інтерфейс чіткий "
                            f"({st.get('bridged')} кадрів)")
+        bad = {k: int(st.get(k, 0) or 0) for k in ("bad_color", "bad_depth", "bad_mv")}
+        if any(bad.values()):
+            # без очищення ці пікселі давали б чорні спалахи/плями у FSR 4
+            res["message"] += (f". Виправлено погані пікселі (NaN/Inf): колір {bad['bad_color']}, "
+                               f"глибина {bad['bad_depth']}, вектори руху {bad['bad_mv']}")
+        if int(st.get("sanitize", 1) or 0) < 0:
+            res["message"] += ". Очищення входів недоступне — можливі чорні спалахи; надішли діагностику"
     elif state == "no_fsr2_shaders":
         res.update(status="error", title="FSR 4: міст не зміг підмінити FSR 2",
                    message="FSR 2 у грі знайдено автоматично, але кадри не вдалося передати в FSR 4 — "

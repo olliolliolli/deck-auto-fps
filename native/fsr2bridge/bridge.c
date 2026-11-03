@@ -627,9 +627,11 @@ static struct {
     float mvx, mvy;      /* масштаб векторів руху: множник до renderSize (1 = вектори в UV) */
     float jx, jy;        /* знак/множник зсуву камери */
     int jitter_src;      /* 0 — з констант FSR 2 [10,11] */
+    int sanitize;        /* 1 — очищати колір/глибину/вектори від NaN/Inf перед FSR 4 */
+    int exposure;        /* 0 — автоекспозиція FFX, 1 — експозиція з FSR 2 гри (1x1) */
 } g_cfg = {1, FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_AUTO_EXPOSURE |
               FFX_UPSCALE_ENABLE_DEPTH_INVERTED | FFX_UPSCALE_ENABLE_DEPTH_INFINITE,
-           0, 0, 1, 0.5f, 0.1f, 10000.0f, "4", 1.0f, 1.0f, 1.0f, 1.0f, 0};
+           0, 0, 1, 0.5f, 0.1f, 10000.0f, "4", 1.0f, 1.0f, 1.0f, 1.0f, 0, 1, 0};
 static FILETIME g_cfg_mtime;
 static uint32_t g_ctx_w, g_ctx_h;   /* оголошено тут, визначено нижче (FFX) */
 static volatile LONG g_cfg_changed;
@@ -662,11 +664,14 @@ static void load_cfg(void)
         else if (!strcmp(k, "mv_y")) g_cfg.mvy = (float)atof(v);
         else if (!strcmp(k, "jitter_x")) g_cfg.jx = (float)atof(v);
         else if (!strcmp(k, "jitter_y")) g_cfg.jy = (float)atof(v);
+        else if (!strcmp(k, "sanitize")) g_cfg.sanitize = atoi(v);
+        else if (!strcmp(k, "exposure")) g_cfg.exposure = !strcmp(v, "game") || !strcmp(v, "1");
     }
     fclose(f);
-    LOG("налаштування: enable=%d flags=0x%x depth_conv=%d reactive=%d skip_accumulate=%d sharpness=%.2f near=%g far=%g version=%s mv=(%g,%g) jitter=(%g,%g)",
+    LOG("налаштування: enable=%d flags=0x%x depth_conv=%d reactive=%d skip_accumulate=%d sharpness=%.2f near=%g far=%g version=%s mv=(%g,%g) jitter=(%g,%g) sanitize=%d exposure=%s",
         g_cfg.enable, g_cfg.flags, g_cfg.depth_conv, g_cfg.reactive, g_cfg.skip_accumulate, g_cfg.sharpness,
-        g_cfg.cam_near, g_cfg.cam_far, g_cfg.want, g_cfg.mvx, g_cfg.mvy, g_cfg.jx, g_cfg.jy);
+        g_cfg.cam_near, g_cfg.cam_far, g_cfg.want, g_cfg.mvx, g_cfg.mvy, g_cfg.jx, g_cfg.jy, g_cfg.sanitize,
+        g_cfg.exposure ? "game" : "auto");
 }
 
 /* перечитує autofps_fsr.ini, якщо файл змінився (налаштування на льоту, під час гри) */
@@ -689,11 +694,12 @@ static DWORD WINAPI cfg_watch_thread(void *arg)
         WIN32_FILE_ATTRIBUTE_DATA fa;
         if (GetFileAttributesExW(path, GetFileExInfoStandard, &fa) &&
             CompareFileTime(&fa.ftLastWriteTime, &g_cfg_mtime) != 0) {
-            uint32_t old_flags = g_cfg.flags;
+            uint32_t old_flags = g_cfg.flags ^ (g_cfg.exposure ? 0x80000000u : 0);
             char old_want[32]; memcpy(old_want, g_cfg.want, sizeof(old_want));
             load_cfg();
             LOG("налаштування оновлено на льоту");
-            if (old_flags != g_cfg.flags || strcmp(old_want, g_cfg.want)) g_ctx_w = 0;  /* перестворити контекст */
+            if (old_flags != (g_cfg.flags ^ (g_cfg.exposure ? 0x80000000u : 0)) || strcmp(old_want, g_cfg.want))
+                g_ctx_w = 0;  /* перестворити контекст */
             InterlockedExchange(&g_cfg_changed, 1);
         }
     }
@@ -715,8 +721,16 @@ static SRWLOCK g_ffx_lock = SRWLOCK_INIT;
 
 static void ffx_msg(uint32_t type, const wchar_t *msg)
 {
+    /* перевірка FFX (DEBUG_CHECKING) повторює ті самі попередження щокадру — кожне пишемо до 3 разів */
+    static uint64_t seen[64]; static uint8_t cnt[64]; static int nseen;
     char buf[512];
     WideCharToMultiByte(CP_UTF8, 0, msg, -1, buf, sizeof(buf), NULL, NULL);
+    uint64_t hsh = fnv1a(buf, strlen(buf));
+    int i;
+    for (i = 0; i < nseen; i++) if (seen[i] == hsh) break;
+    if (i == nseen) { if (nseen >= 64) return; seen[nseen++] = hsh; }
+    if (cnt[i] >= 3) return;
+    cnt[i]++;
     LOG("FFX %s: %s", type == FFX_API_MESSAGE_TYPE_ERROR ? "помилка" : "попередження", buf);
 }
 
@@ -786,6 +800,7 @@ static int ffx_ensure(ID3D12Device *dev, uint32_t w, uint32_t h)
     struct ffxOverrideVersion ov = {0};
     cd.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
     cd.flags = g_cfg.flags;
+    if (g_cfg.exposure) cd.flags &= ~(uint32_t)FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;   /* експозиція — з FSR 2 гри */
     cd.maxRenderSize.width = w; cd.maxRenderSize.height = h;
     cd.maxUpscaleSize.width = w; cd.maxUpscaleSize.height = h;
     cd.fpMessage = ffx_msg;
@@ -816,7 +831,7 @@ static int ffx_ensure(ID3D12Device *dev, uint32_t w, uint32_t h)
 
 typedef struct {
     void *cl;
-    ID3D12Resource *color, *depth, *depth_conv, *mv, *reactive;
+    ID3D12Resource *color, *depth, *depth_conv, *mv, *reactive, *exposure;
     uint32_t cb[64];
     int have_cb;
     int accumulate_skipped;
@@ -901,6 +916,7 @@ static ID3D12Resource *find_res(cl_state *st, int kind, const DXGI_FORMAT *fmts,
 static const DXGI_FORMAT k_depth_fmts[] = {DXGI_FORMAT_R32G8X24_TYPELESS, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT_S8X24_UINT, DXGI_FORMAT_D32_FLOAT};
 static const DXGI_FORMAT k_color_fmts[] = {DXGI_FORMAT_R11G11B10_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM};
 static const DXGI_FORMAT k_mv_fmts[] = {DXGI_FORMAT_R16G16_FLOAT};
+static const DXGI_FORMAT k_exp_fmts[] = {DXGI_FORMAT_R32G32_FLOAT};
 
 static ID3D12Resource *find_depth_any(cl_state *st, uint32_t w, uint32_t h)
 {
@@ -967,6 +983,7 @@ static struct FfxApiResource ffx_res(ID3D12Resource *r, uint32_t state)
     case DXGI_FORMAT_R11G11B10_FLOAT: x.description.format = FFX_API_SURFACE_FORMAT_R11G11B10_FLOAT; break;
     case DXGI_FORMAT_R16G16B16A16_FLOAT: x.description.format = FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT; break;
     case DXGI_FORMAT_R16G16_FLOAT: x.description.format = FFX_API_SURFACE_FORMAT_R16G16_FLOAT; break;
+    case DXGI_FORMAT_R32G32_FLOAT: x.description.format = FFX_API_SURFACE_FORMAT_R32G32_FLOAT; break;
     case DXGI_FORMAT_R32_FLOAT: case DXGI_FORMAT_D32_FLOAT: case DXGI_FORMAT_R32_TYPELESS: x.description.format = FFX_API_SURFACE_FORMAT_R32_FLOAT; break;
     case DXGI_FORMAT_R32G8X24_TYPELESS: case DXGI_FORMAT_D32_FLOAT_S8X24_UINT: case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS:
         x.description.format = FFX_API_SURFACE_FORMAT_R32_FLOAT; break;
@@ -986,6 +1003,9 @@ static struct FfxApiResource ffx_res(ID3D12Resource *r, uint32_t state)
 }
 
 static volatile LONG g_bridged, g_fallback;
+static volatile LONG g_skip_fail;   /* міст не спрацював після пропущеного накопичення FSR 2 */
+static int g_san_state(void);
+static uint32_t g_san_tot(int i);
 /* стан для плагіна AutoFPS: autofps_fsr_status.json поруч з грою */
 static void write_status(const char *state)
 {
@@ -996,8 +1016,10 @@ static void write_status(const char *state)
     wcscat(path, L"autofps_fsr_status.json");
     FILE *f = _wfopen(path, L"w");
     if (!f) return;
-    fprintf(f, "{\"state\":\"%s\",\"version\":\"%s\",\"bridged\":%ld,\"fallback\":%ld,\"known_shaders\":%ld,\"uptime_s\":%lu}\n",
-            state, g_ffx_version, g_bridged, g_fallback, g_known_psos, (unsigned long)((GetTickCount() - g_t0) / 1000));
+    fprintf(f, "{\"state\":\"%s\",\"version\":\"%s\",\"bridged\":%ld,\"fallback\":%ld,\"known_shaders\":%ld,\"uptime_s\":%lu,"
+               "\"sanitize\":%d,\"bad_color\":%u,\"bad_depth\":%u,\"bad_mv\":%u,\"skip_fail\":%ld}\n",
+            state, g_ffx_version, g_bridged, g_fallback, g_known_psos, (unsigned long)((GetTickCount() - g_t0) / 1000),
+            g_san_state(), g_san_tot(0), g_san_tot(1), g_san_tot(2), g_skip_fail);
     fclose(f);
 }
 
@@ -1005,6 +1027,261 @@ static void write_status(const char *state)
 static DWORD g_last_stat;
 static LARGE_INTEGER g_qpf, g_last_qpc;
 static int g_logged_first;
+
+/* ------------------------------------------------------------------ очищення вхідних даних FSR 4
+ *
+ * Рідний FSR 2 сам гасить погані пікселі (max(0, колір)), FSR 4 — ні: один NaN/Inf у кольорі
+ * (сонце, яскраве небо) отруює автоекспозицію всього кадру — кадр блимає чорним — або дає чорну
+ * пляму. Перед FFX копіюємо колір, глибину й вектори у власні текстури, замінюючи NaN/Inf
+ * (шейдер sanitize.hlsl, DXIL). Заразом глибина йде у FFX як R32_FLOAT (а не D32S8, для якого
+ * перегляд R32_FLOAT невалідний). Лічильники поганих пікселів — у журнал і статус.
+ */
+#if defined(__has_include)
+#if __has_include("sanitize_cs.h")
+#include "sanitize_cs.h"
+#define HAVE_SANITIZE 1
+#endif
+#endif
+#ifndef HAVE_SANITIZE
+#define HAVE_SANITIZE 0
+#endif
+
+#define SAN_RING 64     /* наборів дескрипторів (кадрів «у польоті» значно менше) */
+#define SAN_DESC 7      /* 3 SRV + 4 UAV */
+#define SAN_RB 8        /* слотів зчитування лічильників */
+#define SAN_EVERY 30    /* копіювати лічильники раз на стільки кадрів */
+#define SAN_GRAVE 8
+
+static struct {
+    int state;                          /* 0 — ще не пробували, 1 — готово, -1 — недоступно */
+    ID3D12RootSignature *rs;
+    ID3D12PipelineState *pso;
+    ID3D12DescriptorHeap *heap;
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu0;
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu0;
+    UINT inc, slot;
+    ID3D12Resource *color, *depth, *mv;
+    uint32_t w, h;
+    int in_srv;                         /* текстури зараз у стані читання (після FFX) */
+    ID3D12Resource *counters, *readback;
+    const volatile uint32_t *rb;
+    uint32_t rb_slot, copies, frames;
+    uint32_t base[4], seen_base;        /* перші прочитані значення (лічильники накопичувальні) */
+    uint32_t tot[4];                    /* усього з початку гри: колір, глибина, вектори, кадри */
+    uint32_t logged[3];
+    DWORD last_log;
+    ID3D12Resource *grave[SAN_GRAVE];   /* старі текстури: звільняємо, коли GPU точно їх відпрацював */
+    uint32_t grave_frame[SAN_GRAVE];
+} g_san;
+
+static void san_log_counters(void)
+{
+    if (!g_san.rb || g_san.copies < SAN_RB) return;
+    uint32_t s = (g_san.rb_slot + 1) % SAN_RB;      /* найстаріший слот — GPU вже давно його записав */
+    uint32_t v[4];
+    for (int i = 0; i < 4; i++) v[i] = g_san.rb[s * 64 + i];
+    if (!g_san.seen_base) { memcpy(g_san.base, v, sizeof(v)); g_san.seen_base = 1; return; }
+    for (int i = 0; i < 4; i++) g_san.tot[i] = v[i] - g_san.base[i];
+    DWORD t = GetTickCount();
+    int fresh = g_san.tot[0] != g_san.logged[0] || g_san.tot[1] != g_san.logged[1] || g_san.tot[2] != g_san.logged[2];
+    if (fresh && t - g_san.last_log > 5000) {
+        LOG("очищення: виправлено пікселів — колір (NaN/Inf) +%u, глибина +%u, вектори руху +%u; усього %u/%u/%u за %u кадрів",
+            g_san.tot[0] - g_san.logged[0], g_san.tot[1] - g_san.logged[1], g_san.tot[2] - g_san.logged[2],
+            g_san.tot[0], g_san.tot[1], g_san.tot[2], g_san.tot[3]);
+        memcpy(g_san.logged, g_san.tot, sizeof(g_san.logged));
+        g_san.last_log = t;
+    }
+}
+
+static ID3D12Resource *san_buffer(ID3D12Device *dev, D3D12_HEAP_TYPE heap, UINT64 size, D3D12_RESOURCE_FLAGS fl, D3D12_RESOURCE_STATES st)
+{
+    D3D12_HEAP_PROPERTIES hp; memset(&hp, 0, sizeof(hp)); hp.Type = heap;
+    D3D12_RESOURCE_DESC rd; memset(&rd, 0, sizeof(rd));
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; rd.Width = size; rd.Height = 1; rd.DepthOrArraySize = 1;
+    rd.MipLevels = 1; rd.SampleDesc.Count = 1; rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR; rd.Flags = fl;
+    ID3D12Resource *r = NULL;
+    if (FAILED(ID3D12Device_CreateCommittedResource(dev, &hp, D3D12_HEAP_FLAG_NONE, &rd, st, NULL, &IID_ID3D12Resource, (void **)&r))) return NULL;
+    return r;
+}
+
+static ID3D12Resource *san_tex(ID3D12Device *dev, DXGI_FORMAT f, uint32_t w, uint32_t h)
+{
+    D3D12_HEAP_PROPERTIES hp; memset(&hp, 0, sizeof(hp)); hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC rd; memset(&rd, 0, sizeof(rd));
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; rd.Width = w; rd.Height = h; rd.DepthOrArraySize = 1;
+    rd.MipLevels = 1; rd.Format = f; rd.SampleDesc.Count = 1; rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    ID3D12Resource *r = NULL;
+    if (FAILED(ID3D12Device_CreateCommittedResource(dev, &hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                    NULL, &IID_ID3D12Resource, (void **)&r))) return NULL;
+    return r;
+}
+
+static int san_init(ID3D12Device *dev)
+{
+#if HAVE_SANITIZE
+    if (g_san.state) return g_san.state > 0;
+    g_san.state = -1;
+    if (FAILED(o_CreateRootSignature(dev, 0, g_sanitize_cs, sizeof(g_sanitize_cs), &IID_ID3D12RootSignature, (void **)&g_san.rs))) {
+        LOG("очищення: не вдалося створити root signature — вимкнено"); return 0;
+    }
+    D3D12_COMPUTE_PIPELINE_STATE_DESC pd; memset(&pd, 0, sizeof(pd));
+    pd.pRootSignature = g_san.rs;
+    pd.CS.pShaderBytecode = g_sanitize_cs; pd.CS.BytecodeLength = sizeof(g_sanitize_cs);
+    if (FAILED(o_CreateComputePSO(dev, &pd, &IID_ID3D12PipelineState, (void **)&g_san.pso))) {
+        LOG("очищення: не вдалося створити PSO — вимкнено"); return 0;
+    }
+    D3D12_DESCRIPTOR_HEAP_DESC hd; memset(&hd, 0, sizeof(hd));
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.NumDescriptors = SAN_RING * SAN_DESC;
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(o_CreateDescriptorHeap(dev, &hd, &IID_ID3D12DescriptorHeap, (void **)&g_san.heap))) {
+        LOG("очищення: немає купи дескрипторів — вимкнено"); return 0;
+    }
+    ID3D12DescriptorHeap_GetCPUDescriptorHandleForHeapStart(g_san.heap, &g_san.cpu0);
+    ID3D12DescriptorHeap_GetGPUDescriptorHandleForHeapStart(g_san.heap, &g_san.gpu0);
+    g_san.inc = ID3D12Device_GetDescriptorHandleIncrementSize(dev, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    g_san.counters = san_buffer(dev, D3D12_HEAP_TYPE_DEFAULT, 256, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    g_san.readback = san_buffer(dev, D3D12_HEAP_TYPE_READBACK, 256 * SAN_RB, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+    if (!g_san.counters) { LOG("очищення: немає буфера лічильників — вимкнено"); return 0; }
+    if (g_san.readback) {
+        void *p = NULL;
+        if (SUCCEEDED(o_Map ? o_Map(g_san.readback, 0, NULL, &p) : ID3D12Resource_Map(g_san.readback, 0, NULL, &p)))
+            g_san.rb = (const volatile uint32_t *)p;
+    }
+    g_san.state = 1;
+    LOG("очищення вхідних даних FSR 4: увімкнено (NaN/Inf у кольорі, глибина, вектори руху)");
+    return 1;
+#else
+    (void)dev;
+    if (!g_san.state) { g_san.state = -1; LOG("очищення: у цій збірці немає шейдера — вимкнено"); }
+    return 0;
+#endif
+}
+
+static DXGI_FORMAT san_srv_fmt(DXGI_FORMAT f, int depth)
+{
+    switch (f) {
+    case DXGI_FORMAT_R32G8X24_TYPELESS: case DXGI_FORMAT_D32_FLOAT_S8X24_UINT: return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+    case DXGI_FORMAT_R32_TYPELESS: case DXGI_FORMAT_D32_FLOAT: return DXGI_FORMAT_R32_FLOAT;
+    case DXGI_FORMAT_R24G8_TYPELESS: case DXGI_FORMAT_D24_UNORM_S8_UINT: return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+    case DXGI_FORMAT_R16_TYPELESS: case DXGI_FORMAT_D16_UNORM: return DXGI_FORMAT_R16_UNORM;
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS: return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS: return DXGI_FORMAT_R10G10B10A2_UNORM;
+    case DXGI_FORMAT_R16G16_TYPELESS: return DXGI_FORMAT_R16G16_FLOAT;
+    case DXGI_FORMAT_R32G32_TYPELESS: return DXGI_FORMAT_R32G32_FLOAT;
+    case DXGI_FORMAT_R32G32B32A32_TYPELESS: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+    default: (void)depth; return f;
+    }
+}
+
+static void san_barrier3(ID3D12GraphicsCommandList *cl, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to)
+{
+    D3D12_RESOURCE_BARRIER b[3]; memset(b, 0, sizeof(b));
+    ID3D12Resource *r[3] = {g_san.color, g_san.depth, g_san.mv};
+    for (int i = 0; i < 3; i++) {
+        b[i].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b[i].Transition.pResource = r[i];
+        b[i].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b[i].Transition.StateBefore = from; b[i].Transition.StateAfter = to;
+    }
+    ID3D12GraphicsCommandList_ResourceBarrier(cl, 3, b);
+}
+
+static void san_buf_barrier(ID3D12GraphicsCommandList *cl, ID3D12Resource *r, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to)
+{
+    D3D12_RESOURCE_BARRIER b; memset(&b, 0, sizeof(b));
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = r; b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b.Transition.StateBefore = from; b.Transition.StateAfter = to;
+    ID3D12GraphicsCommandList_ResourceBarrier(cl, 1, &b);
+}
+
+/* записує очищення в командний список; повертає 1 і власні текстури, або 0 (тоді FFX бере оригінали) */
+static int san_run(ID3D12GraphicsCommandList *cl, ID3D12Device *dev, ID3D12Resource *color, ID3D12Resource *depth,
+                   ID3D12Resource *mv, ID3D12Resource **oc, ID3D12Resource **od, ID3D12Resource **om)
+{
+    if (!g_cfg.sanitize || !san_init(dev)) return 0;
+    D3D12_RESOURCE_DESC dc, dz, dm;
+    ID3D12Resource_GetDesc(color, &dc); ID3D12Resource_GetDesc(depth, &dz); ID3D12Resource_GetDesc(mv, &dm);
+    uint32_t w = (uint32_t)dc.Width, h = dc.Height;
+    if (dz.Width != w || dz.Height != h || dm.Width != w || dm.Height != h || w > 16384 || h > 16384) return 0;
+
+    g_san.frames++;
+    for (int i = 0; i < SAN_GRAVE; i++)           /* текстури старого розміру — через ~4 с (240 кадрів) */
+        if (g_san.grave[i] && g_san.frames - g_san.grave_frame[i] > 240) { ID3D12Resource_Release(g_san.grave[i]); g_san.grave[i] = NULL; }
+    if (!g_san.color || g_san.w != w || g_san.h != h) {
+        ID3D12Resource *old[3] = {g_san.color, g_san.depth, g_san.mv};
+        for (int k = 0; k < 3; k++) if (old[k]) {
+            int put = 0;
+            for (int i = 0; i < SAN_GRAVE && !put; i++) if (!g_san.grave[i]) { g_san.grave[i] = old[k]; g_san.grave_frame[i] = g_san.frames; put = 1; }
+            if (!put) ID3D12Resource_Release(old[k]);   /* не мало б статися: розмір змінюється рідко */
+        }
+        g_san.color = san_tex(dev, DXGI_FORMAT_R16G16B16A16_FLOAT, w, h);
+        g_san.depth = san_tex(dev, DXGI_FORMAT_R32_FLOAT, w, h);
+        g_san.mv = san_tex(dev, DXGI_FORMAT_R16G16_FLOAT, w, h);
+        g_san.w = w; g_san.h = h; g_san.in_srv = 0;
+        if (!g_san.color || !g_san.depth || !g_san.mv) { LOG("очищення: не вдалося створити текстури %ux%u — вимкнено", w, h); g_san.state = -1; return 0; }
+        LOG("очищення: текстури %ux%u", w, h);
+    }
+
+    UINT slot = (g_san.slot++) % SAN_RING;
+    D3D12_CPU_DESCRIPTOR_HANDLE c = g_san.cpu0; c.ptr += (SIZE_T)slot * SAN_DESC * g_san.inc;
+    D3D12_GPU_DESCRIPTOR_HANDLE g = g_san.gpu0; g.ptr += (UINT64)slot * SAN_DESC * g_san.inc;
+    ID3D12Resource *src[3] = {color, depth, mv};
+    DXGI_FORMAT sf[3] = {dc.Format, dz.Format, dm.Format};
+    for (int i = 0; i < 3; i++) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd; memset(&sd, 0, sizeof(sd));
+        sd.Format = san_srv_fmt(sf[i], i == 1);
+        sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Texture2D.MipLevels = 1;
+        D3D12_CPU_DESCRIPTOR_HANDLE h1 = c; h1.ptr += (SIZE_T)i * g_san.inc;
+        o_CreateSRV(dev, src[i], &sd, h1);
+    }
+    ID3D12Resource *dst[3] = {g_san.color, g_san.depth, g_san.mv};
+    DXGI_FORMAT df[3] = {DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R16G16_FLOAT};
+    for (int i = 0; i < 3; i++) {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC ud; memset(&ud, 0, sizeof(ud));
+        ud.Format = df[i]; ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        D3D12_CPU_DESCRIPTOR_HANDLE h1 = c; h1.ptr += (SIZE_T)(3 + i) * g_san.inc;
+        o_CreateUAV(dev, dst[i], NULL, &ud, h1);
+    }
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC ud; memset(&ud, 0, sizeof(ud));
+        ud.Format = DXGI_FORMAT_R32_TYPELESS; ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        ud.Buffer.NumElements = 64; ud.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        D3D12_CPU_DESCRIPTOR_HANDLE h1 = c; h1.ptr += (SIZE_T)6 * g_san.inc;
+        o_CreateUAV(dev, g_san.counters, NULL, &ud, h1);
+    }
+
+    if (g_san.in_srv) san_barrier3(cl, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    ID3D12DescriptorHeap *hp[1] = {g_san.heap};
+    o_SetDescriptorHeaps(cl, 1, hp);
+    o_SetComputeRootSignature(cl, g_san.rs);
+    o_SetPipelineState(cl, g_san.pso);
+    o_SetComputeRootDescriptorTable(cl, 0, g);
+    struct { uint32_t w, h; float maxc, maxmv; } k = {w, h, 65000.0f, 16384.0f};
+    o_SetComputeRoot32BitConstants(cl, 1, 4, &k, 0);
+    o_Dispatch(cl, (w + 7) / 8, (h + 7) / 8, 1);
+    san_barrier3(cl, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    g_san.in_srv = 1;
+
+    if (g_san.readback && g_san.frames % SAN_EVERY == 0) {
+        g_san.rb_slot = (g_san.rb_slot + 1) % SAN_RB;
+        san_buf_barrier(cl, g_san.counters, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        ID3D12GraphicsCommandList_CopyBufferRegion(cl, g_san.readback, (UINT64)g_san.rb_slot * 256, g_san.counters, 0, 16);
+        san_buf_barrier(cl, g_san.counters, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        g_san.copies++;
+        san_log_counters();
+    }
+    *oc = g_san.color; *od = g_san.depth; *om = g_san.mv;
+    return 1;
+}
+
+static int g_san_state(void) { return g_san.state; }
+static uint32_t g_san_tot(int i) { return g_san.tot[i]; }
+
 
 static void restore_state(ID3D12GraphicsCommandList *cl, const cl_state *st)
 {
@@ -1083,8 +1360,13 @@ static int bridge_rcas(ID3D12GraphicsCommandList *cl, cl_state *st)
     if (!dev) return 0;
     AcquireSRWLockExclusive(&g_ffx_lock);
     int ok = ffx_ensure(dev, dw, dh);
+    if (!ok) { ID3D12Device_Release(dev); ReleaseSRWLockExclusive(&g_ffx_lock); return 0; }
+    /* очищення входів (NaN/Inf) — у той самий командний список, перед FFX */
+    ID3D12Resource *in_color = fr.color, *in_depth = depth, *in_mv = fr.mv;
+    t_in_ffx = 1;
+    int sanitized = san_run(cl, dev, fr.color, depth, fr.mv, &in_color, &in_depth, &in_mv);
+    t_in_ffx = 0;
     ID3D12Device_Release(dev);
-    if (!ok) { ReleaseSRWLockExclusive(&g_ffx_lock); return 0; }
 
     float f[64];
     memcpy(f, fr.cb, sizeof(f));
@@ -1097,9 +1379,10 @@ static int bridge_rcas(ID3D12GraphicsCommandList *cl, cl_state *st)
     memset(&dd, 0, sizeof(dd));
     dd.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
     dd.commandList = cl;
-    dd.color = ffx_res(fr.color, FFX_API_RESOURCE_STATE_COMPUTE_READ);
-    dd.depth = ffx_res(depth, FFX_API_RESOURCE_STATE_COMPUTE_READ);
-    dd.motionVectors = ffx_res(fr.mv, FFX_API_RESOURCE_STATE_COMPUTE_READ);
+    dd.color = ffx_res(in_color, FFX_API_RESOURCE_STATE_COMPUTE_READ);
+    dd.depth = ffx_res(in_depth, FFX_API_RESOURCE_STATE_COMPUTE_READ);
+    dd.motionVectors = ffx_res(in_mv, FFX_API_RESOURCE_STATE_COMPUTE_READ);
+    if (g_cfg.exposure && fr.exposure) dd.exposure = ffx_res(fr.exposure, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     if (g_cfg.reactive && fr.reactive) dd.reactive = ffx_res(fr.reactive, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     dd.output = ffx_res(out, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
     dd.jitterOffset.x = f[10] * g_cfg.jx;
@@ -1133,6 +1416,7 @@ static int bridge_rcas(ID3D12GraphicsCommandList *cl, cl_state *st)
     t_in_ffx = 0;
     ReleaseSRWLockExclusive(&g_ffx_lock);
     restore_state(cl, st);
+    (void)sanitized;
 
     if (rc != FFX_API_RETURN_OK) {
         LOG("FFX: ffxDispatch = %u — вимикаю міст", rc);
@@ -1148,9 +1432,10 @@ static int bridge_rcas(ID3D12GraphicsCommandList *cl, cl_state *st)
             D3D12_RESOURCE_DESC d; ID3D12Resource_GetDesc(rr[i], &d);
             LOG("міст: %s = %p %llux%u формат %d", nn[i], rr[i], (unsigned long long)d.Width, d.Height, d.Format);
         }
-        LOG("міст: перший кадр через %s: %ux%u→%ux%u jitter=(%.3f,%.3f) mvScale=(%.3f,%.3f) preExp=%.3f fov=%.1f°",
+        LOG("міст: перший кадр через %s: %ux%u→%ux%u jitter=(%.3f,%.3f) mvScale=(%.3f,%.3f) preExp=%.3f fov=%.1f° очищення=%s експозиція=%s",
             g_ffx_version, rw, rh, dw, dh, dd.jitterOffset.x, dd.jitterOffset.y, dd.motionVectorScale.x,
-            dd.motionVectorScale.y, dd.preExposure, dd.cameraFovAngleVertical * 57.2958f);
+            dd.motionVectorScale.y, dd.preExposure, dd.cameraFovAngleVertical * 57.2958f, sanitized ? "так" : "ні",
+            g_cfg.exposure ? (fr.exposure ? "з FSR 2 гри" : "гри не знайдено — 1.0") : "авто FFX");
         write_status("ok");
     }
     DWORD t = GetTickCount();
@@ -1249,10 +1534,12 @@ static void STDMETHODCALLTYPE h_Dispatch(ID3D12GraphicsCommandList *cl, UINT x, 
         ID3D12Resource *c = rw ? find_res(&st, D_SRV, k_color_fmts, 4, rw, rh) : NULL;
         if (!c) c = table_find(&st, 1, DXGI_FORMAT_R11G11B10_FLOAT, 0, 0, D_SRV);
         ID3D12Resource *d = find_depth_any(&st, rw, rh);
+        ID3D12Resource *exp = find_res(&st, D_UAV, k_exp_fmts, 1, 1, 1);
         AcquireSRWLockExclusive(&g_fr_lock);
         frame_state *F = fr_get(cl);
         F->color = c;
         if (F->mv_cand) F->mv = F->mv_cand;   /* вектори — останні перед цим кроком (пізніші — внутрішні FSR 2) */
+        if (!F->exposure) F->exposure = exp;  /* експозиція FSR 2 (1x1 R32G32_FLOAT, пише цей крок) */
         if (!F->depth && d) F->depth = d;
         ReleaseSRWLockExclusive(&g_fr_lock);
         break;
@@ -1290,7 +1577,15 @@ static void STDMETHODCALLTYPE h_Dispatch(ID3D12GraphicsCommandList *cl, UINT x, 
           memset(F, 0, sizeof(*F)); F->cl = cl; }   /* кадр FSR 2 завершено */
         ReleaseSRWLockExclusive(&g_fr_lock);
         if (done) return;
-        if (skipped) return;   /* накопичення FSR 2 пропущено — рідний RCAS дав би чорний кадр; лишаємо попередній */
+        if (skipped) {   /* накопичення FSR 2 пропущено — рідний RCAS дав би чорний кадр; лишаємо попередній */
+            LONG n = InterlockedIncrement(&g_skip_fail);
+            if (n <= 3) LOG("міст: кадр не передано після пропущеного накопичення FSR 2 (%ld)", n);
+            if (n == 3 && g_cfg.skip_accumulate) {
+                g_cfg.skip_accumulate = 0;   /* щоб не було «застиглих»/чорних кадрів — FSR 2 рахує накопичення завжди */
+                LOG("міст: пропуск накопичення FSR 2 вимкнено до кінця гри (кадри без зображення)");
+            }
+            return;
+        }
         break;
     }
     default:
