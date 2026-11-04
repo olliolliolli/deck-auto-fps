@@ -120,6 +120,9 @@ def audit(appid, install, compat, device):
         sav = adapter.settings_sav(cfg)
         if sav:
             res["sav"] = sav
+        ov = adapter.overlays(cfg)
+        if ov:
+            res["overlays"] = ov
     return res
 
 
@@ -154,6 +157,8 @@ def main():
                 vals = {k: v for k, v in gvas.load(r["sav"]).items()
                         if G._norm(G.leaf_name(k)) in G.UE_GROUPS or G._norm(G.leaf_name(k)) + "quality" in G.UE_GROUPS}
                 print(f"   + сейв: {os.path.basename(r['sav'])} — синхронізується: {vals}")
+            if r.get("overlays"):
+                print("   + накладки (гра читає після GameUserSettings): " + ", ".join(os.path.basename(p) for p in r["overlays"]))
             if r.get("note"):
                 print(f"   {r['note']}")
             if r.get("steps"):

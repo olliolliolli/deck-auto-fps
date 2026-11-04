@@ -296,6 +296,15 @@ class UnrealAdapter:
 
     def ladder(self, original, lowres=None):
         steps = ue_ladder(lowres)
+        # роздільність рендеру гри (власний TSR/FSR гри ставить sg.ResolutionQuality, напр. 40%) —
+        # ніколи не вища за ту, що стояла в грі: 40% → 100% дало б у 6 разів більше пікселів
+        try:
+            rq_cap = int(float((original or {}).get("sg.ResolutionQuality", 100)))
+        except ValueError:
+            rq_cap = 100
+        if 25 <= rq_cap < 100:
+            for st in steps:
+                st["sg.ResolutionQuality"] = str(min(int(st["sg.ResolutionQuality"]), rq_cap))
         handheld = (self.device or {}).get("id") in HANDHELDS
         extra_max = getattr(self, "extra_max", {}) or {}
         cur = self.read(self.cfg) if getattr(self, "cfg", None) else {}
@@ -305,6 +314,11 @@ class UnrealAdapter:
             if handheld:
                 st["sg.TextureQuality"] = str(min(int(st["sg.TextureQuality"]), UE_HANDHELD_TEXTURE_MAX))
             st["sg.StreamingQuality"] = st["sg.TextureQuality"]
+            try:   # стрімінг — не вищий за той, що стояв у грі
+                st["sg.StreamingQuality"] = str(min(int(st["sg.StreamingQuality"]),
+                                                    int(float((original or {}).get("sg.StreamingQuality", 3)))))
+            except ValueError:
+                pass
             for k in extras:
                 name = k.split(".", 1)[1]
                 cap = int(extra_max.get(k, extra_max.get(name, 3)))
@@ -343,6 +357,57 @@ class UnrealAdapter:
             self._sync_sav(cfg, values)
         except Exception as e:  # noqa: BLE001 — сейв лише доповнення до ini
             print(f"sav sync: {e!r}")
+        try:
+            self._sync_overlays(cfg, values)
+        except Exception as e:  # noqa: BLE001
+            print(f"overlay sync: {e!r}")
+
+    # --- «накладки»: власні ini гри з [ScalabilityGroups] поза Saved/Config, які гра читає ПІСЛЯ
+    # GameUserSettings.ini і перекриває ними наші значення (Hellraiser: Revival —
+    # AppData/Local/Hellraiser/LocalPerformanceConfig.ini, «overlay applied 46 keys»)
+    def overlays(self, cfg):
+        if "/Saved/" not in cfg:
+            return []
+        root = cfg.split("/Saved/")[0]
+        cands = set(glob.glob(os.path.join(root, "*.ini")) + glob.glob(os.path.join(root, "*", "*.ini")))
+        cands |= set(glob.glob(os.path.join(root, "Saved", "*.ini")))
+        cands |= {p for p in (getattr(self, "entry", None) or {}).get("settings_sources", [])
+                  if p.lower().endswith(".ini")}
+        out = []
+        for p in sorted(cands):
+            if os.path.abspath(p) == os.path.abspath(cfg) or not os.path.isfile(p):
+                continue
+            if os.path.basename(p).lower() in ("engine.ini", "input.ini", "scalability.ini"):
+                continue
+            vals = read_ini_section(p, self.SECTION)
+            if sum(1 for k in vals if k.startswith("sg.")) >= 3:
+                out.append(p)
+        return out
+
+    def _sync_overlays(self, cfg, values):
+        entry = getattr(self, "entry", None)
+        origs = entry.setdefault("overlay_original", {}) if entry is not None else {}
+        restore = values is getattr(self, "_original", None)
+        for p in self.overlays(cfg):
+            cur = read_ini_section(p, self.SECTION)
+            orig = origs.setdefault(p, {k: v for k, v in cur.items() if k.startswith("sg.")})
+            src = orig if restore else values
+            want = {k: str(src[k]) for k in cur if k.startswith("sg.") and k in src}
+            if not restore and "sg.ResolutionQuality" in want and "sg.ResolutionQuality" in orig:
+                try:   # роздільність — не вища за ту, що стояла в накладці
+                    want["sg.ResolutionQuality"] = str(min(int(float(want["sg.ResolutionQuality"])),
+                                                           int(float(orig["sg.ResolutionQuality"]))))
+                except ValueError:
+                    pass
+            changed = {k: v for k, v in want.items() if str(cur.get(k)) != v}
+            if not changed:
+                continue
+            backup_once(p)
+            with open(p, encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+            with open(p, "w", encoding="utf-8") as f:
+                f.writelines(patch_ini(lines, {self.SECTION: changed}))
+            print(f"накладка {os.path.basename(p)}: {len(changed)} значень")
 
     # --- графіка в сейві (Saved/SaveGames/*.sav, GVAS): Oblivion Remastered та інші
     def settings_sav(self, cfg):

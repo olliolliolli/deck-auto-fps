@@ -1345,7 +1345,7 @@ class Plugin:
         cfg = e.get("config") or ""
         roots = []
         if "/Saved/" in cfg:
-            roots.append(cfg.split("/Saved/")[0] + "/Saved")
+            roots.append(cfg.split("/Saved/")[0])   # тека проєкту: Saved і «накладки» поруч (LocalPerformanceConfig.ini)
         user = cfg.split("/drive_c/users/steamuser/")[0] + "/drive_c/users/steamuser" if "/steamuser/" in cfg else None
         if user:
             roots += [os.path.join(user, d) for d in ("AppData/Local", "AppData/Roaming",
