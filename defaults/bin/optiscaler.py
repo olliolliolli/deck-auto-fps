@@ -335,6 +335,8 @@ def download_latest(log=print):
     archive = os.path.join(C.CACHE_DIR, "optiscaler", st["latest_asset"])
     log(f"завантажую {st['latest_asset']}")
     http_get(st["latest_url"], archive, timeout=600)
+    if not st.get("latest_sha256"):
+        log("увага: GitHub не надав контрольну суму архіву — перевірку sha256 пропущено")
     if st.get("latest_sha256") and sha256(archive) != st["latest_sha256"]:
         os.remove(archive)
         raise RuntimeError("контрольна сума архіву OptiScaler не збігається — завантаження відкинуто")

@@ -76,7 +76,7 @@ def install_launcher():
     if _read(LAUNCHER) != text.strip():
         with open(LAUNCHER, "w", encoding="utf-8") as f:
             f.write(text)
-    os.chmod(LAUNCHER, 0o755)  # {appid: {"enabled": bool, "seen": ts}}
+    os.chmod(LAUNCHER, 0o755)
 
 _read, _load_json, _save_json = C.read_text, C.load_json, C.save_json
 percentile, detect_device = C.percentile, C.detect_device

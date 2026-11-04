@@ -27,6 +27,7 @@ if [ -f "$LOG" ] && [ "$(wc -c <"$LOG" 2>/dev/null || echo 0)" -gt 300000 ]; the
 fi
 
 APPID="${SteamAppId:-${SteamGameId:-0}}"
+APPID="${APPID//[^0-9]/}"; [ -n "$APPID" ] || APPID=0   # лише цифри: appid іде в імена файлів
 FAST_EXIT="${AUTOFPS_FAST_EXIT:-20}"   # гра, що закрилась швидше — вважається такою, що впала на старті
 
 log "=== Запуск гри appid=$APPID"
@@ -137,11 +138,7 @@ EXT_FG=0
 if [ "$FG_MODE" = "external" ]; then
   # генерацією керує окремий плагін Decky LSFG-VK (його лаунчер стоїть у параметрах запуску) —
   # AutoFPS нічого не вмикає й не вимикає, лише помічає, чи вона активна
-  if [ -z "$DISABLE_LSFGVK" ] && { [ -n "$LSFGVK_PROFILE$LSFGVK_CONFIG$LSFG_PROCESS$LSFG_CONFIG" ] || [ "$ENABLE_LSFG" = "1" ]; }; then
-    EXT_FG=1
-  fi
-  # MAKO (окремий плагін MAKO Decky, лаунчер ~/.local/bin/mako-run)
-  if env | grep -qiE '^MAKO_|^[A-Z_]*LAYER[A-Z_]*=.*mako'; then EXT_FG=1; fi
+  EXT_FG="$AUTOFPS_EXT_FG"   # уже визначено вище (Decky LSFG-VK / MAKO)
   log "генерація кадрів: окремий плагін (Decky LSFG-VK / MAKO), активна: $EXT_FG"
 fi
 if [ "$FG_MODE" = "external" ]; then
@@ -219,7 +216,8 @@ FAST_FILE="$CFG/fast_$APPID"
 if [ "$DUR" -ge "$FAST_EXIT" ]; then
   rm -f "$FAST_FILE" 2>/dev/null
 else
-  FAST_N=$(( $(cat "$FAST_FILE" 2>/dev/null | tr -cd '0-9' | head -c 3 || echo 0) + 1 ))
+  FAST_N="$(tr -cd '0-9' <"$FAST_FILE" 2>/dev/null | head -c 3)"
+  FAST_N=$(( 10#${FAST_N:-0} + 1 ))
   echo "$FAST_N" >"$FAST_FILE"
   log "швидке закриття №$FAST_N поспіль"
 fi
