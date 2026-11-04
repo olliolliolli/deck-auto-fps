@@ -674,6 +674,7 @@ class Plugin:
         self.tm_forecast = None
         self.tm_pending = None
         self.tm_over = []
+        self.ue_checked = False
         self.mango_cap, self.cap_over, self.cap_t = False, 0, 0.0
         _mango_last[0] = None     # обгортка щойно записала у файл fps_limit=0
         self.menu_t, self.menu_mtime, self.menu_changed = 0.0, None, False
@@ -1351,6 +1352,86 @@ class Plugin:
                       b"PostProcessQuality", b"ViewDistance", b"AntiAliasingQuality",
                       b"ReflectionQuality", b"ShadingQuality", b"GlobalIlluminationQuality")
 
+    # ---------------- перевірка Unreal: чи гра справді взяла нашу графіку
+    UE_SECTION_RE = re.compile(r"Section \[(\w+Quality)@(\d+)\]")
+    WIN_PATH_RE = re.compile(r"([A-Za-z]):[/\\]([^\s\"'\[\]]+?\.(?:ini|sav|json|cfg|xml|txt|dat))", re.I)
+
+    def _win_to_unix(self, drive, rest, cfg):
+        rest = rest.replace("\\", "/")
+        if drive.lower() == "z":
+            return "/" + rest
+        if "/drive_c/" in cfg and drive.lower() == "c":
+            return cfg.split("/drive_c/")[0] + "/drive_c/" + rest
+        return None
+
+    def _ue_verify(self, e):
+        """Через ~45 с після старту гри: з журналу Unreal (Saved/Logs) — які групи якості гра
+        застосувала НАСПРАВДІ. Якщо не ті, що ми записали, — гра бере графіку ще звідкись
+        (Hellraiser: LocalPerformanceConfig.ini поверх GameUserSettings). Шукаємо, звідки
+        (шляхи файлів у журналі + пошук за назвами налаштувань), і з наступного запуску пишемо й туди."""
+        cfg = e.get("config") or ""
+        applied = e.get("applied_values") or {}
+        if "/Saved/" not in cfg or not applied:
+            return
+        logs = [p for p in glob.glob(os.path.join(cfg.split("/Saved/")[0], "Saved", "Logs", "*.log"))
+                if os.path.getmtime(p) >= self.game_started - 5 and "backup" not in os.path.basename(p).lower()]
+        if not logs:
+            return
+        log_path = max(logs, key=os.path.getmtime)
+        try:
+            with open(log_path, "rb") as f:
+                text = f.read(6 * 1024 * 1024).decode("utf-8", "ignore")
+        except OSError:
+            return
+        eff, mentioned = {}, []
+        for line in text.splitlines():
+            m = self.UE_SECTION_RE.search(line)
+            if m:
+                eff[f"sg.{m.group(1)}"] = m.group(2)
+            if re.search(r"(?i)overlay|settings|config|load|read|appl", line):
+                for d, rest in self.WIN_PATH_RE.findall(line):
+                    up = self._win_to_unix(d, rest, cfg)
+                    if up and os.path.isfile(up) and up != cfg and "/Engine/" not in up \
+                            and "/Content/" not in up and up not in mentioned:
+                        mentioned.append(up)
+        diff = {}
+        for k, v in applied.items():
+            if not k.startswith("sg.") or k == "sg.ResolutionQuality" or k not in eff:
+                continue
+            try:
+                if int(float(v)) != int(eff[k]):
+                    diff[k] = (v, eff[k])
+            except ValueError:
+                pass
+        self._modify_tune(self.appid, lambda x: x.update(ue_verified=len(diff) < 2, ue_effective=eff))
+        if len(diff) < 2:
+            decky.logger.info(f"перевірка Unreal: гра застосувала нашу графіку ({len(eff)} груп)")
+            return
+        decky.logger.warning(f"перевірка Unreal: гра застосувала інше {diff}; у журналі файли {mentioned}")
+        found = [p for p in mentioned if not p.lower().endswith((".log", ".txt"))]
+        for p in self._find_settings_sources(e):
+            if p not in found:
+                found.append(p)
+        old = e.get("settings_sources") or []
+        new = [p for p in found if p not in old]
+        self._modify_tune(self.appid, lambda x: x.update(settings_sources=old + new))
+        names = ", ".join(os.path.basename(p) for p in (new or found)[:3])
+        if new:
+            self._notify("AutoFPS: гра бере графіку ще з одного файлу",
+                         f"Гра перекрила підібрану графіку (напр. {self._ue_diff_text(diff)}) значеннями з: "
+                         f"{names}. З наступного запуску записуватиму й туди — перезапусти гру")
+        elif not found:
+            self._notify("AutoFPS: гра перекриває графіку",
+                         f"Гра застосувала не ту графіку ({self._ue_diff_text(diff)}), а звідки — не знайшов. "
+                         "Збери діагностику й надішли Claude")
+
+    def _ue_diff_text(self, diff):
+        names = {"ShadowQuality": "тіні", "PostProcessQuality": "постобробка", "EffectsQuality": "ефекти",
+                 "TextureQuality": "текстури", "GlobalIlluminationQuality": "освітлення",
+                 "ReflectionQuality": "відблиски", "FoliageQuality": "рослинність",
+                 "ShadingQuality": "шейдинг", "ViewDistanceQuality": "дальність"}
+        return ", ".join(f"{names.get(k[3:], k[3:])} {a}→{b}" for k, (a, b) in list(diff.items())[:3])
+
     def _find_settings_sources(self, e):
         """Файли гри (текст, бінарні, UTF-16), у яких записані ≥3 налаштування якості —
         кандидати на справжнє сховище графіки (крім файлу, який ми вже змінюємо)."""
@@ -1924,6 +2005,14 @@ class Plugin:
         self._tdp_tick(now)
         self._gpu_tick(now)
         self._menu_tick(now)
+        if self.appid and not getattr(self, "ue_checked", True) and now - self.game_started > 45:
+            self.ue_checked = True
+            try:
+                e = self._tune_entry()
+                if e and e.get("engine") == "unreal" and self.settings.get("autotune"):
+                    self._ue_verify(e)
+            except Exception as ex:  # noqa: BLE001
+                decky.logger.warning(f"перевірка Unreal: {ex}")
         self._tm_tick(now)
 
         # фіксований рівень вибрано вручну

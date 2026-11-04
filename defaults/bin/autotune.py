@@ -365,12 +365,29 @@ class UnrealAdapter:
     # --- «накладки»: власні ini гри з [ScalabilityGroups] поза Saved/Config, які гра читає ПІСЛЯ
     # GameUserSettings.ini і перекриває ними наші значення (Hellraiser: Revival —
     # AppData/Local/Hellraiser/LocalPerformanceConfig.ini, «overlay applied 46 keys»)
+    @staticmethod
+    def sg_section(path):
+        """Розділ ini, де лежать групи якості (sg.*, ≥3) — [ScalabilityGroups] або будь-який інший."""
+        cnt, cur = {}, ""
+        for line in C.read_text(path).splitlines():
+            st = line.strip()
+            if st.startswith("[") and st.endswith("]"):
+                cur = st[1:-1]
+            elif st.lower().startswith("sg.") and "=" in st:
+                cnt[cur] = cnt.get(cur, 0) + 1
+        if cnt.get("ScalabilityGroups", 0) >= 3:
+            return "ScalabilityGroups"
+        best = max(cnt.items(), key=lambda kv: kv[1], default=(None, 0))
+        return best[0] if best[1] >= 3 else None
+
     def overlays(self, cfg):
         if "/Saved/" not in cfg:
             return []
         root = cfg.split("/Saved/")[0]
         cands = set(glob.glob(os.path.join(root, "*.ini")) + glob.glob(os.path.join(root, "*", "*.ini")))
         cands |= set(glob.glob(os.path.join(root, "Saved", "*.ini")))
+        # той самий файл для інших платформ (Windows / WindowsNoEditor / WinGDK) — гра читає «свій»
+        cands |= set(glob.glob(os.path.join(root, "Saved", "Config", "*", "GameUserSettings.ini")))
         cands |= {p for p in (getattr(self, "entry", None) or {}).get("settings_sources", [])
                   if p.lower().endswith(".ini")}
         out = []
@@ -379,8 +396,7 @@ class UnrealAdapter:
                 continue
             if os.path.basename(p).lower() in ("engine.ini", "input.ini", "scalability.ini"):
                 continue
-            vals = read_ini_section(p, self.SECTION)
-            if sum(1 for k in vals if k.startswith("sg.")) >= 3:
+            if self.sg_section(p) is not None:
                 out.append(p)
         return out
 
@@ -389,7 +405,8 @@ class UnrealAdapter:
         origs = entry.setdefault("overlay_original", {}) if entry is not None else {}
         restore = values is getattr(self, "_original", None)
         for p in self.overlays(cfg):
-            cur = read_ini_section(p, self.SECTION)
+            sec = self.sg_section(p) or self.SECTION
+            cur = read_ini_section(p, sec)
             orig = origs.setdefault(p, {k: v for k, v in cur.items() if k.startswith("sg.")})
             src = orig if restore else values
             want = {k: str(src[k]) for k in cur if k.startswith("sg.") and k in src}
@@ -406,7 +423,7 @@ class UnrealAdapter:
             with open(p, encoding="utf-8", errors="ignore") as f:
                 lines = f.readlines()
             with open(p, "w", encoding="utf-8") as f:
-                f.writelines(patch_ini(lines, {self.SECTION: changed}))
+                f.writelines(patch_ini(lines, {sec: changed}))
             print(f"накладка {os.path.basename(p)}: {len(changed)} значень")
 
     # --- графіка в сейві (Saved/SaveGames/*.sav, GVAS): Oblivion Remastered та інші
