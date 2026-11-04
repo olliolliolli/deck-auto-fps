@@ -1848,6 +1848,35 @@ class Plugin:
             self.perf_typical = med if not typical else 0.8 * typical + 0.2 * med
         return True, med, gpu
 
+    def _fg_watch(self, now):
+        """Множник Decky LSFG-VK змінили посеред гри (×2 → ×1 у їхньому меню): інакше ліміт,
+        ціль підбору графіки і заміри рахувалися б за старим множником (ціль 30 замість 50,
+        «замір вище ліміту»)."""
+        if not self.cur_info.get("ext_fg") or self.settings.get("fg_mode") != "external" \
+                or now - getattr(self, "fg_watch_t", 0) < 3:
+            return
+        self.fg_watch_t = now
+        m = their_multiplier()
+        old = max(1, self.sfg)
+        if max(1, m) == old:
+            return
+        self.sfg = m
+        self.mult = m if m >= 2 else 1
+        self.settings["last_fg_mult"] = max(1, m)
+        _save_json(SETTINGS_FILE, self.settings)
+        # заміри зі старим множником — у смітник; замір графіки починається наново
+        self.samples, self.tm_raw, self.tm_windows, self.tm_over = [], [], [], []
+        self.tm_pending, self.cap_over = None, 0
+        self.manual_key = None
+        target = C.quality_target(self.settings, self.device)
+        self._modify_tune(self.appid, lambda x: x.update(target=target))
+        decky.logger.info(f"генерація кадрів змінена посеред гри: ×{old} → ×{max(1, m)}, ціль графіки {target}")
+        self._notify("AutoFPS: генерацію кадрів змінено",
+                     (f"Тепер ×{m}" if m >= 2 else "Вимкнено") +
+                     f" — ліміт і ціль підбору графіки перераховано: {target} FPS гри. Замір почато наново")
+        if self.phase in ("locked", "manual", "waiting"):
+            self._apply()
+
     def _cap_check(self, now):
         """Ліміт gamescope не діє (гра йде помітно вище ліміту 3 вікна по 10 с поспіль) —
         вмикаємо обмежувач MangoHud. Меню без ліміту — теж марно спалена батарея."""
@@ -2001,6 +2030,7 @@ class Plugin:
             self.gpu_hw.append((now, clk, cpu, load))
         self.reader.hw = []
         self._trim(now)
+        self._fg_watch(now)
         self._cap_check(now)
         self._tdp_tick(now)
         self._gpu_tick(now)
@@ -2256,6 +2286,10 @@ class Plugin:
         if not self._modify_tune(appid, fn):
             return {"ok": False, "message": "Цю гру ще не запускали з AutoFPS — підбір почнеться при першому запуску"}
         running = str(self.appid) == appid
+        if running:
+            # графіка цієї сесії вже не та, з якої почнеться підбір — заміри не записуємо
+            self.tuning = False
+            self.tm_raw, self.tm_windows, self.tm_over, self.tm_pending = [], [], [], None
         return {"ok": True, "message": ("Перезапусти гру: графіка змінюється лише при старті. " if running else "") +
                 "Далі просто грай: FPS міряється фоном, графіка змінюється з кожним запуском, поки не досягне цілі"}
 
