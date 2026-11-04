@@ -1038,6 +1038,9 @@ def run(appid, args, device=None, log=print):
         return
     entry["engine"] = adapter.engine
     adapter.entry = entry
+    # файли, які ми минулого разу зробили «лише читання», — знову доступні для запису
+    # (наш запис, відновлення оригіналу, безпечний режим)
+    C.unlock_files(entry.pop("locked", []))
 
     cfg = adapter.locate()
     if not cfg:
@@ -1213,6 +1216,13 @@ def run(appid, args, device=None, log=print):
 
     values = ladder[level]
     adapter.write(cfg, values)
+    if settings.get("lock_config", True):
+        # «лише читання»: гра не перезапише підібране (ні з меню, ні при виході, ні з хмари)
+        files = [cfg] + (adapter.overlays(cfg) if hasattr(adapter, "overlays") else [])
+        locked = C.lock_files(files)
+        if locked:
+            entry["locked"] = locked
+            log(f"{appid}: лише читання — " + ", ".join(os.path.basename(p) for p in locked))
     prev = entry.get("applied_values")
     entry.update(level=level, applied_level=level, steps=len(ladder), lowres=(track == "lowres"),
                  note=manual_note + note, decision_note=note,

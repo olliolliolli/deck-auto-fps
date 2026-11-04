@@ -16,7 +16,35 @@ GAME_SETTINGS_FILE = os.path.join(CFG_DIR, "game_settings.json")
 
 # Налаштування, які можна задати окремо для гри (як «профіль гри» у швидкому меню SteamOS)
 PER_GAME_KEYS = ("bat_mode", "ac_mode", "quality_target", "auto_tdp", "auto_gpu_clock",
-                 "mango_limiter", "respect_manual_graphics")
+                 "mango_limiter", "respect_manual_graphics", "lock_config")
+
+# файли налаштувань, які можна робити «лише читання» (гра тоді не перезапише підібране);
+# реєстр Wine, сейви й PlayerPrefs — ніколи (там і прогрес, і все інше)
+LOCKABLE_EXT = (".ini", ".xml", ".json", ".cfg", ".txt", ".lua", ".config", ".conf")
+
+
+def lock_files(paths):
+    """Зняти дозвіл на запис (гра не перезапише). Повертає список заблокованих."""
+    out = []
+    for p in paths or []:
+        if not p or not p.lower().endswith(LOCKABLE_EXT) or os.path.basename(p).lower() == "user.reg":
+            continue
+        try:
+            st = os.stat(p).st_mode
+            os.chmod(p, st & ~0o222)
+            out.append(p)
+        except OSError:
+            pass
+    return out
+
+
+def unlock_files(paths):
+    for p in paths or []:
+        try:
+            st = os.stat(p).st_mode
+            os.chmod(p, st | 0o200)
+        except OSError:
+            pass
 
 
 def set_home(home):

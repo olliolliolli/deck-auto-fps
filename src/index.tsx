@@ -46,6 +46,7 @@ type Settings = {
   auto_tdp?: "battery" | "always" | "off";
   auto_gpu_clock?: boolean;
   mango_limiter?: boolean;
+  lock_config?: boolean;
   power_profiles?: boolean;
   bat_mode?: string;
   ac_mode?: string;
@@ -1427,6 +1428,14 @@ function Content() {
             description="Увімкни, якщо після змін у меню гри AutoFPS має більше не чіпати її графіку"
             checked={s.respect_manual_graphics}
             onChange={(v: boolean) => update("respect_manual_graphics", v)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="Файл налаштувань — «лише читання»"
+            description="Після запису AutoFPS гра не може перезаписати підібрану графіку (ні при старті, ні при виході). Зміни в меню гри тоді не зберігаються — вимкни, щоб налаштувати гру вручну"
+            checked={s.lock_config ?? true}
+            onChange={(v: boolean) => update("lock_config", v)}
           />
         </PanelSectionRow>
         <PanelSectionRow>

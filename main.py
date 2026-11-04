@@ -101,7 +101,8 @@ DEFAULT_SETTINGS = {
     "fg_allow_3x": False,
     "fg_flow_scale": 0.8,
     "fg_performance_mode": True,
-    "mango_limiter": True,          # обмежувач FPS у MangoHud, коли ліміт gamescope не діє
+    "mango_limiter": True,
+    "lock_config": True,            # файли налаштувань графіки — «лише читання» після запису плагіном          # обмежувач FPS у MangoHud, коли ліміт gamescope не діє
     "fps_counts_generated": False,  # MangoHud бачить лише справжні кадри гри (перевірено на Legion: 42 у MangoHud = 84 на екрані з Lossless ×2)
     "autotune": True,          # автопідбір графіки гри (Unreal/Unity)
     "ue5_tweak": True,         # твік Engine.ini для ігор на Unreal Engine 5
@@ -2241,6 +2242,8 @@ class Plugin:
             write_lsfg(self.settings, max(2, self.mult))
         if key == "fg_mode":
             self._write_fg_mode()
+        if key == "lock_config" and not value:
+            self._unlock_game_files()
         if key == "mango_limiter" and self.appid:
             if not value:
                 self.mango_cap = False
@@ -2309,9 +2312,22 @@ class Plugin:
             e["seen"] = seen
         _save_json(APPS_FILE, apps)
 
+    def _unlock_game_files(self, appid=None):
+        """Повернути дозвіл на запис файлам налаштувань (однієї гри або всіх)."""
+        tune = _load_json(TUNE_FILE, {})
+        changed = False
+        for k, e in tune.items():
+            if isinstance(e, dict) and e.get("locked") and (appid is None or k.split(":")[0] == str(appid)):
+                C.unlock_files(e.pop("locked"))
+                changed = True
+        if changed:
+            _save_json(TUNE_FILE, tune)
+
     async def set_game_enabled(self, appid, enabled):
         """Фронтенд повідомляє, що змінив параметри запуску гри."""
         self._mark_app(appid, enabled=enabled)
+        if not enabled:
+            self._unlock_game_files(appid)   # без AutoFPS гра знову сама зберігає налаштування
         if enabled:  # нове увімкнення — знову повний режим
             for fn in (f"mode_{appid}", f"fast_{appid}"):
                 try:
