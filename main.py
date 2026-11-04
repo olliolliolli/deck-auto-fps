@@ -102,7 +102,8 @@ DEFAULT_SETTINGS = {
     "fg_flow_scale": 0.8,
     "fg_performance_mode": True,
     "mango_limiter": True,
-    "lock_config": True,            # файли налаштувань графіки — «лише читання» після запису плагіном          # обмежувач FPS у MangoHud, коли ліміт gamescope не діє
+    "lock_config": False,           # файли налаштувань графіки — «лише читання» після запису плагіном
+                                    # (вимкнено: тоді гра не зберігає й керування, звук, мову з того ж файлу)          # обмежувач FPS у MangoHud, коли ліміт gamescope не діє
     "fps_counts_generated": False,  # MangoHud бачить лише справжні кадри гри (перевірено на Legion: 42 у MangoHud = 84 на екрані з Lossless ×2)
     "autotune": True,          # автопідбір графіки гри (Unreal/Unity)
     "ue5_tweak": True,         # твік Engine.ini для ігор на Unreal Engine 5
@@ -549,6 +550,16 @@ class Plugin:
         os.makedirs(PROFILES_DIR, exist_ok=True)
         self.device = detect_device()
         self.settings = LayeredSettings({**DEFAULT_SETTINGS, **_load_json(SETTINGS_FILE, {})})
+        try:   # «лише читання» вимкнено (загально чи для гри) — повернути запис заблокованим файлам
+            tune = _load_json(TUNE_FILE, {})
+            for k, e in tune.items():
+                if isinstance(e, dict) and e.get("locked") and \
+                        not C.settings_for(k.split(":")[0], dict(self.settings)).get("lock_config", False):
+                    C.unlock_files(e.pop("locked"))
+                    decky.logger.info(f"знято «лише читання»: {k}")
+            _save_json(TUNE_FILE, tune)
+        except Exception as e:  # noqa: BLE001
+            decky.logger.warning(f"unlock: {e}")
         # генерацією кадрів тепер керує окремий плагін Decky LSFG-VK (одноразовий перехід)
         if not self.settings.get("fg_external_migrated"):
             self.settings.update(fg_mode="external", fg_external_migrated=True)

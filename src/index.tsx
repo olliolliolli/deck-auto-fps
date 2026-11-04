@@ -1433,8 +1433,8 @@ function Content() {
         <PanelSectionRow>
           <ToggleField
             label="Файл налаштувань — «лише читання»"
-            description="Після запису AutoFPS гра не може перезаписати підібрану графіку (ні при старті, ні при виході). Зміни в меню гри тоді не зберігаються — вимкни, щоб налаштувати гру вручну"
-            checked={s.lock_config ?? true}
+            description="Лише для ігор, що самі скидають графіку. Увага: гра тоді не зберігає нічого з цього файлу — ні керування, ні звук, ні мову"
+            checked={s.lock_config ?? false}
             onChange={(v: boolean) => update("lock_config", v)}
           />
         </PanelSectionRow>

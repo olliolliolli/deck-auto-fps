@@ -1216,7 +1216,7 @@ def run(appid, args, device=None, log=print):
 
     values = ladder[level]
     adapter.write(cfg, values)
-    if settings.get("lock_config", True):
+    if settings.get("lock_config", False):
         # «лише читання»: гра не перезапише підібране (ні з меню, ні при виході, ні з хмари)
         files = [cfg] + (adapter.overlays(cfg) if hasattr(adapter, "overlays") else [])
         locked = C.lock_files(files)
