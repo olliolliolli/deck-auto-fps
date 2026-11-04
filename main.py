@@ -2414,6 +2414,10 @@ class Plugin:
                 "ref": prof.get("ref", ""), "ref_tag": g.get("ref_tag", ""),
                 "pd": O.pd_status() if prof.get("ref") == "pd" else None,
                 "found": bool(install and os.path.isdir(install)),
+                "manual": bool(g.get("manual")),
+                "manual_dll": g.get("manual_dll", ""),
+                "methods": O.method_options(a, install) if has_dir else [],
+                "dlls": list(O.DLL_CHAIN),
             }
         return res
 
@@ -2431,17 +2435,18 @@ class Plugin:
             decky.logger.error(f"OptiScaler update failed: {e}")
             return {"ok": False, "error": str(e)}
 
-    def _opti_enable_sync(self, appid):
+    def _opti_enable_sync(self, appid, method=None, dll=None):
         a = str(appid)
         info = self._installed_games().get(a)
         if not info or not info.get("install"):
             raise RuntimeError("гру не знайдено серед встановлених")
         return O.enable(a, info["install"], info["name"], settings=self.settings,
-                        log=decky.logger.info, reset=True)
+                        log=decky.logger.info, reset=True, method=method or None, dll=dll or None)
 
-    async def opti_enable(self, appid):
+    async def opti_enable(self, appid, method=None, dll=None):
+        """method/dll — вибір користувача повзунками (без автоматичного перебору)."""
         try:
-            g = await self._blocking(self._opti_enable_sync, appid)
+            g = await self._blocking(self._opti_enable_sync, appid, method, dll)
             return {"ok": True, "upscaler": g.get("upscaler_label"), "dll": g.get("dll"),
                     "tag": g.get("tag"), "ref": g.get("ref", ""),
                     "method": g.get("method", "optiscaler")}

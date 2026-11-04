@@ -532,6 +532,28 @@ def find_ffx(install, max_depth=5):
     return sorted(out, key=lambda p: (p.count("/"), p))
 
 
+METHOD_LABELS = {"optiscaler": "OptiScaler (DLSS → FSR 4)", "direct": "Один файл (FSR 3.1 гри → FSR 4)",
+                 "bridge": "Міст AutoFPS (FSR 2 гри → FSR 4)"}
+
+
+def method_options(appid, install):
+    """Способи FSR 4 для вибору вручну: [{id, label, ok, why}]. ok=False — у цій грі не спрацює."""
+    has_dir = bool(install and os.path.isdir(install))
+    prof = GAME_PROFILES.get(str(appid), {})
+    engine = detect_engine(install) if has_dir else "generic"
+    ffx = find_ffx(install) if has_dir else []
+    out = []
+    out.append({"id": "optiscaler", "label": METHOD_LABELS["optiscaler"],
+                "ok": not prof.get("unsupported"),
+                "why": prof.get("unsupported", "") or "Гра має підтримувати DLSS (або XeSS/FSR 2 у меню)"})
+    out.append({"id": "direct", "label": METHOD_LABELS["direct"], "ok": bool(ffx),
+                "why": "" if ffx else "У грі немає власного FSR 3.1"})
+    bridge_ok = bool(bridge_dll()) and (bool(prof.get("bridge")) or engine == "re_engine") and not ffx
+    out.append({"id": "bridge", "label": METHOD_LABELS["bridge"], "ok": bridge_ok,
+                "why": "" if bridge_ok else "Лише для ігор RE Engine з FSR 2 (RE2/RE3/RE4/RE7/RE8…)"})
+    return out
+
+
 def choose_method(appid, install, settings, gpu):
     """'direct' — «один файл» у вбудований FSR 3.1 гри; 'optiscaler' — підміна DLSS."""
     forced = (settings or {}).get("opti_method", "auto")
@@ -819,7 +841,7 @@ def _re_engine_disable_ingame_upscaling(install_path):
                 f.write(new)
 
 
-def install(appid, install_path, game_name="", args=None, settings=None, log=print, reset=False):
+def install(appid, install_path, game_name="", args=None, settings=None, log=print, reset=False, dll=None):
     """Встановлює OptiScaler у гру. Повертає словник стану гри.
     reset=True — ручне ввімкнення: почати перебір назв DLL спочатку."""
     settings = settings or C.load_json(C.SETTINGS_FILE, {})
@@ -852,7 +874,8 @@ def install(appid, install_path, game_name="", args=None, settings=None, log=pri
             game.pop(k, None)
     if game.get("target") and game["target"] != target and game.get("installed"):
         _remove_files(game)  # тека змінилась — прибрати старе
-    dll = game.get("dll") or ENGINE_PROFILES[engine]["dll"]
+    dll = dll or game.get("manual_dll") or game.get("dll") or ENGINE_PROFILES[engine]["dll"]
+    game["dll"] = dll
     gpu = effective_gpu(settings)
     upscaler, up_label = game_upscaler(appid, settings, gpu)
     opti_fg = bool(settings.get("opti_fg", False))
@@ -1356,7 +1379,9 @@ def analyze_bridge(appid, game, started, duration, crashed, log=print):
         game["bridge_crashes"] = int(game.get("bridge_crashes", 0)) + 1
         res.update(status="crash", title="FSR 4: гра закрилась одразу",
                    message=f"Гра закрилась через {int(duration)} с з мостом FSR2→FSR4")
-        if game["bridge_crashes"] >= 2:
+        if game["bridge_crashes"] >= 2 and game.get("manual"):
+            res["message"] += ". Міст вибрано вручну — лишаю; якщо гра й далі закривається, вибери інший спосіб"
+        elif game["bridge_crashes"] >= 2:
             bridge_remove(game)
             game.update(enabled=False, installed=False,
                         disabled_reason="Гра двічі закрилась одразу з мостом — міст вимкнено")
@@ -1396,18 +1421,48 @@ def analyze_bridge(appid, game, started, duration, crashed, log=print):
     return res if res["status"] != "ok" or res.get("first_ok") else None
 
 
-def enable(appid, install_path, game_name="", args=None, settings=None, log=print, reset=True):
-    """Одна кнопка: вибирає спосіб сам. Гра з FSR 3.1 → «один файл»; інакше OptiScaler."""
+def enable(appid, install_path, game_name="", args=None, settings=None, log=print, reset=True,
+           method=None, dll=None):
+    """method=None — спосіб вибирається сам (гра з FSR 3.1 → «один файл», RE Engine → міст, інакше
+    OptiScaler). method/dll задано — вибір користувача: ставимо саме його і далі нічого не
+    перемикаємо самі (лише повідомляємо, що не спрацювало)."""
     settings = settings or C.load_json(C.SETTINGS_FILE, {})
     appid = str(appid)
     gpu = effective_gpu(settings)
-    method = choose_method(appid, install_path, settings, gpu)
+    manual = method is not None
+    if manual and method not in METHOD_LABELS:
+        raise RuntimeError(f"невідомий спосіб: {method}")
+    if not manual:
+        method = choose_method(appid, install_path, settings, gpu)
+    g0 = load_game(appid)
+    g0["manual"] = manual
+    if dll and dll in DLL_CHAIN:
+        g0["manual_dll"] = dll
+    elif not manual:
+        g0.pop("manual_dll", None)
+    save_game(appid, g0)
+    if method != "optiscaler" and g0.get("installed") and g0.get("method", "optiscaler") == "optiscaler":
+        _remove_files(g0)                      # інший спосіб — прибрати OptiScaler з гри
+        g0.update(installed=False, files=[], backups=[])
+        save_game(appid, g0)
     if method == "bridge":
-        return bridge_install(appid, install_path, game_name, args, settings, log)
+        g = bridge_install(appid, install_path, game_name, args, settings, log)
+        g["manual"] = manual
+        save_game(appid, g)
+        return g
+    if method == "direct" and g0.get("bridge_files"):
+        bridge_remove(g0)                      # міст іншого способу — прибрати
+        g0.update(installed=False)
+        save_game(appid, g0)
     if method == "direct":
         try:
-            return direct_install(appid, install_path, game_name, args, settings, log, reset)
+            g = direct_install(appid, install_path, game_name, args, settings, log, reset)
+            g["manual"] = manual
+            save_game(appid, g)
+            return g
         except DirectExhausted:
+            if manual:
+                raise RuntimeError("«один файл» у цій грі не спрацював жодним варіантом — вибери інший спосіб")
             log("«один файл» не спрацював — ставлю OptiScaler")
     game = load_game(appid)
     if game.get("direct_files"):
@@ -1420,8 +1475,10 @@ def enable(appid, install_path, game_name="", args=None, settings=None, log=prin
         save_game(appid, game)
     if not installed_tag():
         download_latest(log)
-    g = install(appid, install_path, game_name, args, settings, log, reset=reset)
+    g = install(appid, install_path, game_name, args, settings, log, reset=reset,
+                dll=load_game(appid).get("manual_dll"))
     g["method"] = "optiscaler"
+    g["manual"] = manual
     save_game(appid, g)
     return g
 
@@ -1446,6 +1503,10 @@ def direct_feedback(appid, ok, log=print):
     try:
         return direct_install(appid, game.get("install"), game.get("name", ""), None, None, log)
     except DirectExhausted:
+        if game.get("manual"):
+            game["direct_tried"] = []
+            save_game(appid, game)
+            raise RuntimeError("усі варіанти «одного файлу» перепробувано — вибери інший спосіб повзунком")
         return enable(appid, game.get("install"), game.get("name", ""), None,
                       dict(C.load_json(C.SETTINGS_FILE, {}), opti_method="optiscaler"), log,
                       reset=False)
@@ -1613,6 +1674,9 @@ def analyze(appid, started, duration, crashed=False, log=print):
     res = {"t": int(time.time()), "duration": int(duration), "dll": dll, **info}
 
     def switch(reason):
+        if game.get("manual"):
+            # спосіб і бібліотеку вибрав користувач — нічого не перемикаємо самі
+            return f"{reason}. Вибери іншу бібліотеку повзунком «Бібліотека OptiScaler» у меню AutoFPS"
         nxt = _next_dll(game)
         tried = sorted(set(game.get("dll_tried", [])) | {dll})
         game["dll_tried"] = tried
@@ -1693,11 +1757,15 @@ def analyze_direct(appid, game, duration, crashed, log=print):
         game.pop("direct_variant", None)
         game["direct_runs"] = 0
         nxt = next((x for x in direct_chain(effective_gpu(C.load_json(C.SETTINGS_FILE, {}))) if x not in game["direct_tried"]), None)
+        if game.get("manual") and not nxt:
+            game["direct_tried"] = []           # вибір користувача: не переходимо на OptiScaler самі
+            nxt = next(iter(direct_chain(effective_gpu(C.load_json(C.SETTINGS_FILE, {})))), None)
         res.update(status="crash", title="FSR 4: гра закрилась одразу",
                    message=(f"Гра закрилась через {int(duration)} с з «{DIRECT_VARIANTS[v]['label']}». "
                             + (f"Наступного разу спробую «{DIRECT_VARIANTS[nxt]['label']}»" if nxt
-                               else "Варіанти «одного файлу» вичерпано — наступного разу буде OptiScaler")))
-        if not nxt:
+                               else "Варіанти «одного файлу» вичерпано — наступного разу буде OptiScaler")
+                            + (". Не допомагає — вибери інший спосіб повзунком" if game.get("manual") else "")))
+        if not nxt and not game.get("manual"):
             direct_remove(game)
             game.update(method="optiscaler", installed=False, direct_exhausted=True)
         game["check"] = res

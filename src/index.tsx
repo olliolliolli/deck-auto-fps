@@ -266,6 +266,54 @@ function FpsSlider({
   );
 }
 
+// Вибір одного з кількох варіантів повзунком (як у швидкому меню SteamOS); застосовується,
+// коли повзунок зупинився (інакше кожен проміжний крок перевстановлював би файли гри)
+type Choice = { id: string; label: string; ok: boolean; why: string };
+function ChoiceSlider({
+  title,
+  options,
+  value,
+  hint,
+  onPick,
+  disabled,
+}: {
+  title: string;
+  options: Choice[];
+  value: string;
+  hint: (o: Choice) => string;
+  onPick: (id: string) => void;
+  disabled?: boolean;
+}) {
+  const idx = Math.max(0, options.findIndex((o) => o.id === value));
+  const [pos, setPos] = useState(idx);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => setPos(idx), [idx]);
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+  const cur = options[Math.min(pos, options.length - 1)];
+  return (
+    <PanelSectionRow>
+      <SliderField
+        label={`${title}: ${cur.label}`}
+        description={hint(cur)}
+        value={pos}
+        min={0}
+        max={options.length - 1}
+        step={1}
+        notchCount={options.length}
+        notchTicksVisible
+        disabled={disabled}
+        onChange={(p: number) => {
+          setPos(p);
+          if (timer.current) clearTimeout(timer.current);
+          timer.current = setTimeout(() => {
+            if (options[p] && options[p].id !== value) onPick(options[p].id);
+          }, 700);
+        }}
+      />
+    </PanelSectionRow>
+  );
+}
+
 function hhmm(t: number): string {
   const d = new Date(t * 1000);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
@@ -304,7 +352,11 @@ type OptiGame = {
   ref: string;
   ref_tag: string;
   pd: PdStatus | null;
-  method: string; // "" | "direct" | "optiscaler"
+  method: string; // "" | "direct" | "optiscaler" | "bridge"
+  manual?: boolean;
+  manual_dll?: string;
+  methods?: { id: string; label: string; ok: boolean; why: string }[];
+  dlls?: string[];
   planned: string; // що вибере кнопка: "direct" («один файл») | "optiscaler"
   native_fsr31: boolean;
   direct_variant: string;
@@ -342,7 +394,7 @@ type OptiResult = {
 const startTuning = callable<[], boolean>("start_tuning");
 const optiStatus = callable<[appid?: number], OptiStatus>("opti_status");
 const optiUpdate = callable<[], OptiResult>("opti_update");
-const optiEnable = callable<[appid: number], OptiResult>("opti_enable");
+const optiEnable = callable<[appid: number, method?: string | null, dll?: string | null], OptiResult>("opti_enable");
 const optiDisable = callable<[appid: number], OptiResult>("opti_disable");
 const optiDirectFeedback = callable<[appid: number, ok: boolean], OptiResult>("opti_direct_feedback");
 const optiPdScan = callable<[], PdStatus>("opti_pd_scan");
@@ -477,9 +529,10 @@ const GameLaunchSection = memo(function GameLaunchSection() {
     : "З AutoFPS ще не запускалася";
 
   // Одна кнопка: підключити AutoFPS до гри (якщо ще ні) + завантажити й поставити OptiScaler
-  const toggleOpti = async () => {
+  const toggleOpti = async () => applyOpti(!opti?.game?.enabled);
+  // method/dll — вибір повзунком (без автоматичного перебору способів і назв бібліотеки)
+  const applyOpti = async (turnOn: boolean, method?: string, dll?: string) => {
     if (appid === null || !opti?.game) return;
-    const turnOn = !opti.game.enabled;
     try {
       if (turnOn) {
         setOptiBusy(opti.installed ? "Встановлюю в гру…" : "Завантажую OptiScaler…");
@@ -489,7 +542,7 @@ const GameLaunchSection = memo(function GameLaunchSection() {
           if (!ok) throw new Error("Steam не зберіг параметри запуску");
           await setGameEnabled(appid, true);
         }
-        const r = await optiEnable(appid);
+        const r = await optiEnable(appid, method ?? null, dll ?? null);
         if (r.ok && r.method === "bridge") {
           toaster.toast({
             title: "AutoFPS · FSR 4 увімкнено",
@@ -556,7 +609,7 @@ const GameLaunchSection = memo(function GameLaunchSection() {
     } else if (og.planned === "bridge" && !og.enabled) {
       optiLabel = "FSR 4 вимкнено · доступний міст AutoFPS";
       optiDesc = "Для цієї гри є власний міст FSR2→FSR4: чіткий інтерфейс, без REFramework і Nexus. " +
-        "Кнопка нижче поставить у грі FSR 2 «Продуктивність» (рендер 50%) — FSR 4 тримає картинку майже як «Якість», а FPS значно вищий";
+        "Повзунок нижче (міст) поставить у грі FSR 2 «Продуктивність» (рендер 50%) — FSR 4 тримає картинку майже як «Якість», а FPS значно вищий";
     } else if (og.enabled && og.method === "direct") {
       optiLabel = `⚡ FSR 4 у вбудований FSR 3.1 гри (${og.upscaler ?? "один файл"})`;
       const chk = og.direct_confirmed
@@ -700,7 +753,33 @@ const GameLaunchSection = memo(function GameLaunchSection() {
           <PanelSectionRow>
             <Field label={optiLabel} description={optiDesc} />
           </PanelSectionRow>
-          {!optiBlocked && (
+          {!optiBlocked && og.methods && og.methods.length > 0 && (
+            <ChoiceSlider
+              key={`m-${appid}-${og.enabled ? og.method : "off"}`}
+              title="Спосіб FSR 4"
+              disabled={!!optiBusy}
+              options={[{ id: "off", label: "Вимкнено", ok: true, why: "" }, ...og.methods]}
+              value={og.enabled ? og.method || "optiscaler" : "off"}
+              hint={(o) =>
+                o.id === "off"
+                  ? "Оригінальні файли гри, рідне масштабування"
+                  : (o.ok ? "" : `⚠ ${o.why}. `) + "Вибір діє з наступного запуску гри; сам нічого не перемикаю"
+              }
+              onPick={(id) => (id === "off" ? applyOpti(false) : applyOpti(true, id, og.manual_dll || undefined))}
+            />
+          )}
+          {!optiBlocked && og.enabled && (og.method || "optiscaler") === "optiscaler" && og.dlls && (
+            <ChoiceSlider
+              key={`d-${appid}-${og.dll}`}
+              title="Бібліотека OptiScaler"
+              disabled={!!optiBusy}
+              options={og.dlls.map((d) => ({ id: d, label: d, ok: true, why: "" }))}
+              value={og.dll || og.dlls[0]}
+              hint={() => "Під якою назвою OptiScaler підвантажується в гру. Не працює — спробуй іншу"}
+              onPick={(d) => applyOpti(true, "optiscaler", d)}
+            />
+          )}
+          {!optiBlocked && !(og.methods && og.methods.length > 0) && (
             <PanelSectionRow>
               <ButtonItem layout="below" disabled={!!optiBusy} onClick={toggleOpti}>
                 {optiBusy ||
