@@ -166,5 +166,54 @@ def fix(fix_id, install_launcher=None):
     return False, f"Невідоме виправлення: {fix_id}"
 
 
+REPO = "olliolliolli/deck-auto-fps"
+MAX_URL = 7500           # GitHub приймає URL до ~8 КБ
+
+
+def _version():
+    try:
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "package.json"), encoding="utf-8") as f:
+            return json.load(f).get("version", "?")
+    except (OSError, ValueError):
+        return "?"
+
+
+def report(appid=None, device=None):
+    """Посилання «створити issue» з уже заповненим звітом: самоперевірка, відкати, кінець лога."""
+    import urllib.parse
+    items = check(appid)
+    bad = [i for i in items if i["level"] != "ok"]
+    lines = [f"**AutoFPS** {_version()} · пристрій: {device or '?'} · гра: {appid or '—'}", "",
+             "### Самоперевірка"]
+    lines += [f"- {i['level']}: {i['title']} — {i['detail']}" for i in bad] or ["- усе гаразд"]
+    for name in ("last_rollback.json", "last_crash.json"):
+        txt = _read(os.path.join(C.CACHE_DIR, name))
+        if txt:
+            lines += ["", f"### {name}", "```", txt[:600], "```"]
+    if appid:
+        tune = C.load_json(C.TUNE_FILE, {})
+        e = {k: v for k, v in tune.items() if k.startswith(f"{appid}:")}
+        if e:
+            lines += ["", "### tune.json (ця гра)", "```", json.dumps(e, ensure_ascii=False)[:1200], "```"]
+    head = "\n".join(lines)
+    log_lines = _read(WRAPPER_LOG).splitlines()[-80:]
+    title = "Проблема: " + (bad[0]["title"] if bad else f"гра {appid or '?'}")
+    base = f"https://github.com/{REPO}/issues/new?title={urllib.parse.quote(title)}&body="
+    # довжину міряємо вже закодованою (кирилиця в URL — у 6 разів довша)
+    n = len(log_lines)
+    while True:
+        body = head
+        if n:
+            body += "\n\n### wrapper.log (кінець)\n```\n" + "\n".join(log_lines[-n:]) + "\n```"
+        url = base + urllib.parse.quote(body)
+        if len(url) <= MAX_URL or n == 0:
+            break
+        n = n // 2 if n > 8 else 0
+    if len(url) > MAX_URL:
+        url = base + urllib.parse.quote(head[:1200])
+    return url
+
+
 if __name__ == "__main__":
     print(json.dumps(check(sys.argv[1] if len(sys.argv) > 1 else None), ensure_ascii=False, indent=2))
