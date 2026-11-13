@@ -1299,6 +1299,9 @@ def run(appid, args, device=None, log=print):
         if locked:
             entry["locked"] = locked
             log(f"{appid}: лише читання — " + ", ".join(os.path.basename(p) for p in locked))
+    if adapter.comparable(values) == adapter.comparable(entry["original"]):
+        # чесно: записано те саме, що вже стояло в грі — у грі нічого не зміниться
+        note = "Графіку не змінено — твої налаштування гри вже на цьому рівні. " + note
     prev = entry.get("applied_values")
     entry.update(level=level, applied_level=level, steps=len(ladder), lowres=(track == "lowres"),
                  note=manual_note + note, decision_note=note,
