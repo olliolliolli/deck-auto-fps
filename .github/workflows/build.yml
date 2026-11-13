@@ -15,6 +15,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Перевірки (pyflakes, bash -n, автотести)
+        run: |
+          pip install -q pyflakes
+          python3 -m pyflakes main.py defaults/bin/*.py tests/*.py
+          bash -n defaults/bin/autofps
+          python3 -m unittest discover -s tests -v
       - name: MinGW (міст FSR2→FSR4)
         run: sudo apt-get update -q && sudo apt-get install -y -q gcc-mingw-w64-x86-64
       - run: bash build.sh
@@ -24,6 +30,13 @@ jobs:
         with:
           name: AutoFPS
           path: AutoFPS.zip
+      - name: Publish versioned release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          TAG="v$VER-b${{ github.run_number }}"
+          gh release create "$TAG" AutoFPS.zip --prerelease             --title "AutoFPS $VER (збірка ${{ github.run_number }})"             --notes "Окрема версія для відкату. Коміт ${{ github.sha }}."             --target ${{ github.sha }}
       - name: Publish release "latest"
         env:
           GH_TOKEN: ${{ github.token }}

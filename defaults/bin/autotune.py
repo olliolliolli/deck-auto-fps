@@ -17,6 +17,7 @@ AutoFPS autotune — автоматичне налаштування графі�
 """
 import glob
 import os
+import time
 import re
 import sys
 
@@ -991,6 +992,27 @@ def find_compat(appid):
     return os.path.join(C.HOME, ".local/share/Steam/steamapps/compatdata", appid)
 
 
+def _why_not_found(appid, compat):
+    """Зрозуміла причина, чому файл графіки не знайдено, і що зробити користувачу."""
+    try:
+        import generic_settings as G
+        k = G.known_path(compat, appid)
+        if k:
+            if not os.path.isfile(k[1]):
+                return ("settings_not_created",
+                        "Гра ще не створила файл налаштувань. Зайди в налаштування графіки гри, "
+                        "зміни будь-що, вийди з гри — з наступного запуску AutoFPS підбере графіку")
+            return ("settings_unreadable", "Файл налаштувань гри має невідомий формат — "
+                    "натисни «Зібрати діагностику» і надішли розробнику")
+    except Exception:  # noqa: BLE001
+        pass
+    if not os.path.isdir(os.path.join(compat, "pfx")):
+        return ("no_prefix", "Гра не запускалась через Proton або ще жодного разу не запускалась — "
+                "працює лише підбір FPS")
+    return ("unsupported", "Файл налаштувань графіки не знайдено (можливо, гра ще не зберегла "
+            "налаштування). Перевіряю знову при кожному запуску; поки працює лише підбір FPS")
+
+
 def run(appid, args, device=None, log=print):
     settings = C.settings_for(appid)          # загальні + окремі налаштування цієї гри
     if not settings.get("autotune", True) or appid in ("", "0"):
@@ -1012,7 +1034,8 @@ def run(appid, args, device=None, log=print):
 
     install = find_install(args) or entry.get("install")
     if not install:
-        entry["note"] = "Не знайшов теку гри"
+        entry["note"] = "Не знайшов теку гри — перевір, що гра запускається через Steam з параметром AutoFPS"
+        entry["reason"] = "no_install"
         C.save_json(C.TUNE_FILE, tune)
         return
     entry["install"] = install
@@ -1049,11 +1072,17 @@ def run(appid, args, device=None, log=print):
             log(f"generic settings: {e!r}")
             adapter = None
     if not adapter:
+        # «unknown» не остаточне: на кожному запуску пробуємо знову (файл міг з'явитися)
         entry["engine"] = "unknown"
-        entry["note"] = "Рушій не підтримується — працює лише підбір FPS"
+        entry["checked_at"] = int(time.time())
+        reason, note = _why_not_found(appid, compat)
+        entry["reason"], entry["note"] = reason, note
+        log(f"графіка: {reason} — {note}")
         C.save_json(C.TUNE_FILE, tune)
         return
     entry["engine"] = adapter.engine
+    if entry.pop("reason", None):
+        entry.pop("note", None)          # файл знайшовся — стара причина вже неактуальна
     adapter.entry = entry
     # файли, які ми минулого разу зробили «лише читання», — знову доступні для запису
     # (наш запис, відновлення оригіналу, безпечний режим)

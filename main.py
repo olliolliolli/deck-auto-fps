@@ -2851,6 +2851,27 @@ class Plugin:
             decky.logger.error(f"diagnostics failed: {e}")
             return {"ok": False, "error": str(e)}
 
+    async def health(self, appid=None):
+        """Самоперевірка (doctor.py): список пунктів з рівнем і можливим виправленням."""
+        try:
+            import doctor
+            a = appid or self._last_app()
+            return await self._blocking(doctor.check, str(a) if a else None)
+        except Exception as e:  # noqa: BLE001
+            decky.logger.error(f"health failed: {e!r}")
+            return [{"id": "health", "level": "error", "title": "Самоперевірка не вдалася",
+                     "detail": str(e)[:300], "fix": None}]
+
+    async def health_fix(self, fix_id):
+        try:
+            import doctor
+            ok, msg = await self._blocking(doctor.fix, fix_id, install_launcher)
+            decky.logger.info(f"health_fix {fix_id}: {ok} {msg}")
+            return {"ok": ok, "message": msg}
+        except Exception as e:  # noqa: BLE001
+            decky.logger.error(f"health_fix failed: {e!r}")
+            return {"ok": False, "message": str(e)[:300]}
+
     async def forget_all(self):
         self.games = {}
         _save_json(GAMES_FILE, self.games)
