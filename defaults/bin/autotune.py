@@ -1001,7 +1001,7 @@ def find_compat(appid):
     return os.path.join(C.HOME, ".local/share/Steam/steamapps/compatdata", appid)
 
 
-def _why_not_found(appid, compat):
+def _why_not_found(appid, compat, install=None):
     """Зрозуміла причина, чому файл графіки не знайдено, і що зробити користувачу."""
     try:
         import generic_settings as G
@@ -1016,8 +1016,9 @@ def _why_not_found(appid, compat):
     except Exception:  # noqa: BLE001
         pass
     if not os.path.isdir(os.path.join(compat, "pfx")):
-        return ("no_prefix", "Гра не запускалась через Proton або ще жодного разу не запускалась — "
-                "працює лише підбір FPS")
+        return ("native_unsupported", "Нативна Linux-версія гри: її файл налаштувань графіки ще не "
+                "підтримується (або гра ще не зберегла налаштування). Натисни «Повідомити про "
+                "проблему» — додам; поки працює підбір FPS")
     return ("unsupported", "Файл налаштувань графіки не знайдено (можливо, гра ще не зберегла "
             "налаштування). Перевіряю знову при кожному запуску; поки працює лише підбір FPS")
 
@@ -1084,7 +1085,7 @@ def run(appid, args, device=None, log=print):
         # «unknown» не остаточне: на кожному запуску пробуємо знову (файл міг з'явитися)
         entry["engine"] = "unknown"
         entry["checked_at"] = int(time.time())
-        reason, note = _why_not_found(appid, compat)
+        reason, note = _why_not_found(appid, compat, install)
         entry["reason"], entry["note"] = reason, note
         log(f"графіка: {reason} — {note}")
         C.save_json(C.TUNE_FILE, tune)

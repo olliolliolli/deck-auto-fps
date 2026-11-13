@@ -695,8 +695,54 @@ class UnityPrefsData(_Fmt):
         return text[:m.end()] + nb + text[i:] if n else text
 
 
+class FeralPrefs(_Fmt):
+    """Нативні Linux-порти Feral Interactive: ~/.local/share/feral-interactive/<гра>/preferences —
+    реєстр у XML. Керуємо лише значеннями всередині ключа Graphics → <відеокарта>."""
+    name = "feral"
+    LINE = re.compile(r'^(\s*)<(key|/key|value)(?:\s+name="([^"]*)")?(?:\s+type="(\w+)")?\s*>(?:([^<]*)</value>)?')
+
+    @staticmethod
+    def accepts(path):
+        return os.path.basename(path) == "preferences" and "feral-interactive" in path
+
+    def _iter(self, text):
+        stack = []
+        for line in text.splitlines(keepends=True):
+            m = self.LINE.match(line)
+            key = None
+            if m:
+                tag = m.group(2)
+                if tag == "key":
+                    stack.append(m.group(3) or "")
+                elif tag == "/key":
+                    if stack:
+                        stack.pop()
+                elif m.group(4) == "integer" and "Graphics" in stack                         and "AutoValueRemap" not in stack and m.group(5) is not None:
+                    key = "\\".join(stack[stack.index("Graphics"):] + [m.group(3)])
+            yield line, key, m
+
+    def items(self):
+        text, self.enc = _read_text(self.path)
+        return [(k, m.group(5).strip()) for _l, k, m in self._iter(text) if k]
+
+    def scale(self, key, value):
+        sc = scale_of(key.rsplit("\\", 1)[-1], value)
+        if not sc:
+            return None, False
+        return sc, (sc in TOGGLES or sc == ANISO)
+
+    def write(self, values):
+        text, enc = _read_text(self.path)
+        out = []
+        for line, k, m in self._iter(text):
+            if k and k in values:
+                line = line[:m.start(5)] + str(values[k]) + line[m.end(5):]
+            out.append(line)
+        _save(self.path, "".join(out), enc)
+
+
 FORMATS = {c.name: c for c in (FromSoftXml, XmlText, XmlAttr, KvLine, IniFmt, JsonFmt, FuncFmt, WinReg,
-                               GvasFmt, UnityPrefsData)}
+                               GvasFmt, UnityPrefsData, FeralPrefs)}
 
 # ---------------------------------------------------------------- пошук файлу налаштувань
 
@@ -793,11 +839,33 @@ def _known(compat):
     return None
 
 
+def _alnum(s):
+    return re.sub(r"[^a-z0-9]", "", str(s).lower())
+
+
+def native_candidates(install):
+    """Файли налаштувань нативних Linux-версій ігор (без Proton): порти Feral Interactive."""
+    home = os.path.expanduser("~")
+    base = os.path.join(home, ".local", "share", "feral-interactive")
+    if not (install and os.path.isdir(base)):
+        return []
+    want = _alnum(os.path.basename(os.path.normpath(install)))
+    out = []
+    for d in sorted(os.listdir(base)):
+        p = os.path.join(base, d, "preferences")
+        if os.path.isfile(p) and want and (_alnum(d) == want or _alnum(d) in want or want in _alnum(d)):
+            out.append(("feral", p))
+    return out
+
+
 def discover(compat, install):
     """(формат, шлях) файлу з найбільшою кількістю налаштувань якості (≥ 3) або None."""
     hit = _known(compat)
     if hit:
         return hit
+    for fmt, p in native_candidates(install):
+        if _try(fmt, p) >= 3:
+            return fmt, p
     user = os.path.join(compat, "pfx", "drive_c", "users", "steamuser")
     best = None
     for path, ext in _candidates(compat, install):

@@ -86,7 +86,7 @@ class Reasons(Base):
         self.assertEqual(A._why_not_found("1091500", self.compat)[0], "settings_not_created")
 
     def test_no_prefix(self):
-        self.assertEqual(A._why_not_found("5", os.path.join(self.tmp, "none"))[0], "no_prefix")
+        self.assertEqual(A._why_not_found("5", os.path.join(self.tmp, "none"))[0], "native_unsupported")
 
     def test_unsupported(self):
         compat = os.path.join(self.tmp, "compatdata", "6")
