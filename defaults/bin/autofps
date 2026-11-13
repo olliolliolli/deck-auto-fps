@@ -31,6 +31,11 @@ APPID="${APPID//[^0-9]/}"; [ -n "$APPID" ] || APPID=0   # лише цифри: a
 FAST_EXIT="${AUTOFPS_FAST_EXIT:-20}"   # гра, що закрилась швидше — вважається такою, що впала на старті
 
 log "=== Запуск гри appid=$APPID"
+# журнал змін: модулі, що змінюють гру, запускаються через journal.py (оригінали файлів
+# зберігаються; якщо гра впаде на старті — зміни відкочуються)
+export AUTOFPS_SESSION="$$-$(date +%s)"
+J=()
+[ -f "$DIR/journal.py" ] && J=("$DIR/journal.py" run "$APPID")
 log "команда: $(printf '%q ' "$@" | cut -c1-700)"
 
 # --- режим для цієї гри (понижується після падінь на старті)
@@ -64,14 +69,14 @@ rm -f "$CACHE/tuning_now" 2>/dev/null
 if [ -f "$DIR/autotune.py" ]; then
   # у безпечному режимі autotune лише повертає оригінальні налаштування гри (якщо ми їх міняли)
   AUTOFPS_SAFE=$([ "$MODE" = "safe" ] && echo 1 || echo 0) \
-    timeout 15 python3 "$DIR/autotune.py" "$APPID" "$@" >>"$LOG" 2>&1 \
+    timeout 15 python3 "${J[@]}" "$DIR/autotune.py" "$APPID" "$@" >>"$LOG" 2>&1 \
     || log "autotune завершився з помилкою (ігнорую)"
 fi
 TUNING="$(cat "$CACHE/tuning_now" 2>/dev/null)"
 # --- Unreal Engine 5: твік Engine.ini (кеш шейдерів, рівніший кадр, дешевші важкі ефекти)
 if [ -f "$DIR/ue_tweaks.py" ]; then
   if [ "$MODE" != "safe" ]; then UE_CMD=apply; else UE_CMD=remove; fi
-  timeout 20 python3 "$DIR/ue_tweaks.py" "$UE_CMD" "$APPID" "$@" >>"$LOG" 2>&1 \
+  timeout 20 python3 "${J[@]}" "$DIR/ue_tweaks.py" "$UE_CMD" "$APPID" "$@" >>"$LOG" 2>&1 \
     || log "ue_tweaks завершився з помилкою (ігнорую)"
 fi
 
@@ -87,7 +92,7 @@ fi
 #     перевстановлюється сам) і сказати Wine брати підмінну бібліотеку з теки гри
 OPTI_DLL=""; OPTI_FG=0; OPTI_METHOD=""
 if [ "$MODE" != "safe" ] && [ -f "$DIR/optiscaler.py" ]; then
-  OPTI_OUT="$(timeout 120 python3 "$DIR/optiscaler.py" ensure "$APPID" "$@" 2>>"$LOG")"
+  OPTI_OUT="$(timeout 120 python3 "${J[@]}" "$DIR/optiscaler.py" ensure "$APPID" "$@" 2>>"$LOG")"
   OPTI_DLL="$(echo "$OPTI_OUT" | sed -n 's/^DLL=//p')"
   OPTI_FG="$(echo "$OPTI_OUT" | sed -n 's/^FG=//p')"
   OPTI_METHOD="$(echo "$OPTI_OUT" | sed -n 's/^METHOD=//p')"
@@ -209,6 +214,7 @@ fi
 RC=$?
 DUR=$(( $(date +%s) - START ))
 log "гра завершилась через ${DUR} с, код $RC"
+[ -f "$DIR/journal.py" ] && timeout 20 python3 "$DIR/journal.py" end "$APPID" "$DUR" "$RC" "$FAST_EXIT" >>"$LOG" 2>&1
 
 # Одне швидке закриття — ще не падіння (користувач міг вийти сам: Steam завершує гру
 # сигналом, код 130 буває і при звичайному виході). Знижуємо режим після ДВОХ поспіль.

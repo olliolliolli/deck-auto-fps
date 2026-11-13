@@ -204,6 +204,15 @@ def _drop_lines(path, pred):
         f.writelines(line for line in lines if not pred(line.strip()))
 
 
+def write_mismatch(wanted, current):
+    """Чи не збереглась більшість записаних значень (дрібні розбіжності формату не рахуються)."""
+    keys = [k for k in wanted if k in current]
+    if not keys:
+        return bool(wanted)
+    bad = sum(1 for k in keys if changed_by_user({k: wanted[k]}, {k: current[k]}))
+    return bad * 2 > len(keys)
+
+
 def changed_by_user(applied, current):
     """Чи змінено значення, які ми записали минулого разу (у меню гри)."""
     for k, v in applied.items():
@@ -1262,6 +1271,26 @@ def run(appid, args, device=None, log=print):
 
     values = ladder[level]
     adapter.write(cfg, values)
+    # перевірка запису: прочитати файл назад — чи справді в ньому те, що ми записали
+    try:
+        bad = write_mismatch(adapter.comparable(values), adapter.read(cfg))
+    except Exception as e:  # noqa: BLE001
+        bad = True
+        log(f"{appid}: перевірка запису не вдалася: {e!r}")
+    if bad:
+        entry["write_failures"] = int(entry.get("write_failures", 0)) + 1
+        log(f"{appid}: записані налаштування не збереглися у файлі (раз {entry['write_failures']})")
+        if entry["write_failures"] >= 2:
+            adapter.restore(cfg, entry["original"])
+            entry.update(disabled=True, reason="write_failed",
+                         note="Не вдається записати налаштування графіки в цю гру — повернуто "
+                              "оригінал, підбір графіки вимкнено (FPS підбирається як і раніше)")
+            entry.pop("applied_values", None)
+            entry.pop("applied_level", None)
+            C.save_json(C.TUNE_FILE, tune)
+            return
+    else:
+        entry.pop("write_failures", None)
     if settings.get("lock_config", False):
         # «лише читання»: гра не перезапише підібране (ні з меню, ні при виході, ні з хмари)
         files = [cfg] + (adapter.overlays(cfg) if hasattr(adapter, "overlays") else [])

@@ -616,6 +616,7 @@ class Plugin:
         self.events = []
         self.loop = asyncio.get_event_loop()
         self.last_crash_t = int(time.time())
+        self.last_rollback_t = int(time.time())
         try:
             install_launcher()
         except Exception as e:  # noqa: BLE001
@@ -738,6 +739,28 @@ class Plugin:
                      f"Гра працювала {crash.get('dur')} с (код {crash.get('rc')}). "
                      + (f"Наступний запуск — {nxt}. " if nxt else "")
                      + "Збери діагностику й надішли Claude")
+
+    def _version_health(self):
+        """Після гри: чи не з'явились нові проблеми після оновлення плагіна."""
+        try:
+            import doctor
+            import versions
+            ver = _load_json(os.path.join(_PLUGIN_DIR, "package.json"), {}).get("version", "?")
+            msg = versions.record(ver, doctor.check(str(self.appid)))
+            if msg:
+                self._notify("AutoFPS: після оновлення стало гірше", msg)
+        except Exception as e:  # noqa: BLE001
+            decky.logger.warning(f"version health: {e!r}")
+
+    def _report_rollback(self):
+        rb = _load_json(os.path.join(CACHE_DIR, "last_rollback.json"), None)
+        if not rb or int(rb.get("t", 0)) <= getattr(self, "last_rollback_t", 0):
+            return
+        self.last_rollback_t = int(rb["t"])
+        n = len(rb.get("files") or [])
+        self._notify("AutoFPS: зміни відкочено",
+                     f"Гра закрилась через {rb.get('dur')} с — {n} змінених AutoFPS файлів повернуто "
+                     "до оригіналу. Якщо гра падає знову, наступний запуск буде безпечнішим")
 
     def _mode_report(self, cur):
         mode = cur.get("mode", "full")
@@ -1920,7 +1943,9 @@ class Plugin:
         cur = self._detect_game()
 
         if not cur:
+            self._report_rollback()         # журнал пише звіт уже після виходу з гри
             if self.appid is not None:
+                self._version_health()
                 self._opti_selfcheck(now)
                 self._report_crash()
                 if self.tuning and self.tm_pending and self.tm_saved_n == 0:
@@ -2861,6 +2886,18 @@ class Plugin:
             decky.logger.error(f"health failed: {e!r}")
             return [{"id": "health", "level": "error", "title": "Самоперевірка не вдалася",
                      "detail": str(e)[:300], "fix": None}]
+
+    async def health_report(self, appid=None):
+        """Посилання на готовий звіт про проблему (GitHub issue) — «чорна скринька»."""
+        try:
+            import doctor
+            a = appid or self._last_app()
+            url = await self._blocking(doctor.report, str(a) if a else None,
+                                       (self.device or {}).get("id"))
+            return {"ok": True, "url": url}
+        except Exception as e:  # noqa: BLE001
+            decky.logger.error(f"health_report failed: {e!r}")
+            return {"ok": False, "message": str(e)[:300]}
 
     async def health_fix(self, fix_id):
         try:

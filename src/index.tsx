@@ -196,6 +196,7 @@ const setGameEnabled = callable<[appid: number, enabled: boolean], boolean>("set
 const restoreOriginal = callable<[], boolean>("restore_original");
 type HealthItem = { id: string; level: "ok" | "warn" | "error"; title: string; detail: string; fix: string | null };
 const health = callable<[appid?: string | null], HealthItem[]>("health");
+const healthReport = callable<[appid?: string | null], { ok: boolean; url?: string; message?: string }>("health_report");
 const healthFix = callable<[fixId: string], { ok: boolean; message: string }>("health_fix");
 
 const ENGINE: Record<string, string> = {
@@ -1016,6 +1017,19 @@ function HealthPanel({ appid }: { appid: string | null }) {
       <PanelSectionRow>
         <ButtonItem layout="below" disabled={busy} onClick={run}>
           {busy ? "Перевіряю…" : "Перевірити ще раз"}
+        </ButtonItem>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <ButtonItem
+          layout="below"
+          disabled={busy}
+          onClick={async () => {
+            const r = await healthReport(appid);
+            if (r.ok && r.url) Navigation.NavigateToExternalWeb(r.url);
+            else toaster.toast({ title: "AutoFPS", body: `Не вдалося: ${r.message}` });
+          }}
+        >
+          Повідомити про проблему
         </ButtonItem>
       </PanelSectionRow>
     </PanelSection>
