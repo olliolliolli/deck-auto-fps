@@ -762,8 +762,28 @@ def _try(fmt_name, path):
         return 0
 
 
+# Відомі файли налаштувань (відносно steamuser у префіксі): перевіряються першими, бо
+# в теці гри можуть лежати файли зі «схожим» вмістом (опис опцій, значення за замовчуванням)
+KNOWN_FILES = (
+    ("json", "AppData/Local/CD Projekt Red/Cyberpunk 2077/UserSettings.json"),   # Cyberpunk 2077
+)
+
+
+def _known(compat):
+    root = os.path.join(compat, "pfx", "drive_c", "users", "steamuser")
+    for fmt, rel in KNOWN_FILES:
+        p = os.path.join(root, *rel.split("/"))
+        if os.path.isfile(p) and _try(fmt, p) >= 3:
+            return fmt, p
+    return None
+
+
 def discover(compat, install):
     """(формат, шлях) файлу з найбільшою кількістю налаштувань якості (≥ 3) або None."""
+    hit = _known(compat)
+    if hit:
+        return hit
+    user = os.path.join(compat, "pfx", "drive_c", "users", "steamuser")
     best = None
     for path, ext in _candidates(compat, install):
         names = ("winreg",) if ext == ".reg" else EXT_FORMATS[ext]
@@ -776,7 +796,10 @@ def discover(compat, install):
             except OSError:
                 mt = 0
             # реєстр — лише якщо ніде немає файлу (там і чужі програми бувають)
-            score = (n - (2 if fn == "winreg" else 0), mt)
+            # файли з префікса (їх гра справді читає) важливіші за файли в теці гри,
+            # де здебільшого лежать описи опцій і значення за замовчуванням
+            where = 0 if fn == "winreg" else (2 if path.startswith(user) else 1)
+            score = (where, n, mt)
             if best is None or score > best[0]:
                 best = (score, fn, path)
             break
@@ -800,8 +823,8 @@ class GenericAdapter:
     @classmethod
     def find(cls, install, compat, device, cached=None):
         """cached = (назва_формату, шлях) з минулого запуску — без повного пошуку."""
-        hit = None
-        if cached and cached[0] in FORMATS and os.path.isfile(cached[1]) and _try(*cached) >= 3:
+        hit = _known(compat)               # відомий файл важливіший за збережений вибір
+        if not hit and cached and cached[0] in FORMATS and os.path.isfile(cached[1]) and _try(*cached) >= 3:
             hit = cached
         if not hit:
             hit = discover(compat, install)
