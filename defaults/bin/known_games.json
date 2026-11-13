@@ -1,0 +1,9 @@
+{
+  "_comment": "Відомі файли налаштувань графіки (шлях відносно steamuser у префіксі Proton). Перевіряються раніше за загальний пошук. Додавайте гру: appid -> {name, format, path}.",
+  "1091500": {"name": "Cyberpunk 2077", "format": "json",
+              "path": "AppData/Local/CD Projekt Red/Cyberpunk 2077/UserSettings.json"},
+  "1245620": {"name": "Elden Ring", "format": "fromsoft",
+              "path": "AppData/Roaming/EldenRing/GraphicsConfig.xml"},
+  "1174180": {"name": "Red Dead Redemption 2", "format": "xmltext",
+              "path": "Documents/Rockstar Games/Red Dead Redemption 2/Settings/system.xml"}
+}

@@ -762,19 +762,34 @@ def _try(fmt_name, path):
         return 0
 
 
-# Відомі файли налаштувань (відносно steamuser у префіксі): перевіряються першими, бо
-# в теці гри можуть лежати файли зі «схожим» вмістом (опис опцій, значення за замовчуванням)
-KNOWN_FILES = (
-    ("json", "AppData/Local/CD Projekt Red/Cyberpunk 2077/UserSettings.json"),   # Cyberpunk 2077
-)
+# Відомі файли налаштувань — known_games.json поруч (appid -> format, path відносно steamuser).
+# Перевіряються раніше за загальний пошук: у теці гри можуть лежати «схожі» файли.
+KNOWN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "known_games.json")
+
+
+def known_game(appid):
+    try:
+        with open(KNOWN_FILE, "r", encoding="utf-8") as f:
+            g = json.load(f).get(str(appid))
+    except (OSError, ValueError):
+        return None
+    return g if isinstance(g, dict) and g.get("format") in FORMATS and g.get("path") else None
+
+
+def known_path(compat, appid=None):
+    """Повний шлях відомого файлу для гри (може ще не існувати) або None."""
+    appid = appid or os.path.basename(os.path.normpath(compat))
+    g = known_game(appid)
+    if not g:
+        return None
+    root = os.path.join(compat, "pfx", "drive_c", "users", "steamuser")
+    return g["format"], os.path.join(root, *g["path"].split("/"))
 
 
 def _known(compat):
-    root = os.path.join(compat, "pfx", "drive_c", "users", "steamuser")
-    for fmt, rel in KNOWN_FILES:
-        p = os.path.join(root, *rel.split("/"))
-        if os.path.isfile(p) and _try(fmt, p) >= 3:
-            return fmt, p
+    k = known_path(compat)
+    if k and os.path.isfile(k[1]) and _try(*k) >= 3:
+        return k
     return None
 
 

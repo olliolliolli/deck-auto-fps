@@ -1,0 +1,10 @@
+{"version":3,"data":[{"group_name":"/graphics/advanced","options":[
+{"name":"ShadowMeshQuality","type":"name","value":"High","default_value":"High","values":["Low","Medium","High"]},
+{"name":"LocalShadowsQuality","type":"name","value":"High","default_value":"High","values":["Low","Medium","High","Ultra"]},
+{"name":"CascadedShadowsRange","type":"name","value":"High","default_value":"High","values":["Low","Medium","High"]},
+{"name":"VolumetricFogResolution","type":"name","value":"High","default_value":"High","values":["Low","Medium","High","Ultra"]},
+{"name":"ScreenSpaceReflectionsQuality","type":"name","value":"High","default_value":"High","values":["Off","Low","Medium","High","Ultra","Psycho"]},
+{"name":"AmbientOcclusion","type":"name","value":"Medium","default_value":"Medium","values":["Off","Low","Medium","High"]},
+{"name":"MaxDynamicDecals","type":"name","value":"High","default_value":"High","values":["Low","Medium","High","Ultra"]},
+{"name":"CrowdDensity","type":"name","value":"High","default_value":"High","values":["Low","Medium","High"]},
+{"name":"FilmGrain","type":"bool","value":true,"default_value":true}]}]}

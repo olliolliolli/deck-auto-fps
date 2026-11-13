@@ -194,6 +194,9 @@ const RES_16_10 = [
 ];
 const setGameEnabled = callable<[appid: number, enabled: boolean], boolean>("set_game_enabled");
 const restoreOriginal = callable<[], boolean>("restore_original");
+type HealthItem = { id: string; level: "ok" | "warn" | "error"; title: string; detail: string; fix: string | null };
+const health = callable<[appid?: string | null], HealthItem[]>("health");
+const healthFix = callable<[fixId: string], { ok: boolean; message: string }>("health_fix");
 
 const ENGINE: Record<string, string> = {
   unreal: "Unreal Engine",
@@ -962,6 +965,63 @@ function OptiSection({
   );
 }
 
+// Самоперевірка: що не так і кнопка «Виправити» для кожного пункту, який можна виправити
+function HealthPanel({ appid }: { appid: string | null }) {
+  const [items, setItems] = useState<HealthItem[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    setBusy(true);
+    try { setItems(await health(appid)); } finally { setBusy(false); }
+  };
+  useEffect(() => { run(); }, [appid]);
+  const doFix = async (it: HealthItem) => {
+    if (!it.fix) return;
+    setBusy(true);
+    try {
+      let r: { ok: boolean; message: string };
+      if (it.fix.startsWith("wrapper:")) {
+        const id = Number(it.fix.split(":")[1]);
+        const cur = await readLaunchOptions(id);
+        const ok = await writeLaunchOptions(id, addWrapper(cur, fgExternal ? lsfgLauncher : ""));
+        if (ok) await setGameEnabled(id, true);
+        r = { ok, message: ok ? "AutoFPS підключено до гри" : "Steam не зберіг параметри запуску" };
+      } else {
+        r = await healthFix(it.fix);
+      }
+      toaster.toast({ title: "AutoFPS", body: r.message });
+    } finally {
+      setBusy(false);
+      run();
+    }
+  };
+  const bad = (items ?? []).filter((i) => i.level !== "ok");
+  const icon = { ok: "✓", warn: "⚠", error: "✕" };
+  return (
+    <PanelSection title="Самоперевірка">
+      {items && bad.length === 0 && (
+        <PanelSectionRow>
+          <Field label="✓ Усе гаразд" description={`${items.length} перевірок пройдено`} />
+        </PanelSectionRow>
+      )}
+      {bad.map((it) => (
+        <PanelSectionRow key={it.id}>
+          <Field label={`${icon[it.level]} ${it.title}`} description={it.detail} />
+          {it.fix && (
+            <ButtonItem layout="below" disabled={busy} onClick={() => doFix(it)}>
+              Виправити
+            </ButtonItem>
+          )}
+        </PanelSectionRow>
+      ))}
+      <PanelSectionRow>
+        <ButtonItem layout="below" disabled={busy} onClick={run}>
+          {busy ? "Перевіряю…" : "Перевірити ще раз"}
+        </ButtonItem>
+      </PanelSectionRow>
+    </PanelSection>
+  );
+}
+
 function Content() {
   const [st, setSt] = useState<Status | null>(null);
   const [tab, setTabState] = useState(lastTab);
@@ -1481,6 +1541,7 @@ function Content() {
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
+      <HealthPanel appid={st.appid ? String(st.appid) : st.tune?.appid ?? null} />
       <PanelSection title="Діагностика">
         <PanelSectionRow>
           <ButtonItem
