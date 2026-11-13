@@ -45,7 +45,7 @@ class Feral(unittest.TestCase):
 
     def test_write_only_graphics(self):
         f = G.FORMATS["feral"](self.prefs)
-        key = [k for k, _ in f.items() if k.endswith("\ShadowQuality")][0]
+        key = [k for k, _ in f.items() if k.endswith("ShadowQuality") and "Soft" not in k][0]
         with open(self.prefs, encoding="utf-8") as fh:
             before = fh.read()
         f.write({key: "0"})
@@ -56,6 +56,14 @@ class Feral(unittest.TestCase):
         self.assertEqual(len(diff), 1)
         self.assertIn('name="ShadowQuality"', diff[0][1])
         self.assertIn('DefaultShadowQuality" type="integer">1<', after)
+
+    def test_every_step_changes_something(self):
+        a = G.GenericAdapter("", "", {}, G.FORMATS["feral"], self.prefs)
+        ladder = a.ladder(a.read(self.prefs))
+        self.assertEqual(ladder[0], a.read(self.prefs))
+        for i in range(1, len(ladder)):
+            self.assertNotEqual(ladder[i], ladder[i - 1], f"сходинка {i} без змін")
+        self.assertGreaterEqual(len(ladder), 4)
 
     def test_other_game_not_matched(self):
         self.assertIsNone(G.discover(self.compat, os.path.join(self.tmp, "common", "Portal 2")))

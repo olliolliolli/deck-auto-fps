@@ -976,7 +976,10 @@ class GenericAdapter:
                 floor = min(floor, cap)
                 idx = max(floor, int(round(cap - frac * (cap - floor))))
                 st[k] = _cased(sc[idx], cur.get(k, ""))
-            steps.append(st)
+            # сходинка, що нічим не відрізняється від попередньої, — лише марний запуск:
+            # кожна сходинка драбини має справді щось змінювати
+            if not steps or st != steps[-1]:
+                steps.append(st)
         return steps
 
     def rank(self, values, ladder):
