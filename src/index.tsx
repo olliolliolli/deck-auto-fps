@@ -41,6 +41,7 @@ type Settings = {
   probe_s: number;
   fg_mode: "external" | "off" | "auto" | "always";
   dock_auto?: boolean;
+  dock_audio?: boolean;
   fg_tool?: "lsfg" | "mako" | "none";
   ue5_tweak?: boolean;
   unity_tweak?: boolean;
@@ -1496,6 +1497,14 @@ function Content() {
             description="Підключено телевізор чи монітор (HDMI / USB-C) — ігри з вибраною в AutoFPS роздільністю 16:10 запускаються в 16:9 (напр. 1440×900 → 1600×900). Відключено — повертається 16:10. Спрацьовує в момент підключення (без постійних перевірок); діє з наступного запуску гри"
             checked={s.dock_auto ?? true}
             onChange={(v: boolean) => update("dock_auto", v)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="Телевізор: звук через телевізор"
+            description="У момент підключення звук іде на телевізор (HDMI / USB-C), при відключенні — назад на динаміки чи навушники консолі"
+            checked={s.dock_audio ?? true}
+            onChange={(v: boolean) => update("dock_audio", v)}
           />
         </PanelSectionRow>
         <PanelSectionRow>

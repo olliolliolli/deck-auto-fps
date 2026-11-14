@@ -104,7 +104,8 @@ DEFAULT_SETTINGS = {
     "mango_limiter": True,
     "lock_config": False,           # файли налаштувань графіки — «лише читання» після запису плагіном
                                     # (вимкнено: тоді гра не зберігає й керування, звук, мову з того ж файлу)          # обмежувач FPS у MangoHud, коли ліміт gamescope не діє
-    "dock_auto": True,          # телевізор (HDMI/DP): роздільність ігор 16:9 замість 16:10
+    "dock_auto": True,
+    "dock_audio": True,         # телевізор: звук на HDMI/DP, при відключенні — назад          # телевізор (HDMI/DP): роздільність ігор 16:9 замість 16:10
     "fps_counts_generated": False,  # MangoHud бачить лише справжні кадри гри (перевірено на Legion: 42 у MangoHud = 84 на екрані з Lossless ×2)
     "autotune": True,          # автопідбір графіки гри (Unreal/Unity)
     "ue5_tweak": True,         # твік Engine.ini для ігор на Unreal Engine 5
@@ -2473,10 +2474,27 @@ class Plugin:
             loop = asyncio.get_event_loop()
             loop.add_reader(sock.fileno(), self._hotplug_read)
             self.hp_sock, self.hp_ext = sock, C.external_display()
+            if self.hp_ext:
+                self._dock_audio(True)       # плагін стартував, коли телевізор уже підключено
             decky.logger.info(f"телевізор: стежу за підключенням екрана (зараз: {self.hp_ext or 'немає'})")
         except Exception as e:  # noqa: BLE001
             self.hp_sock = None
             decky.logger.warning(f"телевізор: підписка на події екрана не вдалася: {e!r}")
+
+    def _dock_audio(self, tv):
+        """Звук на телевізор при підключенні, назад на консоль — при відключенні."""
+        if not self.settings.get("dock_audio", True):
+            return
+        try:
+            import dock_audio as DA
+            name = DA.to_tv() if tv else DA.to_handheld()
+            decky.logger.info(f"звук: {'телевізор' if tv else 'консоль'} -> {name}")
+            if tv and name:
+                self._notify("AutoFPS: звук на телевізорі", "Звук перемкнено на телевізор")
+            elif tv:
+                decky.logger.warning("звук: у телевізора немає звукового виходу HDMI/DP — лишаю як є")
+        except Exception as e:  # noqa: BLE001
+            decky.logger.warning(f"звук: перемкнути не вдалося: {e!r}")
 
     def _hotplug_stop(self):
         sock = getattr(self, "hp_sock", None)
@@ -2510,6 +2528,7 @@ class Plugin:
             return
         self.hp_ext = ext
         decky.logger.info(f"телевізор: {'підключено ' + str(ext) if ext else 'відключено'}")
+        self._dock_audio(bool(ext))
         emit = getattr(decky, "emit", None)
         loop = getattr(self, "loop", None) or asyncio.get_event_loop()
         if emit:
