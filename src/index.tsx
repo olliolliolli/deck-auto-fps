@@ -1208,7 +1208,7 @@ function Content() {
       )}
       {tab === "fps" && (
         <>
-      <PanelSection title="Ліміт FPS на екрані">
+      <PanelSection title="Ліміт FPS гри (без генерації)">
         <PanelSectionRow>
           <Field
             label={`Зараз ${st.power?.ac ? "🔌 від зарядки" : "🔋 від батареї"}: ${modeLabel(st.power?.mode ?? s.mode)}`}
@@ -1248,7 +1248,7 @@ function Content() {
             label={`Графіка підбирається під ${st.graphics_target ?? "—"} FPS гри`}
             description={
               (st.graphics_target_why ? st.graphics_target_why + ". " : "") +
-              "Справжніх кадрів, без генерації — щоб гра рівно тримала ліміт від батареї" +
+              "Справжніх кадрів гри; генерація кадрів множить їх зверху" +
               (s.quality_target !== "auto" ? " (задано вручну на вкладці «Ще»)" : "")
             }
           />
