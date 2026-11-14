@@ -933,13 +933,26 @@ class Plugin:
         if self.device.get("tv"):
             if m == "vrr" and not self.device.get("vrr"):
                 return "auto"                  # без VRR — рівний дільник частоти телевізора
-            if m.isdigit() and int(m) not in self.device["tiers"]:
-                # напр. 50 на 120 Гц — нерівно; найближчий нижчий дільник частоти
-                return str(max([t for t in self.device["tiers"] if t <= int(m)] or [self.device["tiers"][0]]))
+            ok = self._tv_bases()
+            if m.isdigit() and int(m) not in ok:
+                # напр. 50 на 120 Гц — нерівно; найближчий нижчий рівний рівень
+                # (з генерацією кадрів — щоб і кадри гри, і кадри на екрані ділили частоту)
+                return str(max([t for t in ok if t <= int(m)] or [ok[0]]))
         return m
 
     def _vrr(self):
         return bool(self.device.get("vrr")) and self._mode() == "vrr"
+
+    def _tv_bases(self):
+        """Телевізор без VRR: рівні FPS гри, за яких картинка рівна. З генерацією кадрів ×m —
+        і m×рівень має ділити частоту (120 Гц, ×2: 30→60, 60→120; 40→80 — ривки)."""
+        tiers = self.device["tiers"]
+        if self.device.get("vrr"):
+            return tiers
+        hz = int(self.device.get("max_hz") or 60)
+        m = getattr(self, "sfg", 1)
+        m = m if m and m >= 2 else 1
+        return [t for t in tiers if hz % (t * m) == 0] or [tiers[0]]
 
     def _tv_apply(self, ext):
         """Підключено/відключено телевізор: профіль екрана для ліміту FPS."""
@@ -1743,6 +1756,9 @@ class Plugin:
             if m < 2:
                 return native, 1
             fit = [t for t in tiers if t <= native and t * m in tiers]
+            if not fit and self.device.get("tv") and not self.device.get("vrr"):
+                # генерацію вимкнути не можемо (її вмикає інший плагін) — найнижчий рівний рівень
+                fit = [min([t for t in tiers if t * m in tiers] or [tiers[0]])]
             return (max(fit), m) if fit else (native, 1)
         if fg == "off" or not self._lsfg_cached()["ready"]:
             return native, 1

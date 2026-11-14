@@ -69,6 +69,7 @@ class TV(unittest.TestCase):
     def plugin(self, mode, ac=True):
         p = main.Plugin.__new__(main.Plugin)
         p.ac = ac
+        p.sfg = 1
         p.settings = {"mode": "auto", "power_profiles": True, "ac_mode": mode, "bat_mode": mode}
         p.device = main.tv_profile({"id": "legion_go_s", "vrr": True, "tiers": [30, 40, 47, 60, 90, 120]},
                                    120, False)
@@ -82,6 +83,23 @@ class TV(unittest.TestCase):
 
     def test_vrr_without_tv_vrr_becomes_auto(self):
         self.assertEqual(self.plugin("vrr")._mode(), "auto")
+
+    def test_fg_on_tv_even_output(self):
+        p = self.plugin("50")
+        p.sfg = 2
+        self.assertEqual(p._mode(), "30")             # 40×2=80 нерівно на 120 Гц → 30×2=60
+        p = self.plugin("60")
+        p.sfg = 2
+        self.assertEqual(p._mode(), "60")             # 60×2=120
+
+    def test_choose_fg_on_tv(self):
+        p = self.plugin("vrr")
+        p.sfg = 2
+        p.settings.update(headroom=0.95, fg_mode="external")
+        p.cur_info = {}
+        self.assertEqual(main.Plugin._choose(p, 50), (30, 2))
+        self.assertEqual(main.Plugin._choose(p, 65), (60, 2))
+        self.assertEqual(main.Plugin._choose(p, 25), (30, 2))
 
     def test_uneven_limit_snaps_down(self):
         self.assertEqual(self.plugin("50")._mode(), "40")
