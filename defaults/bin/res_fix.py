@@ -10,7 +10,9 @@
   * портах Feral: preferences — FullscreenWidth/Height, WindowWidth/Height…
 Змінюємо лише значення, у яких співвідношення сторін не збігається з екраном (> 3%).
 
-CLI:  python3 res_fix.py <appid> <команда гри…>
+CLI:  python3 res_fix.py <appid> <команда гри…>          — перед грою: під поточний екран
+      python3 res_fix.py restore <appid> <команда гри…>  — після гри: назад під екран консолі
+Так гра завжди зберігає 16:10, а на телевізорі отримує 16:9 лише на час гри.
 """
 import glob
 import os
@@ -166,10 +168,11 @@ def fix_feral(path, scr, appid=None, res_file=None, log=print):
     return changed
 
 
-def run(appid, args, drm=None, compat=None, log=print):
+def run(appid, args, drm=None, compat=None, log=print, restore=False):
+    """restore=True — після виходу з гри: роздільність у грі назад під екран консолі (16:10)."""
     if C.load_json(C.SETTINGS_FILE, {}).get("dock_auto", True) is False:
         return 0
-    scr = screen(drm)
+    scr = panel_size(drm) if restore else screen(drm)
     if not scr or str(appid) in ("", "0"):
         return 0
     res_file = os.path.join(C.CFG_DIR, "resolution.json")
@@ -201,6 +204,9 @@ def run(appid, args, drm=None, compat=None, log=print):
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         try:
-            run(sys.argv[1], sys.argv[2:])
+            if sys.argv[1] == "restore":
+                run(sys.argv[2], sys.argv[3:], restore=True)
+            else:
+                run(sys.argv[1], sys.argv[2:])
         except Exception as e:  # noqa: BLE001 — гру запускаємо за будь-яких умов
             print(f"res_fix error: {e!r}")

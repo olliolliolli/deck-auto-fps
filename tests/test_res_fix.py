@@ -57,6 +57,17 @@ class ResFix(unittest.TestCase):
     def test_tv_keeps_16_9(self):
         self.assertFalse(R.fix_reg(self.reg, R.screen(drm(self.tmp, "1920x1080\n1280x720")), log=self.logs.append))
 
+    def test_session_tv_then_restore(self):
+        compat = os.path.join(self.tmp, "compat")
+        os.makedirs(os.path.join(compat, "pfx"))
+        shutil.copy(os.path.join(FIX, "tr2013_user.reg"), os.path.join(compat, "pfx", "user.reg"))
+        reg = os.path.join(compat, "pfx", "user.reg")
+        d = drm(self.tmp, "1920x1080")
+        R.run("203160", [], drm=d, compat=compat, log=self.logs.append)          # старт на ТВ
+        self.assertIn('"FullscreenHeight"=dword:00000438', self.read(reg).split("Display] 1")[0])
+        R.run("203160", [], drm=d, compat=compat, log=self.logs.append, restore=True)  # вихід
+        self.assertIn('"FullscreenHeight"=dword:000004b0', self.read(reg).split("Display] 1")[0])
+
     def test_feral(self):
         p = os.path.join(self.tmp, "preferences")
         shutil.copy(os.path.join(FIX, "feral_rottr_preferences"), p)
