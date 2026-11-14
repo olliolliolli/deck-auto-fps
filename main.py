@@ -2118,6 +2118,15 @@ class Plugin:
                 # ліміт — справжні кадри гри; генерація лише множить їх зверху (не вище частоти екрана)
                 self.base, self.mult = max(1, min(int(fixed), int(self.device["max_hz"]) // m)), m
                 self._apply()
+            elif self._must_cap() and now - self.last_apply > 5:
+                # телевізор без VRR + генерація: і до заміру — рівний ліміт (30 → 60), інакше ривки;
+                # якщо гру вже міряли — її рівний рівень з минулого разу
+                ok = self._tv_bases()
+                prev = int((self.games.get(str(self.appid)) or {}).get("base") or 0)
+                self.base = max([t for t in ok if t <= prev] or [ok[0]])
+                self.mult = self.sfg
+                self.mango_cap = True
+                self._apply()
             # підбір графіки без кнопки стояв би вічно — через 3 хв гри починаємо самі
             if self.tuning and now - self.phase_t > 180:
                 self.user_started = True
