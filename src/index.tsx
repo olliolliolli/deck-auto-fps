@@ -42,6 +42,7 @@ type Settings = {
   fg_mode: "external" | "off" | "auto" | "always";
   dock_auto?: boolean;
   dock_audio?: boolean;
+  tv_max_height?: number;
   fg_tool?: "lsfg" | "mako" | "none";
   ue5_tweak?: boolean;
   unity_tweak?: boolean;
@@ -202,6 +203,7 @@ type DisplayState = {
   handheld: Record<string, string>;
 };
 const displayState = callable<[], DisplayState>("display_state");
+const displayRestored = callable<[], boolean>("display_restored");
 const setGameEnabled = callable<[appid: number, enabled: boolean], boolean>("set_game_enabled");
 const restoreOriginal = callable<[], boolean>("restore_original");
 type HealthItem = { id: string; level: "ok" | "warn" | "error"; title: string; detail: string; fix: string | null };
@@ -1500,6 +1502,15 @@ function Content() {
           />
         </PanelSectionRow>
         <PanelSectionRow>
+          <DropdownItem
+            label="Телевізор: роздільність гри не вище"
+            description="Гра рендерить у цій роздільності, телевізор масштабує на весь екран. 4K для Legion — забагато"
+            rgOptions={[1080, 1440, 2160].map((h) => ({ data: h, label: h === 2160 ? "4K (як у телевізора)" : `${h}p` }))}
+            selectedOption={s.tv_max_height ?? 1080}
+            onChange={(o: { data: number }) => update("tv_max_height", o.data)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
           <ToggleField
             label="Телевізор: звук через телевізор"
             description="У момент підключення звук іде на телевізор (HDMI / USB-C), при відключенні — назад на динаміки чи навушники консолі"
@@ -1651,6 +1662,7 @@ export default definePlugin(() => {
 
   // Телевізор: у момент підключення — роздільність ігор 16:9, при відключенні — назад 16:10
   let dockKey: string | null = null;
+  const s0 = (d: DisplayState) => Object.values(d.games)[0]?.replace("x", "×") ?? "1080p";
   const dockSync = async () => {
     let d: DisplayState;
     try {
@@ -1672,12 +1684,13 @@ export default definePlugin(() => {
         /* гру видалено */
       }
     }
+    if (!key) await displayRestored().catch(() => false);
     if (first && !key) return;          // старт без телевізора — нічого не повідомляємо
     toaster.toast({
       title: key ? "AutoFPS: телевізор підключено" : "AutoFPS: екран консолі",
       body: key
-        ? `${d.external!.w}×${d.external!.h} — ігри запускатимуться в 16:9 без чорних смуг` +
-          (n ? ` (${n} ігор з ручною роздільністю)` : "") + ". Запущену гру перезапусти"
+        ? `${d.external!.w}×${d.external!.h} — ігри рендерять у 16:9 до ${s0(d)} (телевізор масштабує сам)` +
+          (n ? `, ${n} ігор` : "") + ". Запущену гру перезапусти"
         : "Роздільність ігор повернуто до 16:10",
     });
   };
