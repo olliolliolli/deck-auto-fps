@@ -40,6 +40,7 @@ type Settings = {
   warmup_s: number;
   probe_s: number;
   fg_mode: "external" | "off" | "auto" | "always";
+  dock_auto?: boolean;
   fg_tool?: "lsfg" | "mako" | "none";
   ue5_tweak?: boolean;
   unity_tweak?: boolean;
@@ -193,6 +194,13 @@ const RES_16_10 = [
   { w: 1440, h: 900, label: "900p 1440×900" },
   { w: 1280, h: 800, label: "800p 1280×800" },
 ];
+type DisplayState = {
+  external: { connector: string; w: number; h: number } | null;
+  enabled: boolean;
+  games: Record<string, string>;
+  handheld: Record<string, string>;
+};
+const displayState = callable<[], DisplayState>("display_state");
 const setGameEnabled = callable<[appid: number, enabled: boolean], boolean>("set_game_enabled");
 const restoreOriginal = callable<[], boolean>("restore_original");
 type HealthItem = { id: string; level: "ok" | "warn" | "error"; title: string; detail: string; fix: string | null };
@@ -1484,6 +1492,14 @@ function Content() {
         </PanelSectionRow>
         <PanelSectionRow>
           <ToggleField
+            label="Телевізор: картинка 16:9 без чорних смуг"
+            description="Підключено телевізор чи монітор (HDMI / USB-C) — ігри з вибраною в AutoFPS роздільністю 16:10 запускаються в 16:9 (напр. 1440×900 → 1600×900). Відключено — повертається 16:10. Діє з наступного запуску гри"
+            checked={s.dock_auto ?? true}
+            onChange={(v: boolean) => update("dock_auto", v)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
             label="Режим «Авто»: починати за кнопкою"
             description="Щоб не міряти FPS у меню гри: у режимі «Авто» замір FPS стартує після «▶ Почати підбір» на вкладці «Гра». Графіка й фіксований ліміт кнопки не потребують"
             checked={s.start_on_button ?? true}
@@ -1624,6 +1640,41 @@ export default definePlugin(() => {
     }
   }, 5000);
 
+  // Телевізор: перемикаємо роздільність ігор на 16:9 і назад (Steam застосує при запуску гри)
+  let dockKey: string | null = null;
+  const dockSync = async () => {
+    let d: DisplayState;
+    try {
+      d = await displayState();
+    } catch {
+      return;
+    }
+    const key = d.enabled && d.external ? `${d.external.connector}:${d.external.w}x${d.external.h}` : "";
+    if (key === dockKey) return;
+    const first = dockKey === null;
+    dockKey = key;
+    const target = key ? d.games : d.handheld;
+    let n = 0;
+    for (const [id, r] of Object.entries(target)) {
+      try {
+        SteamClient.Apps.SetAppResolutionOverride(Number(id), r);
+        n++;
+      } catch {
+        /* гру видалено */
+      }
+    }
+    if (first && !key) return;          // старт без телевізора — нічого не повідомляємо
+    toaster.toast({
+      title: key ? "AutoFPS: телевізор підключено" : "AutoFPS: екран консолі",
+      body: key
+        ? `${d.external!.w}×${d.external!.h} — ігри запускатимуться в 16:9 без чорних смуг` +
+          (n ? ` (${n} ігор з ручною роздільністю)` : "") + ". Запущену гру перезапусти"
+        : "Роздільність ігор повернуто до 16:10",
+    });
+  };
+  dockSync();
+  const dockWatch = window.setInterval(dockSync, 4000);
+
   return {
   name: "AutoFPS",
   titleView: <div className={staticClasses.Title}>AutoFPS</div>,
@@ -1632,6 +1683,7 @@ export default definePlugin(() => {
   onDismount() {
     removeEventListener("autofps_toast", onToast);
     window.clearInterval(watch);
+    window.clearInterval(dockWatch);
   },
   };
 });

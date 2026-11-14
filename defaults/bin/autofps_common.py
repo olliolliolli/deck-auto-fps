@@ -1,6 +1,7 @@
 """Спільний код для бекенда (main.py) і скриптів запуску (autotune.py)."""
 import json
 import os
+import re
 
 HOME = os.environ.get("AUTOFPS_HOME") or os.path.expanduser("~")
 CFG_DIR = os.path.join(HOME, ".config", "autofps")
@@ -113,6 +114,44 @@ def percentile(values, p):
     lo = int(k)
     hi = min(lo + 1, len(s) - 1)
     return s[lo] + (s[hi] - s[lo]) * (k - lo)
+
+
+DRM = "/sys/class/drm"
+
+
+def external_display(drm=None):
+    """Підключений зовнішній екран (HDMI / DP через USB-C): {"connector", "w", "h"} або None."""
+    import glob as _g
+    drm = drm or DRM
+    for st in sorted(_g.glob(os.path.join(drm, "card*-*", "status"))):
+        name = os.path.basename(os.path.dirname(st))
+        if "eDP" in name or "Writeback" in name:
+            continue
+        try:
+            with open(st, encoding="utf-8") as f:
+                if f.read().strip() != "connected":
+                    continue
+            with open(os.path.join(os.path.dirname(st), "modes"), encoding="utf-8") as f:
+                first = f.readline().strip()
+        except OSError:
+            continue
+        m = re.match(r"^(\d+)x(\d+)", first)
+        w, h = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+        return {"connector": name.split("-", 1)[1], "w": w, "h": h}
+    return None
+
+
+TV_RES = [(1280, 720), (1600, 900), (1920, 1080), (2560, 1440), (3840, 2160)]
+
+
+def dock_resolution(handheld, tv_h):
+    """Роздільність 16:9 для телевізора замість ручної 16:10 (без чорних смуг):
+    найбільша стандартна 16:9 не вища за ручну й не вища за екран телевізора."""
+    m = re.match(r"^(\d+)x(\d+)$", str(handheld or ""))
+    h = int(m.group(2)) if m else 1080
+    cands = [r for r in TV_RES if r[1] <= h and (not tv_h or r[1] <= tv_h)] or [TV_RES[0]]
+    w, hh = cands[-1]
+    return f"{w}x{hh}"
 
 
 def panel_vrr_range():

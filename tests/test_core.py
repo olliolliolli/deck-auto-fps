@@ -148,5 +148,30 @@ class Target(unittest.TestCase):
         st["bat_mode"] = "20"
         self.assertEqual(C.quality_target(st, dev), 30)
 
+class Dock(unittest.TestCase):
+    def test_dock_resolution(self):
+        self.assertEqual(C.dock_resolution("1440x900", 2160), "1600x900")
+        self.assertEqual(C.dock_resolution("1280x800", 1080), "1280x720")
+        self.assertEqual(C.dock_resolution("1920x1200", 1080), "1920x1080")
+        self.assertEqual(C.dock_resolution("1920x1200", 720), "1280x720")
+
+    def test_external_display(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            for name, st, mode in (("card0-eDP-1", "connected", "1920x1200"),
+                                   ("card0-DP-1", "disconnected", ""),
+                                   ("card0-DP-2", "connected", "3840x2160\n1920x1080")):
+                os.makedirs(os.path.join(tmp, name))
+                with open(os.path.join(tmp, name, "status"), "w") as f:
+                    f.write(st + "\n")
+                with open(os.path.join(tmp, name, "modes"), "w") as f:
+                    f.write(mode)
+            self.assertEqual(C.external_display(tmp), {"connector": "DP-2", "w": 3840, "h": 2160})
+            os.remove(os.path.join(tmp, "card0-DP-2", "status"))
+            self.assertIsNone(C.external_display(tmp))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()
