@@ -1,0 +1,52 @@
+WINE REGISTRY Version 2
+
+[Software\\Crystal Dynamics\\Tomb Raider\\Graphics] 1794688514
+#time=1dd7477a708a904
+"AdapterId"=dword:00000000
+"AntiAliasingMode"=dword:00000001
+"AspectRatio"=dword:00000000
+"AtiForceFetch4"=dword:00000000
+"BestTextureFilter"=dword:00000006
+"Brightness"=hex:00,00,80,3f
+"Contrast"=dword:000001f4
+"DisableDriverManagement"=dword:00000000
+"DisableDynamicTextures"=dword:00000000
+"DisableHardwareShadowMaps"=dword:00000000
+"DisableNonPow2Textures"=dword:00000000
+"DisableNullRenderTargets"=dword:00000000
+"DisablePureDevice"=dword:00000000
+"DOFQuality"=dword:00000001
+"DX11AdapterId"=dword:00000000
+"DX11OutputId"=dword:00000000
+"EnableGDI_Cursor"=dword:00000001
+"EnableHighPrecisionRT"=dword:00000000
+"EnableMotionBlur"=dword:00000001
+"EnablePostProcess"=dword:00000001
+"EnableScreenEffects"=dword:00000001
+"EnableTessellation"=dword:00000000
+"ExclusiveFullscreen"=dword:00000001
+"Fullscreen"=dword:00000001
+"FullscreenHeight"=dword:00000438
+"FullscreenRefreshRate"=dword:00000078
+"FullscreenWidth"=dword:00000780
+"HairQuality"=dword:00000000
+"LODScale"=dword:00000002
+"PrecreateShaders"=dword:00000001
+"ReflectionQuality"=dword:00000001
+"RenderAPI"=dword:00000000
+"ShadowMode"=dword:00000001
+"ShadowResolution"=dword:00000001
+"SSAOMode"=dword:00000001
+"StereoDepth"=hex:00,00,00,3f
+"StereoEnabled"=dword:00000000
+"StereoStrength"=hex:00,00,00,3f
+"TextureQuality"=dword:00000000
+"UseFPUPreserve"=dword:00000000
+"UseRefDevice"=dword:00000000
+"VSyncMode"=dword:00000001
+"WindowPlacement"=hex:2c,00,00,00,00,00,00,00,01,00,00,00,00,00,00,00,00,00,00,\
+  00,00,00,00,00,00,00,00,00,f0,00,00,00,87,00,00,00,90,06,00,00,b1,03,00,00
+
+[Software\\Wine\\Display] 1
+"FullscreenWidth"=dword:00000780
+"FullscreenHeight"=dword:00000438
