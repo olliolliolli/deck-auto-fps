@@ -1564,6 +1564,7 @@ class Plugin:
     # сесіях заміру не було зовсім і підбір стояв. Тепер: усю сесію збираємо 10-секундні вікна,
     # оцінюємо «скільки гра тягне» і кожні 30 с зберігаємо в tune.json (вихід з гри нічого не губить).
 
+    MON_WINDOWS = 6         # моніторинг: середній FPS за хвилину вирішує, чи знижувати
     TM_SKIP_S = 45          # логотипи; завантаження й меню далі відсіюються фільтром вікон
     TM_MIN_WINDOWS = 4      # ≥ 40 с чистої гри до першого запису
     TM_EXIT_WINDOWS = 3     # вихід з гри раніше — зберігаємо, якщо є хоч 30 с чистої гри
@@ -1618,11 +1619,12 @@ class Plugin:
             return
         if p10 < med * 0.5:
             return                                   # ривки: шейдери, підвантаження
+        mean = sum(fps) / len(fps)              # середній FPS вікна (важкі й легкі сцени разом)
         if capped:
             # тримає ліміт: запас оцінюємо за навантаженням GPU (99% — запасу немає)
-            est = p10 * (min(1.8, 97.0 / max(gpu, 40.0)) if gpu is not None else 1.0)
+            est = mean * (min(1.8, 97.0 / max(gpu, 40.0)) if gpu is not None else 1.0)
         else:
-            est = p10
+            est = mean
         self.tm_windows.append((round(med, 1), round(est, 1)))
         del self.tm_windows[:-60]
         # провали відносно звичного рівня цієї сесії (перехід між рівнями, заставка) — геть
@@ -1728,7 +1730,7 @@ class Plugin:
         target = C.quality_target(self.settings, self.device)
         last = entry.get("last")
         if lower_only and last and last.get("level") == entry["applied_level"]:
-            p10 = min(p10, last["p10"])  # важка сцена — враховуємо гірший випадок
+            p10 = (p10 + last["p10"]) / 2  # тривала важка ділянка — зсуваємо оцінку, а не беремо мінімум
         elif lower_only:
             return
         entry["last"] = {"level": entry["applied_level"], "p10": round(p10, 1),
@@ -1772,6 +1774,7 @@ class Plugin:
         self._apply()
 
     def _lock(self, base, mult, now, why, detail="", save=True):
+        self.mon_avgs = []          # новий рівень — середнє рахуємо заново
         old_out = self._out_fps() if self.phase == "locked" else 0
         self.base, self.mult = base, mult
         self.phase, self.phase_t, self.samples = "locked", now, []
@@ -2180,44 +2183,57 @@ class Plugin:
             return
 
         if self.phase == "locked":
-            # Steam може перезаписати ліміт — підтверджуємо раз на 5 с
-            if now - self.last_apply > 5:
-                self._apply()
-            window = [s for s in self.samples if now - s[0] <= 10]
-            if now - self.phase_t < 10 or len(window) < 10:
-                return
-            self.samples = window
-            if now - window[0][0] < 9:
-                return
-            p10 = percentile([s[1] for s in window], 0.10)
-            gpus = [s[2] for s in window if s[2] is not None]
-            gpu_avg = sum(gpus) / len(gpus) if gpus else None
+            self._monitor_locked(now)
 
-            if p10 < self.base * float(self.settings["drop_ratio"]):
-                self.bad_windows += 1
-            else:
-                self.bad_windows = 0
-            if self.bad_windows >= 2 and self.gpu_state in ("ref", "descending"):
-                self.bad_windows = 0      # просідання від підбору частоти GPU — він сам поверне
-                return
-            if self.bad_windows >= 2 and (self._gpu_rescue("FPS просів") or self._tdp_rescue()):
-                self.bad_windows = 0      # спершу повертаємо потужність, FPS не чіпаємо
-                return
-            if self.bad_windows >= 2:
-                if self.sfg < 2:
-                    self._record_tune(p10, lower_only=True)
-                self._step_down(now, p10)
-                return
+    def _monitor_locked(self, now):
+        """Стан «locked»: стежимо за FPS і знижуємо рівень, якщо СЕРЕДНЄ за хвилину нижче цілі."""
+        # Steam може перезаписати ліміт — підтверджуємо раз на 5 с
+        if now - self.last_apply > 5:
+            self._apply()
+        window = [s for s in self.samples if now - s[0] <= 10]
+        if now - self.phase_t < 10 or len(window) < 10:
+            return
+        self.samples = window
+        if now - window[0][0] < 9:
+            return
+        vals = [s[1] for s in window]
+        avg = sum(vals) / len(vals)
+        gpus = [s[2] for s in window if s[2] is not None]
+        gpu_avg = sum(gpus) / len(gpus) if gpus else None
 
-            # Запас по GPU — пробуємо вищий рівень (не частіше ніж раз на 3 хв)
-            if gpu_avg is not None and gpu_avg < 55 and \
-                    self.base * self.mult < self.device["tiers"][-1]:
-                self.idle_windows += 1
-            else:
-                self.idle_windows = 0
-            if self.idle_windows >= 6 and now - self.last_probe > 180 and self.sfg < 2:
-                self._start_probe(now, upgrade=True)
-            self.samples = [s for s in self.samples if now - s[0] <= 1]
+        # Рішення — за СЕРЕДНІМ FPS за останню хвилину (6 вікон по 10 с), а не за найгіршою
+        # секундою: у грі чергуються легкі й важкі сцени, коротка важка сцена — не привід
+        # знижувати графіку чи ліміт
+        self.mon_avgs = (getattr(self, "mon_avgs", []) + [avg])[-self.MON_WINDOWS:]
+        minute = sum(self.mon_avgs) / len(self.mon_avgs)
+        full = len(self.mon_avgs) >= self.MON_WINDOWS
+        if full and minute < self.base * float(self.settings["drop_ratio"]):
+            self.bad_windows += 1
+        else:
+            self.bad_windows = 0
+        if self.bad_windows >= 1 and self.gpu_state in ("ref", "descending"):
+            self.bad_windows = 0      # просідання від підбору частоти GPU — він сам поверне
+            return
+        if self.bad_windows >= 1 and (self._gpu_rescue("FPS просів") or self._tdp_rescue()):
+            self.bad_windows = 0      # спершу повертаємо потужність, FPS не чіпаємо
+            self.mon_avgs = []
+            return
+        if self.bad_windows >= 1:
+            if self.sfg < 2:
+                self._record_tune(minute, lower_only=True)
+            self.mon_avgs = []
+            self._step_down(now, minute)
+            return
+
+        # Запас по GPU — пробуємо вищий рівень (не частіше ніж раз на 3 хв)
+        if gpu_avg is not None and gpu_avg < 55 and \
+                self.base * self.mult < self.device["tiers"][-1]:
+            self.idle_windows += 1
+        else:
+            self.idle_windows = 0
+        if self.idle_windows >= 6 and now - self.last_probe > 180 and self.sfg < 2:
+            self._start_probe(now, upgrade=True)
+        self.samples = [s for s in self.samples if now - s[0] <= 1]
 
     # ---------------- API for frontend
 
