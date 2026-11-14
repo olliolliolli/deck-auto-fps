@@ -64,5 +64,29 @@ class Monitor(unittest.TestCase):
         self.assertLess(self.p.downs[0], 44)
 
 
+
+class TV(unittest.TestCase):
+    def plugin(self, mode, ac=True):
+        p = main.Plugin.__new__(main.Plugin)
+        p.ac = ac
+        p.settings = {"mode": "auto", "power_profiles": True, "ac_mode": mode, "bat_mode": mode}
+        p.device = main.tv_profile({"id": "legion_go_s", "vrr": True, "tiers": [30, 40, 47, 60, 90, 120]},
+                                   120, False)
+        return p
+
+    def test_profile_dividers(self):
+        d = main.tv_profile({"vrr": True}, 120, False)
+        self.assertEqual(d["tiers"], [30, 40, 60, 120])
+        self.assertFalse(d["vrr"])
+        self.assertEqual(main.tv_profile({}, 60, False)["tiers"], [30, 60])
+
+    def test_vrr_without_tv_vrr_becomes_auto(self):
+        self.assertEqual(self.plugin("vrr")._mode(), "auto")
+
+    def test_uneven_limit_snaps_down(self):
+        self.assertEqual(self.plugin("50")._mode(), "40")
+        self.assertEqual(self.plugin("60")._mode(), "60")
+
+
 if __name__ == "__main__":
     unittest.main()
