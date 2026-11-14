@@ -2623,7 +2623,8 @@ class Plugin:
             _save_json(touched_file, sorted(touched))
         else:
             handheld = {a: res.get(a, "Default") for a in touched | set(res)}
-        return {"external": ext, "enabled": on, "games": games, "handheld": handheld}
+        render = list(C.tv_render_size(ext, self.settings.get("tv_max_height", 1080))) if ext and on else None
+        return {"external": ext, "enabled": on, "games": games, "handheld": handheld, "render": render}
 
     async def display_restored(self):
         """Інтерфейс повернув роздільності після відключення телевізора."""

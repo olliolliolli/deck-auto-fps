@@ -201,6 +201,7 @@ type DisplayState = {
   enabled: boolean;
   games: Record<string, string>;
   handheld: Record<string, string>;
+  render?: [number, number] | null;
 };
 const displayState = callable<[], DisplayState>("display_state");
 const displayRestored = callable<[], boolean>("display_restored");
@@ -1638,8 +1639,13 @@ export default definePlugin(() => {
   // Гра запущена, але не через AutoFPS — підказуємо один раз
   const warned = new Set<number>();
   let seenSince: Record<number, number> = {};
+  let lastRunning: number | null = null;
   const watch = window.setInterval(async () => {
     const running = runningAppId();
+    if (running !== lastRunning) {
+      lastRunning = running;
+      applySystemRes();               // Steam міг скинути обмеження при запуску гри
+    }
     if (running === null) {
       seenSince = {};
       return;
@@ -1663,6 +1669,17 @@ export default definePlugin(() => {
   // Телевізор: у момент підключення — роздільність ігор 16:9, при відключенні — назад 16:10
   let dockKey: string | null = null;
   const s0 = (d: DisplayState) => Object.values(d.games)[0]?.replace("x", "×") ?? "1080p";
+  // Системне обмеження: внутрішня роздільність gamescope = те, що бачать ігри (4K-телевізор →
+  // 1920×1080; gamescope масштабує на весь екран). Так само робить сам Steam.
+  let tvSize: [number, number] | null = null;
+  const applySystemRes = () => {
+    if (!tvSize) return;
+    try {
+      SteamClient.System.DisplayManager?.SetGamescopeInternalResolution(tvSize[0], tvSize[1]);
+    } catch {
+      /* старий Steam без цієї функції */
+    }
+  };
   const dockSync = async () => {
     let d: DisplayState;
     try {
@@ -1670,6 +1687,8 @@ export default definePlugin(() => {
     } catch {
       return;
     }
+    tvSize = d.enabled && d.external && d.render ? d.render : null;
+    applySystemRes();
     const key = d.enabled && d.external ? `${d.external.connector}:${d.external.w}x${d.external.h}` : "";
     if (key === dockKey) return;
     const first = dockKey === null;
