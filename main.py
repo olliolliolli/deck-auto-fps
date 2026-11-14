@@ -147,6 +147,31 @@ def _clean_env():
     return env
 
 
+def get_root_atoms(*names):
+    """Значення атомів gamescope з кореневого вікна: {назва: int}."""
+    xprop = shutil.which("xprop") or "/usr/bin/xprop"
+    out = {}
+    try:
+        r = subprocess.run([xprop, "-root", *names], env=_clean_env(), capture_output=True,
+                           text=True, timeout=3)
+        for line in r.stdout.splitlines():
+            m = re.match(r"^(\w+)\(CARDINAL\) = (\d+)", line)
+            if m:
+                out[m.group(1)] = int(m.group(2))
+    except Exception as e:  # noqa: BLE001
+        decky.logger.warning(f"xprop read failed: {e}")
+    return out
+
+
+def tv_profile(base, hz, vrr):
+    """Профіль пристрою на час гри на телевізорі: частота й VRR телевізора, рівні FPS —
+    лише дільники частоти (без VRR інакше кадри показуються нерівно)."""
+    hz = int(hz or 60)
+    tiers = [t for t in (30, 40, 45, 60, 90, 120) if t <= hz and hz % t == 0] or [30]
+    return dict(base, vrr=bool(vrr), max_hz=hz, min_hz=hz, refresh_control=False,
+                tiers=tiers, tv=True, label=base.get("label", "") + " · телевізор")
+
+
 def set_root_atom(name, value):
     xprop = shutil.which("xprop") or "/usr/bin/xprop"
     cmd = [xprop, "-root", "-f", name, "32c", "-set", name, str(int(value))]
@@ -899,15 +924,41 @@ class Plugin:
     # ---------------- живлення: профілі батарея/зарядка, автопідбір TDP
 
     def _mode(self):
-        """Рівень FPS з урахуванням джерела живлення."""
+        """Рівень FPS з урахуванням джерела живлення (і телевізора без VRR)."""
+        m = str(self.settings["mode"])
         if self.settings.get("power_profiles", True):
-            m = str(self.settings.get("ac_mode" if self.ac else "bat_mode", "same"))
-            if m != "same":
-                return m
-        return str(self.settings["mode"])
+            pm = str(self.settings.get("ac_mode" if self.ac else "bat_mode", "same"))
+            if pm != "same":
+                m = pm
+        if self.device.get("tv"):
+            if m == "vrr" and not self.device.get("vrr"):
+                return "auto"                  # без VRR — рівний дільник частоти телевізора
+            if m.isdigit() and int(m) not in self.device["tiers"]:
+                # напр. 50 на 120 Гц — нерівно; найближчий нижчий дільник частоти
+                return str(max([t for t in self.device["tiers"] if t <= int(m)] or [self.device["tiers"][0]]))
+        return m
 
     def _vrr(self):
         return bool(self.device.get("vrr")) and self._mode() == "vrr"
+
+    def _tv_apply(self, ext):
+        """Підключено/відключено телевізор: профіль екрана для ліміту FPS."""
+        base = getattr(self, "device_handheld", None) or self.device
+        self.device_handheld = base
+        if not ext:
+            if self.device.get("tv"):
+                self.device = base
+                decky.logger.info("екран: профіль консолі")
+            return
+        a = get_root_atoms("GAMESCOPE_VRR_CAPABLE", "GAMESCOPE_DISPLAY_REFRESH_RATE_FEEDBACK")
+        hz = a.get("GAMESCOPE_DISPLAY_REFRESH_RATE_FEEDBACK") or 60
+        vrr = bool(a.get("GAMESCOPE_VRR_CAPABLE"))
+        self.device = tv_profile(base, hz, vrr)
+        decky.logger.info(f"екран: телевізор {hz} Гц, VRR {'є' if vrr else 'немає'}, рівні {self.device['tiers']}")
+        if not vrr:
+            self._notify("AutoFPS: телевізор без VRR",
+                         f"{hz} Гц без змінної частоти — FPS тримаю рівним дільником частоти "
+                         f"({', '.join(map(str, self.device['tiers']))}), щоб картинка йшла плавно")
 
     def _tdp_wanted(self):
         """off — не керуємо; max — повна потужність; auto — шукаємо найтихішу сходинку, що тримає FPS."""
@@ -2476,6 +2527,7 @@ class Plugin:
             self.hp_sock, self.hp_ext = sock, C.external_display()
             if self.hp_ext:
                 self._dock_audio(True)       # плагін стартував, коли телевізор уже підключено
+                self._tv_apply(self.hp_ext)
             decky.logger.info(f"телевізор: стежу за підключенням екрана (зараз: {self.hp_ext or 'немає'})")
         except Exception as e:  # noqa: BLE001
             self.hp_sock = None
@@ -2528,6 +2580,7 @@ class Plugin:
             return
         self.hp_ext = ext
         decky.logger.info(f"телевізор: {'підключено ' + str(ext) if ext else 'відключено'}")
+        self._tv_apply(ext)
         self._dock_audio(bool(ext))
         emit = getattr(decky, "emit", None)
         loop = getattr(self, "loop", None) or asyncio.get_event_loop()
