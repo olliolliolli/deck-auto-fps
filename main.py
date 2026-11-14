@@ -105,6 +105,7 @@ DEFAULT_SETTINGS = {
     "lock_config": False,           # файли налаштувань графіки — «лише читання» після запису плагіном
                                     # (вимкнено: тоді гра не зберігає й керування, звук, мову з того ж файлу)          # обмежувач FPS у MangoHud, коли ліміт gamescope не діє
     "dock_auto": True,
+    "tv_max_height": 1080,      # телевізор: гра рендерить не вище (1080 / 1440 / 2160)
     "dock_audio": True,         # телевізор: звук на HDMI/DP, при відключенні — назад          # телевізор (HDMI/DP): роздільність ігор 16:9 замість 16:10
     "fps_counts_generated": False,  # MangoHud бачить лише справжні кадри гри (перевірено на Legion: 42 у MangoHud = 84 на екрані з Lossless ×2)
     "autotune": True,          # автопідбір графіки гри (Unreal/Unity)
@@ -2604,13 +2605,33 @@ class Plugin:
             loop.create_task(emit("autofps_display"))
 
     async def display_state(self):
-        """Для фонового стеження інтерфейсу: чи підключено телевізор і ручні роздільності ігор."""
+        """Для інтерфейсу: телевізор і роздільність Steam для ігор.
+        На телевізорі — усі встановлені ігри рендерять не вище tv_max_height (за замовчуванням
+        1080p; 4K-телевізор масштабує сам), ручні 16:10 → 16:9. Після відключення повертаються
+        лише ті ігри, які змінив AutoFPS (ручна роздільність або «Default»)."""
         ext = C.external_display()
         res = _load_json(os.path.join(CFG_DIR, "resolution.json"), {})
         on = bool(self.settings.get("dock_auto", True))
-        return {"external": ext, "enabled": on,
-                "games": {a: C.dock_resolution(r, (ext or {}).get("h")) for a, r in res.items()} if ext else {},
-                "handheld": res}
+        touched_file = os.path.join(CFG_DIR, "dock_touched.json")
+        touched = set(_load_json(touched_file, []))
+        games, handheld = {}, {}
+        if ext and on:
+            size = C.tv_render_size(ext, self.settings.get("tv_max_height", 1080))
+            for a in set(self._installed_games()) | set(res):
+                games[a] = C.dock_resolution(res[a], size[1]) if a in res else f"{size[0]}x{size[1]}"
+            touched |= set(games)
+            _save_json(touched_file, sorted(touched))
+        else:
+            handheld = {a: res.get(a, "Default") for a in touched | set(res)}
+        return {"external": ext, "enabled": on, "games": games, "handheld": handheld}
+
+    async def display_restored(self):
+        """Інтерфейс повернув роздільності після відключення телевізора."""
+        try:
+            os.remove(os.path.join(CFG_DIR, "dock_touched.json"))
+        except OSError:
+            pass
+        return True
 
     async def start_tuning(self):
         """Кнопка «Почати підбір»: гравець уже в грі — короткий розігрів і замір."""

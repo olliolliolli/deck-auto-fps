@@ -68,6 +68,13 @@ class ResFix(unittest.TestCase):
         R.run("203160", [], drm=d, compat=compat, log=self.logs.append, restore=True)  # вихід
         self.assertIn('"FullscreenHeight"=dword:000004b0', self.read(reg).split("Display] 1")[0])
 
+    def test_tv_4k_capped_to_1080(self):
+        import autofps_common as C
+        self.assertEqual(C.tv_render_size({"w": 3840, "h": 2160}, 1080), (1920, 1080))
+        self.assertEqual(C.tv_render_size({"w": 1920, "h": 1080}, 1080), (1920, 1080))
+        self.assertEqual(R.target_for(3840, 2160, (1920, 1080)), (1920, 1080))
+        self.assertIsNone(R.target_for(1920, 1080, (1920, 1080)))
+
     def test_feral(self):
         p = os.path.join(self.tmp, "preferences")
         shutil.copy(os.path.join(FIX, "feral_rottr_preferences"), p)

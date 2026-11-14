@@ -48,7 +48,8 @@ def screen(drm=None):
     """(ширина, висота) екрана, на якому зараз буде гра."""
     ext = C.external_display(drm)
     if ext and ext.get("w"):
-        return ext["w"], ext["h"]
+        cap = C.load_json(C.SETTINGS_FILE, {}).get("tv_max_height", 1080)
+        return C.tv_render_size(ext, cap)
     return panel_size(drm)
 
 
@@ -57,8 +58,8 @@ def target_for(w, h, scr, appid=None, res_file=None):
     if not (w and h and scr):
         return None
     sw, sh = scr
-    if abs((w / h) - (sw / sh)) / (sw / sh) <= 0.03:
-        return None
+    if abs((w / h) - (sw / sh)) / (sw / sh) <= 0.03 and w <= sw and h <= sh:
+        return None                     # і форма, і розмір уже підходять
     want = sw / sh
     manual = C.load_json(res_file, {}).get(str(appid)) if res_file and appid else None
     if manual and re.match(r"^\d+x\d+$", manual):

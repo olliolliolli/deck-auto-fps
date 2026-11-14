@@ -144,6 +144,18 @@ def external_display(drm=None):
 TV_RES = [(1280, 720), (1600, 900), (1920, 1080), (2560, 1440), (3840, 2160)]
 
 
+def tv_render_size(ext, max_h=1080):
+    """Роздільність, у якій гра рендерить на телевізорі: не вище max_h (4K-телевізор → 1920×1080,
+    gamescope сам масштабує на весь екран)."""
+    if not ext or not ext.get("w"):
+        return None
+    w, h = int(ext["w"]), int(ext["h"])
+    max_h = int(max_h or 0)
+    if not max_h or h <= max_h:
+        return w, h
+    return int(round(w * max_h / h / 2)) * 2, max_h
+
+
 def dock_resolution(handheld, tv_h):
     """Роздільність 16:9 для телевізора замість ручної 16:10 (без чорних смуг):
     найбільша стандартна 16:9 не вища за ручну й не вища за екран телевізора."""
