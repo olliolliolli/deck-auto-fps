@@ -944,6 +944,13 @@ class Plugin:
     def _vrr(self):
         return bool(self.device.get("vrr")) and self._mode() == "vrr"
 
+    def _must_cap(self):
+        """Телевізор без VRR + генерація кадрів: кадри гри МАЮТЬ бути рівно на ліміті (30 → 60),
+        інакше генерація робить ~110 кадрів, а екран відкидає зайві нерівно — ривки.
+        Тоді обмежувач MangoHud діє незалежно від налаштування."""
+        return bool(self.device.get("tv") and not self.device.get("vrr")
+                    and getattr(self, "sfg", 0) >= 2)
+
     def _tv_bases(self):
         """Телевізор без VRR: рівні FPS гри, за яких картинка рівна. З генерацією кадрів ×m —
         і m×рівень має ділити частоту (120 Гц, ×2: 30→60, 60→120; 40→80 — ривки)."""
@@ -968,6 +975,9 @@ class Plugin:
         hz = a.get("GAMESCOPE_DISPLAY_REFRESH_RATE_FEEDBACK") or 60
         vrr = bool(a.get("GAMESCOPE_VRR_CAPABLE"))
         self.device = tv_profile(base, hz, vrr)
+        if self._must_cap() and getattr(self, "appid", None):
+            self.mango_cap = True                # телевізор підключили посеред гри з генерацією
+            self._apply()
         decky.logger.info(f"екран: телевізор {hz} Гц, VRR {'є' if vrr else 'немає'}, рівні {self.device['tiers']}")
         if not vrr:
             self._notify("AutoFPS: телевізор без VRR",
@@ -2055,7 +2065,7 @@ class Plugin:
             decky.logger.info(f"game start: {json.dumps(cur)}")
             if self.sfg >= 2:
                 self.mult = self.sfg
-            if cur.get("ext_fg") and self.settings.get("mango_limiter", True):
+            if cur.get("ext_fg") and (self.settings.get("mango_limiter", True) or self._must_cap()):
                 self.mango_cap = True     # з шаром Decky LSFG-VK ліміт gamescope не діє
             if self.settings.get("last_fg_mult") != max(1, self.sfg):
                 self.settings["last_fg_mult"] = max(1, self.sfg)   # для цілі підбору графіки
@@ -2495,7 +2505,7 @@ class Plugin:
             self._unlock_game_files()
         if key == "mango_limiter" and self.appid:
             if not value:
-                self.mango_cap = False
+                self.mango_cap = self._must_cap()
             elif self.cur_info.get("ext_fg"):
                 self.mango_cap = True
             write_mango_limit(self._mango_cap_value())
