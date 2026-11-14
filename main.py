@@ -104,6 +104,7 @@ DEFAULT_SETTINGS = {
     "mango_limiter": True,
     "lock_config": False,           # файли налаштувань графіки — «лише читання» після запису плагіном
                                     # (вимкнено: тоді гра не зберігає й керування, звук, мову з того ж файлу)          # обмежувач FPS у MangoHud, коли ліміт gamescope не діє
+    "dock_auto": True,          # телевізор (HDMI/DP): роздільність ігор 16:9 замість 16:10
     "fps_counts_generated": False,  # MangoHud бачить лише справжні кадри гри (перевірено на Legion: 42 у MangoHud = 84 на екрані з Lossless ×2)
     "autotune": True,          # автопідбір графіки гри (Unreal/Unity)
     "ue5_tweak": True,         # твік Engine.ini для ігор на Unreal Engine 5
@@ -2456,6 +2457,15 @@ class Plugin:
         self.games.pop(a, None)
         _save_json(GAMES_FILE, self.games)
         return True
+
+    async def display_state(self):
+        """Для фонового стеження інтерфейсу: чи підключено телевізор і ручні роздільності ігор."""
+        ext = C.external_display()
+        res = _load_json(os.path.join(CFG_DIR, "resolution.json"), {})
+        on = bool(self.settings.get("dock_auto", True))
+        return {"external": ext, "enabled": on,
+                "games": {a: C.dock_resolution(r, (ext or {}).get("h")) for a, r in res.items()} if ext else {},
+                "handheld": res}
 
     async def start_tuning(self):
         """Кнопка «Почати підбір»: гравець уже в грі — короткий розігрів і замір."""
