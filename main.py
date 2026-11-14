@@ -626,10 +626,12 @@ class Plugin:
         self._write_fg_mode()
         decky.logger.info(f"AutoFPS started on {self.device['label']}")
         self.task = asyncio.get_event_loop().create_task(self._loop())
+        self._hotplug_start()
 
     async def _unload(self):
         if getattr(self, "task", None):
             self.task.cancel()
+        self._hotplug_stop()
         self._restore_display()
         self._tdp_restore()
         self._gpu_restore()
@@ -2457,6 +2459,61 @@ class Plugin:
         self.games.pop(a, None)
         _save_json(GAMES_FILE, self.games)
         return True
+
+    # ---------------- телевізор: подія ядра про (від)підключення екрана, без опитування
+
+    def _hotplug_start(self):
+        """Підписка на uevent ядра (netlink). Ядро саме повідомляє про HDMI/DP — плагін спить,
+        доки екран не підключать чи відключать."""
+        import socket
+        try:
+            sock = socket.socket(socket.AF_NETLINK, socket.SOCK_DGRAM, 15)  # NETLINK_KOBJECT_UEVENT
+            sock.bind((0, 1))
+            sock.setblocking(False)
+            loop = asyncio.get_event_loop()
+            loop.add_reader(sock.fileno(), self._hotplug_read)
+            self.hp_sock, self.hp_ext = sock, C.external_display()
+            decky.logger.info(f"телевізор: стежу за підключенням екрана (зараз: {self.hp_ext or 'немає'})")
+        except Exception as e:  # noqa: BLE001
+            self.hp_sock = None
+            decky.logger.warning(f"телевізор: підписка на події екрана не вдалася: {e!r}")
+
+    def _hotplug_stop(self):
+        sock = getattr(self, "hp_sock", None)
+        if sock:
+            try:
+                asyncio.get_event_loop().remove_reader(sock.fileno())
+                sock.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self.hp_sock = None
+
+    def _hotplug_read(self):
+        drm = False
+        while True:
+            try:
+                msg = self.hp_sock.recv(16384)
+            except (BlockingIOError, OSError):
+                break
+            if b"SUBSYSTEM=drm" in msg:
+                drm = True
+        if drm and not getattr(self, "hp_pending", False):
+            # кілька подій поспіль (EDID, режими) — перевіряємо стан один раз, коли все вляжеться
+            self.hp_pending = True
+            asyncio.get_event_loop().call_later(1.5, self._hotplug_check)
+
+    def _hotplug_check(self):
+        self.hp_pending = False
+        ext = C.external_display()
+        if ext == getattr(self, "hp_ext", None):
+            decky.logger.info("телевізор: подія екрана, стан без змін")
+            return
+        self.hp_ext = ext
+        decky.logger.info(f"телевізор: {'підключено ' + str(ext) if ext else 'відключено'}")
+        emit = getattr(decky, "emit", None)
+        loop = getattr(self, "loop", None) or asyncio.get_event_loop()
+        if emit:
+            loop.create_task(emit("autofps_display"))
 
     async def display_state(self):
         """Для фонового стеження інтерфейсу: чи підключено телевізор і ручні роздільності ігор."""
