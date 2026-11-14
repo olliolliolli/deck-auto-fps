@@ -139,5 +139,16 @@ class Doctor(Base):
         self.assertEqual(self.by_id()["log"]["level"], "warn")
 
 
+class Target(unittest.TestCase):
+    def test_fg_halves_limit(self):
+        st = {"quality_target": "auto", "bat_mode": "50", "last_fg_mult": 2}
+        dev = {"quality_target": 40}
+        self.assertEqual(C.quality_target(st, dev), 30)
+        self.assertIn("×2", C.quality_target_why(st, dev))
+        self.assertIn("30", C.quality_target_why(st, dev))
+        st["last_fg_mult"] = 1
+        self.assertEqual(C.quality_target(st, dev), 50)
+
+
 if __name__ == "__main__":
     unittest.main()

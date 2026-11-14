@@ -125,6 +125,7 @@ type Status = {
   };
   game_update?: { appid: string; old: string; new: string; t: number } | null;
   graphics_target?: number;
+  graphics_target_why?: string;
 };
 
 const TDP_STATE: Record<string, string> = {
@@ -1246,6 +1247,7 @@ function Content() {
           <Field
             label={`Графіка підбирається під ${st.graphics_target ?? "—"} FPS гри`}
             description={
+              (st.graphics_target_why ? st.graphics_target_why + ". " : "") +
               "Справжніх кадрів, без генерації — щоб гра рівно тримала ліміт від батареї" +
               (s.quality_target !== "auto" ? " (задано вручну на вкладці «Ще»)" : "")
             }
