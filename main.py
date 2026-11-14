@@ -2030,7 +2030,8 @@ class Plugin:
             fixed = self._mode()
             if fixed.isdigit() and now - self.last_apply > 5:
                 m = self.sfg if self.sfg >= 2 else 1
-                self.base, self.mult = max(1, int(fixed) // m), m
+                # ліміт — справжні кадри гри; генерація лише множить їх зверху (не вище частоти екрана)
+                self.base, self.mult = max(1, min(int(fixed), int(self.device["max_hz"]) // m)), m
                 self._apply()
             # підбір графіки без кнопки стояв би вічно — через 3 хв гри починаємо самі
             if self.tuning and now - self.phase_t > 180:
@@ -2101,12 +2102,12 @@ class Plugin:
             if self.phase != "manual" or getattr(self, "manual_key", None) != (mode, self.sfg):
                 self.manual_key = (mode, self.sfg)
                 self.base, self.mult = base, (self.sfg if self.sfg >= 2 else 1)
-                # рівень — це FPS на екрані; з генерацією кадрів гра рендерить у mult разів менше
-                self.base = max(1, base // self.mult)
+                # рівень — справжні кадри гри (генерацію ігноруємо); на екрані = рівень × множник
+                self.base = max(1, min(base, int(self.device["max_hz"]) // self.mult))
                 if vrr:
                     self.phase, self.message = "manual", f"VRR: до {base} FPS, частота екрана йде за грою"
                 elif self.mult > 1:
-                    self.phase, self.message = "manual", f"Вручну: {base} FPS на екрані ({self.base} × FG {self.mult})"
+                    self.phase, self.message = "manual", f"Вручну: {self.base} FPS гри (з генерацією ×{self.mult} на екрані {self.base * self.mult})"
                 else:
                     self.phase, self.message = "manual", f"Вручну: {base} FPS"
                 self._apply()
