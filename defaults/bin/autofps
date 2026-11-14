@@ -219,6 +219,21 @@ RC=$?
 DUR=$(( $(date +%s) - START ))
 log "гра завершилась через ${DUR} с, код $RC"
 [ -f "$DIR/journal.py" ] && timeout 20 python3 "$DIR/journal.py" end "$APPID" "$DUR" "$RC" "$FAST_EXIT" >>"$LOG" 2>&1
+# --- після гри: роздільність у самій грі назад під екран консолі (16:10). Proton дописує
+#     реєстр уже після виходу гри (wineserver) — чекаємо, поки все закриється, у фоні,
+#     щоб не затримувати Steam
+if [ "$MODE" != "safe" ] && [ -f "$DIR/res_fix.py" ]; then
+  REG="${STEAM_COMPAT_DATA_PATH:-$HOME/.local/share/Steam/steamapps/compatdata/$APPID}/pfx/user.reg"
+  (
+    for _ in $(seq 1 30); do
+      pgrep -x wineserver >/dev/null 2>&1 || break
+      sleep 1
+    done
+    sleep 2
+    timeout 10 python3 "$DIR/res_fix.py" restore "$APPID" "$@"
+  ) >>"$LOG" 2>&1 </dev/null &
+  disown 2>/dev/null
+fi
 
 # Одне швидке закриття — ще не падіння (користувач міг вийти сам: Steam завершує гру
 # сигналом, код 130 буває і при звичайному виході). Знижуємо режим після ДВОХ поспіль.
