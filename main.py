@@ -2261,6 +2261,7 @@ class Plugin:
                               "error": self.gc.error}},
             "game_update": getattr(self, "game_update", None),
             "graphics_target": C.quality_target(eff, self.device),
+            "graphics_target_why": C.quality_target_why(eff, self.device),
         }
 
     def _lsfg_cached(self):

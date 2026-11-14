@@ -191,6 +191,24 @@ def fg_multiplier_now(settings):
     return 2
 
 
+def quality_target_why(settings, device):
+    """Пояснення цілі графіки для меню: звідки взялось число."""
+    t = str(settings.get("quality_target", "auto"))
+    if t != "auto":
+        return f"Задано вручну: {t} FPS"
+    cap = str(settings.get("bat_mode", "same"))
+    if cap == "same":
+        cap = str(settings.get("mode", "auto"))
+    if cap.isdigit():
+        mult = max(1, int(settings.get("last_fg_mult", 1) or 1))
+        raw = int(cap) // mult
+        txt = f"Ліміт {cap} FPS" + (f" ÷ генерація кадрів ×{mult} = {raw} справжніх" if mult > 1 else "")
+        if raw < 30:
+            txt += " → піднято до мінімуму 30"
+        return txt
+    return f"Ліміт без фіксованого числа (VRR/Авто) — типова ціль пристрою {device['quality_target']}"
+
+
 def quality_target(settings, device):
     """Під скільки справжніх FPS гри підбирати графіку.
     auto — з ліміту від батареї: ліміт на екрані ÷ множник генерації кадрів (не менше 30);
