@@ -1493,7 +1493,7 @@ function Content() {
         <PanelSectionRow>
           <ToggleField
             label="Телевізор: картинка 16:9 без чорних смуг"
-            description="Підключено телевізор чи монітор (HDMI / USB-C) — ігри з вибраною в AutoFPS роздільністю 16:10 запускаються в 16:9 (напр. 1440×900 → 1600×900). Відключено — повертається 16:10. Діє з наступного запуску гри"
+            description="Підключено телевізор чи монітор (HDMI / USB-C) — ігри з вибраною в AutoFPS роздільністю 16:10 запускаються в 16:9 (напр. 1440×900 → 1600×900). Відключено — повертається 16:10. Спрацьовує в момент підключення (без постійних перевірок); діє з наступного запуску гри"
             checked={s.dock_auto ?? true}
             onChange={(v: boolean) => update("dock_auto", v)}
           />
@@ -1640,7 +1640,7 @@ export default definePlugin(() => {
     }
   }, 5000);
 
-  // Телевізор: перемикаємо роздільність ігор на 16:9 і назад (Steam застосує при запуску гри)
+  // Телевізор: у момент підключення — роздільність ігор 16:9, при відключенні — назад 16:10
   let dockKey: string | null = null;
   const dockSync = async () => {
     let d: DisplayState;
@@ -1672,8 +1672,10 @@ export default definePlugin(() => {
         : "Роздільність ігор повернуто до 16:10",
     });
   };
+  // без опитування: бекенд надсилає подію в момент підключення/відключення екрана
   dockSync();
-  const dockWatch = window.setInterval(dockSync, 4000);
+  const onDisplay = () => { dockSync(); };
+  addEventListener("autofps_display", onDisplay);
 
   return {
   name: "AutoFPS",
@@ -1683,7 +1685,7 @@ export default definePlugin(() => {
   onDismount() {
     removeEventListener("autofps_toast", onToast);
     window.clearInterval(watch);
-    window.clearInterval(dockWatch);
+    removeEventListener("autofps_display", onDisplay);
   },
   };
 });
