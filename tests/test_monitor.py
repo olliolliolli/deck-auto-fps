@@ -92,6 +92,14 @@ class TV(unittest.TestCase):
         p.sfg = 2
         self.assertEqual(p._mode(), "60")             # 60×2=120
 
+    def test_must_cap_on_tv_with_fg(self):
+        p = self.plugin("vrr")
+        self.assertFalse(p._must_cap())
+        p.sfg = 2
+        self.assertTrue(p._must_cap())
+        p.mango_cap, p.phase, p.base, p.mult = True, "locked", 30, 2
+        self.assertEqual(p._mango_cap_value(), 30)
+
     def test_choose_fg_on_tv(self):
         p = self.plugin("vrr")
         p.sfg = 2
