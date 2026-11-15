@@ -73,18 +73,18 @@ def ue_is_quality(name, value):
 # текстури — в останню чергу (16 ГБ спільної пам'яті вистачає на High).
 UE_DELTAS = [
     {"ShadowQuality": 2},
-    {"PostProcessQuality": 2, "EffectsQuality": 2},
+    {"PostProcessQuality": 2, "EffectsQuality": 2, "AntiAliasingQuality": 1},
     {"GlobalIlluminationQuality": 2, "ReflectionQuality": 2, "FoliageQuality": 2},
     {"ShadowQuality": 1, "ViewDistanceQuality": 2, "ShadingQuality": 2},
     {"GlobalIlluminationQuality": 1, "ReflectionQuality": 1, "PostProcessQuality": 1},
     {"ResolutionQuality": 85, "EffectsQuality": 1, "FoliageQuality": 1},
-    {"ShadowQuality": 0, "AntiAliasingQuality": 2},
+    {"ShadowQuality": 0},
     {"ResolutionQuality": 75, "GlobalIlluminationQuality": 0, "ReflectionQuality": 0,
      "PostProcessQuality": 0},
     {"ResolutionQuality": 67, "ViewDistanceQuality": 1, "FoliageQuality": 0,
      "EffectsQuality": 0},
     {"ResolutionQuality": 58, "ShadingQuality": 1, "TextureQuality": 2},
-    {"ResolutionQuality": 50, "AntiAliasingQuality": 1, "TextureQuality": 1},
+    {"ResolutionQuality": 50, "TextureQuality": 1},
 ]
 
 
@@ -92,6 +92,10 @@ def ue_ladder(lowres=None):
     """lowres=67 — та сама сходинка якості, але роздільність рендеру зафіксовано (≈HD)."""
     cur = {k.split(".", 1)[1]: 3 for k in UE_KEYS}
     cur["ResolutionQuality"] = lowres or 100
+    # Згладжування на портативному екрані: «Епічно» в UE5 (TSR) дуже дороге й майже непомітне,
+    # а з апскейлером (FSR / DLSS через OptiScaler) його й так замінює апскейлер. Максимум —
+    # «Високо», з другої сходинки — «Середньо» (TSR нижче вже дає мерехтіння).
+    cur["AntiAliasingQuality"] = 2
     ladder = [dict(cur)]
     for d in UE_DELTAS:
         cur.update({k: v for k, v in d.items() if not (lowres and k == "ResolutionQuality")})
