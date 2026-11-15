@@ -916,6 +916,7 @@ function OptiSection({
   const upOptions = [
     { data: "auto", label: "Авто (FSR 4)" },
     { data: "fsr4", label: "FSR 4 — найкраща картинка" },
+    { data: "fsr4lite", label: "FSR 4.1 Lite — легша модель, більше FPS" },
     { data: "fsr31", label: "FSR 3.1 — найшвидше" },
   ];
   let version = st.installed ? `OptiScaler ${st.installed}` : "OptiScaler ще не завантажено";
@@ -950,7 +951,7 @@ function OptiSection({
         <DropdownItem
           label="Масштабування в іграх з DLSS"
           rgOptions={upOptions}
-          selectedOption={["auto", "fsr4", "fsr31"].includes(settings.opti_upscaler) ? settings.opti_upscaler : "auto"}
+          selectedOption={["auto", "fsr4", "fsr4lite", "fsr31"].includes(settings.opti_upscaler) ? settings.opti_upscaler : "auto"}
           onChange={async (o: { data: string }) => {
             await update("opti_upscaler", o.data);
             setSt(await optiStatus());

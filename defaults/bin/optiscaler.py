@@ -55,6 +55,17 @@ ASSETS = {
     "amdxc64_rdna2": {"url": f"{_BE}/fsr-4-1-1-rdna2/amdxc64.dll", "file": "amdxc64.dll",
                       "sha256": "a0a0af61d475e30a70966b3459f3793df772faf8f26ae3261d10554ff592cbd5"},
     # OptiScaler 0.10.0-pre1: потрібен для RDNA2-шляху, поки стабільна версія < 0.10
+    # FSR 4.1.2 Lite (INT8): офіційний файл AMD FSR 4.1.2 (той самий, що бере FSR 4.1 Lite для
+    # SteamOS, github.com/db1522/fsr4-lite-steam-machine) + нічна OptiScaler 10, що вміє
+    # примусово вмикати модель Lite (FSR.Fsr4Model / Fsr4GpuSupport)
+    "amdxcffx64_lite_412": {"url": "https://github.com/db1522/fsr4-files/releases/download/v4.1.2/amdxcffx64.dll",
+                            "file": "amdxcffx64.dll",
+                            "sha256": "c33a287f3048bf02311cae430b6a977500b94ca7b315cd7bff751e6b03e483e3"},
+    "optiscaler_nightly_lite": {"url": "https://github.com/optiscaler/OptiScaler-nightly/releases/download/"
+                                       "nightly-20261024/OptiScaler_v10.0.0-pre1_20261024.7z",
+                                "file": "OptiScaler_v10.0.0-pre1_20261024.7z", "archive": True,
+                                "tag": "v10.0.0-pre1-20261024",
+                                "sha256": "74f20189e0ec76288c86d69057b3feb4750f4680118a9852fb743b343274ac1d"},
     "optiscaler_pre10": {"url": f"{_BE}/fsr-4-1-1-rdna2/OptiScaler_0.10.0-pre1.20260622_135940.dll",
                          "file": "OptiScaler.dll",
                          "sha256": "b374b19081cc066365d0c6da4808d768e16469b0cbdfc478b6e95999947d5364"},
@@ -69,6 +80,11 @@ FSR4_VARIANTS = {
                                 "Plugins.LoadCustomAmdxc64OnRdna2": "true"}},
     "rdna34-official-411": {"label": "FSR 4.1.1 · підміна драйвера",
                             "extra": ["amdxcffx64_official_411"], "ini": {}},
+    "lite-412": {"label": "FSR 4.1.2 Lite · INT8", "extra": ["amdxcffx64_lite_412"], "extra_dir": "OptiScaler",
+                 "source": "optiscaler_nightly_lite",
+                 "ini": {"FSR.Fsr4GpuSupport": "4", "FSR.Fsr4Model": "3",
+                         "Upscalers.Dx12Upscaler": "ffx", "Upscalers.Dx11Upscaler": "ffx_12",
+                         "Upscalers.VulkanUpscaler": "ffx_12"}},
     "rdna4-native": {"label": "FSR 4.1.1 · SDK", "extra": [], "ini": {}},
     "rdna23-int8-402": {"label": "FSR 4.0.2 · INT8 (сумісний)", "extra": [], "upscaler": "fsr40_int8",
                         "ini": {}},
@@ -381,6 +397,31 @@ def fetch_asset(key, log=print):
     return dest
 
 
+def fetch_source(key, log=print):
+    """Окрема збірка OptiScaler (архів) для варіанта: розпакувати один раз, повернути теку з
+    OptiScaler.dll."""
+    out = os.path.join(root_dir(), "assets", key, "src")
+    found = glob.glob(os.path.join(out, "**", "OptiScaler.dll"), recursive=True)
+    if found:
+        return os.path.dirname(found[0])
+    archive = fetch_asset(key, log)
+    tmp = out + ".tmp"
+    shutil.rmtree(tmp, ignore_errors=True)
+    extract(archive, tmp)
+    found = glob.glob(os.path.join(tmp, "**", "OptiScaler.dll"), recursive=True)
+    if not found:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise RuntimeError(f"в архіві {key} немає OptiScaler.dll")
+    shutil.rmtree(out, ignore_errors=True)
+    os.replace(tmp, out)
+    found = glob.glob(os.path.join(out, "**", "OptiScaler.dll"), recursive=True)
+    try:
+        os.remove(archive)                     # розпаковане лишається, архів не потрібен
+    except OSError:
+        pass
+    return os.path.dirname(found[0])
+
+
 def _version_tuple(tag):
     nums = [int(x) for x in re.findall(r"\d+", tag or "")[:3]]
     return tuple(nums + [0] * (3 - len(nums)))
@@ -425,6 +466,8 @@ def effective_gpu(settings=None):
 def fsr4_variant(gpu, choice):
     if choice == "fsr40":
         return "rdna23-int8-402"
+    if choice == "fsr4lite":
+        return "lite-412"
     arch = gpu.get("arch")
     if arch == "rdna2":
         return "rdna2-valve-411"
@@ -435,11 +478,11 @@ def fsr4_variant(gpu, choice):
 
 def resolve_upscaler(choice, gpu):
     """auto → FSR 4.1 на AMD. Повертає (ключ, підпис)."""
-    if choice in ("fsr31", "xess", "fsr4", "fsr40"):
+    if choice in ("fsr31", "xess", "fsr4", "fsr40", "fsr4lite"):
         key = choice
     else:
         key = "fsr4" if gpu.get("vendor") == "amd" else "fsr31"
-    if key in ("fsr4", "fsr40"):
+    if key in ("fsr4", "fsr40", "fsr4lite"):
         return key, FSR4_VARIANTS[fsr4_variant(gpu, key)]["label"]
     return key, {"fsr31": "FSR 3.1", "xess": "XeSS"}[key]
 
@@ -631,7 +674,7 @@ def ffx_key(src_ini):
 
 
 def ini_overrides(engine, appid, upscaler, opti_fg, variant=None, ffx="fsr31"):
-    fsr = upscaler in ("fsr4", "fsr40", "fsr31")
+    fsr = upscaler in ("fsr4", "fsr40", "fsr4lite", "fsr31")
     ov = {
         # журнал для самоперевірки після гри (Info — без зайвого навантаження)
         "Log.LogToFile": "true",
@@ -641,7 +684,7 @@ def ini_overrides(engine, appid, upscaler, opti_fg, variant=None, ffx="fsr31"):
         # DLSS-ігри здебільшого DX12. FSR 3.1/4 — один шлях; бекенд задає UpscalerIndex:
         # 0 = FSR 4, 1 = FSR 3.1 (за замовчуванням на не-RDNA4 OptiScaler бере FSR 3!)
         "Upscalers.Dx12Upscaler": ffx if fsr else upscaler,
-        "FSR.Fsr4Update": "true" if upscaler in ("fsr4", "fsr40") else "false",
+        "FSR.Fsr4Update": "true" if upscaler in ("fsr4", "fsr40", "fsr4lite") else "false",
     }
     if fsr:
         ov["FSR.UpscalerIndex"] = "1" if upscaler == "fsr31" else "0"
@@ -664,7 +707,7 @@ def _files_to_copy(src):
     for name in sorted(os.listdir(src)):
         p = os.path.join(src, name)
         if os.path.isdir(p):
-            if name in ("D3D12_Optiscaler", "plugins"):
+            if name in ("D3D12_Optiscaler", "plugins", "OptiScaler"):   # OptiScaler/ — бібліотеки v10
                 out.append(name)
             continue
         if os.path.splitext(name)[1].lower() in SKIP_EXT:
@@ -819,7 +862,7 @@ def game_upscaler(appid, settings, gpu):
     """Апскейлер для гри з урахуванням обмежень профілю (напр. Village — без FSR 4)."""
     key, label = resolve_upscaler(settings.get("opti_upscaler", "auto"), gpu)
     cap = GAME_PROFILES.get(str(appid), {}).get("max_upscaler")
-    if cap and key in ("fsr4", "fsr40"):
+    if cap and key in ("fsr4", "fsr40", "fsr4lite"):
         key, label = resolve_upscaler(cap, gpu)
     return key, label
 
@@ -884,11 +927,14 @@ def install(appid, install_path, game_name="", args=None, settings=None, log=pri
     ref_dll = ref_tag = None
     if ref_kind:
         ref_dll, ref_tag = fetch_reframework(ref_kind, prof.get("ref_asset", ""), log)
-    variant = fsr4_variant(gpu, upscaler) if upscaler in ("fsr4", "fsr40") else None
+    variant = fsr4_variant(gpu, upscaler) if upscaler in ("fsr4", "fsr40", "fsr4lite") else None
     vinfo = FSR4_VARIANTS.get(variant, {})
     # усі додаткові файли — заздалегідь, щоб не лишити гру напіввстановленою
     extra_paths = {k: fetch_asset(k, log) for k in vinfo.get("extra", [])}
     up_override = fetch_asset(vinfo["upscaler"], log) if vinfo.get("upscaler") else None
+    if vinfo.get("source"):
+        src = fetch_source(vinfo["source"], log)     # окрема збірка OptiScaler для цього варіанта
+        tag = ASSETS[vinfo["source"]]["tag"]
     injector = None
     if vinfo.get("injector_pre10") and _version_tuple(tag) < (0, 10, 0):
         injector = fetch_asset("optiscaler_pre10", log)
@@ -934,8 +980,14 @@ def install(appid, install_path, game_name="", args=None, settings=None, log=pri
     # 3) FSR 4: файли варіанта під відеокарту
     for key, path in extra_paths.items():
         name = ASSETS[key]["file"]
-        shutil.copy2(path, os.path.join(target, name))
-        files.append(name)
+        sub = vinfo.get("extra_dir")
+        if sub:
+            os.makedirs(os.path.join(target, sub), exist_ok=True)
+            shutil.copy2(path, os.path.join(target, sub, name))
+            files.append(sub)                 # тека цілком наша (з OptiScaler v10)
+        else:
+            shutil.copy2(path, os.path.join(target, name))
+            files.append(name)
     if up_override and not helix_here:
         shutil.copy2(up_override, os.path.join(target, "amd_fidelityfx_upscaler_dx12.dll"))
         files.append("amd_fidelityfx_upscaler_dx12.dll")
@@ -1546,10 +1598,11 @@ def ensure(appid, args, settings=None, log=print):
     missing = not os.path.isfile(os.path.join(target, game.get("dll", "dxgi.dll"))) or \
         not os.path.isfile(os.path.join(target, MARKER)) or \
         (game.get("ref") and not os.path.isfile(os.path.join(target, "dinput8.dll")))
-    outdated = installed_tag() and game.get("tag") != installed_tag()
+    own_src = FSR4_VARIANTS.get(game.get("fsr4_variant", ""), {}).get("source")
+    outdated = installed_tag() and not own_src and game.get("tag") != installed_tag()
     gpu = effective_gpu(settings)
     want_up = game_upscaler(appid, settings, gpu)[0]
-    want_var = fsr4_variant(gpu, want_up) if want_up in ("fsr4", "fsr40") else ""
+    want_var = fsr4_variant(gpu, want_up) if want_up in ("fsr4", "fsr40", "fsr4lite") else ""
     want_ratio = (ref_ratio(settings) or "auto") if game.get("ref") else ""
     changed = (game.get("upscaler"), game.get("opti_fg"), game.get("fsr4_variant", ""),
                game.get("ref_ratio", want_ratio)) != (
@@ -1649,6 +1702,12 @@ def parse_log(text):
         "upscalers": sorted(set(created)),
         "fsr_version": srver[-1] if srver else "",
         "errors": errors[-3:],
+        # FSR 4.1 Lite: ім'я моделі + завантажений файл AMD + створений апскейлер (як у FSR 4.1 Lite
+        # для SteamOS) — саме ім'я з'являється й тоді, коли гра апскейлер не запускала
+        "lite": ("ffxProvider_FSR4Lite_Int8" in text and "amdxcffx64.dll" in text.lower()
+                 and not re.search(r"failed to load amdxcffx64", text, re.I)
+                 and ("Created driver upscaler context" in text
+                      or re.search(r"Render Resolution:\s*\d+x\d+,\s*Display Resolution", text) is not None)),
     }
 
 
@@ -1720,6 +1779,8 @@ def analyze(appid, started, duration, crashed=False, log=print):
         lbl = game.get("upscaler_label", "FSR")
         fsr = f" (FSR {info['fsr_version']})" if info["fsr_version"] and info["fsr_version"] not in lbl else ""
         title = "✓ DLSS працює"
+        if game.get("fsr4_variant", "").startswith("lite"):
+            lbl = "FSR 4.1 Lite ✓" if info.get("lite") else "FSR 4 (модель Lite у журналі не підтверджено)"
         msg = (f"OptiScaler як {info['proxy'] or dll}, гра використовує DLSS → "
                f"{lbl}{fsr}")
     elif info["errors"]:
