@@ -18,6 +18,16 @@ class Lite(unittest.TestCase):
         self.assertEqual(O.fsr4_variant(GPU, "fsr4lite"), "lite-412")
         self.assertEqual(O.fsr4_variant(GPU, "fsr4"), "rdna34-official-411")   # старий FSR 4 як був
 
+    def test_capcom(self):
+        lite = {"opti_upscaler": "fsr4lite"}
+        for a in ("2246340", "3357650", "3764200", "2638890", "2050650", "601150"):
+            self.assertEqual(O.ref_kind_for(a, "fsr4lite"), "nightly", a)
+        self.assertEqual(O.ref_kind_for("2050650", "fsr4"), "pd")          # без Lite — як було
+        self.assertIsNone(O.ref_kind_for("1551980", "fsr4lite"))           # не Capcom — без REFramework
+        self.assertEqual(O.choose_method("2050650", None, lite, GPU), "optiscaler")
+        # Village: FSR 4 псує картинку — і Lite обмежується до FSR 3.1
+        self.assertEqual(O.game_upscaler("1196590", lite, GPU)[0], "fsr31")
+
     def test_ini(self):
         ov = O.ini_overrides("unreal", "1551980", "fsr4lite", False, "lite-412")
         self.assertEqual(ov["FSR.Fsr4Model"], "3")

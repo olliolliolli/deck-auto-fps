@@ -169,7 +169,24 @@ GAME_PROFILES = {
     "2246340": {"ref": "nightly"},                                    # Monster Hunter Wilds
     "1446780": {"ini": {"Hooks.RestoreComputeSignature": "true"}},   # Monster Hunter Rise
     "2054970": {},                                                    # Dragon's Dogma 2
+    # нові Capcom (RE Engine): лише через FSR 4.1 Lite + REFramework
+    "3357650": {"name": "PRAGMATA"},
+    "3764200": {"name": "Resident Evil Requiem"},
+    "2638890": {"name": "Onimusha: Way of the Sword"},
 }
+
+# Capcom RE Engine, де FSR 4.1 Lite іде через OptiScaler + REFramework (нічна збірка praydog):
+# REFramework рано чіпляється до рушія й обходить перевірки цілісності Capcom. Список — «Requires
+# REFramework» зі спільнотного Compatibility List OptiScaler (як у FSR 4.1 Lite для SteamOS) + DD2.
+CAPCOM_LITE = {"2246340", "2638890", "3357650", "3764200", "601150", "883710", "952060",
+               "2050650", "418370", "1196590", "2054970"}
+
+
+def ref_kind_for(appid, upscaler):
+    """Яку збірку REFramework ставити: Lite у Capcom — нічна praydog (без PureDark), інакше профіль."""
+    if upscaler == "fsr4lite" and str(appid) in CAPCOM_LITE:
+        return "nightly"
+    return GAME_PROFILES.get(str(appid), {}).get("ref")
 
 # REFramework: дві різні збірки (як у decky-optiscaler-plus)
 REF_PD_API = "https://api.github.com/repos/TheRazerMD/REFramework/releases"
@@ -604,6 +621,8 @@ def choose_method(appid, install, settings, gpu):
     forced = (settings or {}).get("opti_method", "auto")
     if forced in ("direct", "optiscaler"):
         return forced
+    if (settings or {}).get("opti_upscaler") == "fsr4lite":
+        return "optiscaler"            # Lite — лише через OptiScaler 10 (у Capcom — з REFramework)
     if gpu.get("vendor") not in ("amd", "unknown"):
         return "optiscaler"
     prof = GAME_PROFILES.get(str(appid), {})
@@ -894,7 +913,7 @@ def install(appid, install_path, game_name="", args=None, settings=None, log=pri
     prof = GAME_PROFILES.get(appid, {})
     if prof.get("unsupported"):
         raise RuntimeError(prof["unsupported"])
-    ref_kind = prof.get("ref")
+    ref_kind = ref_kind_for(appid, game_upscaler(appid, settings, effective_gpu(settings))[0])
     pd = find_pd_plugin() if ref_kind == "pd" else None
     if pd is not None and not pd["present"]:
         raise NeedPdPlugin(f"для {prof.get('name', 'цієї гри')} потрібен {PD_PLUGIN_NAME} з Nexus Mods")
@@ -1590,6 +1609,11 @@ def ensure(appid, args, settings=None, log=print):
     if not game.get("enabled"):
         return None, False
     settings = settings or C.load_json(C.SETTINGS_FILE, {})
+    if settings.get("opti_upscaler") == "fsr4lite" and game.get("method") in ("direct", "bridge")             and not game.get("manual") and game.get("install"):
+        # вибрано FSR 4.1 Lite — «один файл» і міст FSR2→FSR4 його не вміють: перейти на OptiScaler
+        log(f"FSR 4.1 Lite: {game.get('name') or appid} — переходжу з «{game['method']}» на OptiScaler")
+        enable(appid, game["install"], game.get("name", ""), args, settings, log, reset=False)
+        game = load_game(appid)
     if game.get("method") == "direct":
         return direct_ensure(appid, game, args, settings, log)
     if game.get("method") == "bridge":
@@ -1604,7 +1628,7 @@ def ensure(appid, args, settings=None, log=print):
     want_up = game_upscaler(appid, settings, gpu)[0]
     want_var = fsr4_variant(gpu, want_up) if want_up in ("fsr4", "fsr40", "fsr4lite") else ""
     want_ratio = (ref_ratio(settings) or "auto") if game.get("ref") else ""
-    changed = (game.get("upscaler"), game.get("opti_fg"), game.get("fsr4_variant", ""),
+    changed = (game.get("ref") or None) != ref_kind_for(appid, want_up) or (game.get("upscaler"), game.get("opti_fg"), game.get("fsr4_variant", ""),
                game.get("ref_ratio", want_ratio)) != (
         want_up, bool(settings.get("opti_fg", False)), want_var, want_ratio)
     if missing or outdated or changed:
