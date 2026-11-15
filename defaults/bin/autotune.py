@@ -42,10 +42,33 @@ UE_NOT_GRAPHICS = ("upscal", "dlss", "fsr", "xess", "tsr", "audio", "sound", "po
                    "traffic", "crowd", "physics", "resolution", "preset", "framegen", "sharp")
 
 
+# Деякі ігри UE тримають графіку у власному розділі текстом, а не числом:
+# Stellar Blade — [/Script/SB.SBGameUserSettings] ShadowQuality=SB_GAMEUSERSETTINGS_VERYHIGH.
+# Такі значення переводимо в рівні 0–3 (як sg.*), а записуємо назад словами самої гри.
+ENUM_RE = re.compile(r"^(?P<pre>[A-Za-z0-9_]*?_)?(?P<lvl>VERYLOW|LOW|MEDIUM|HIGH|VERYHIGH|ULTRA|EPIC|CINEMATIC)$",
+                     re.I)
+ENUM_LEVEL = {"verylow": 0, "low": 0, "medium": 1, "high": 2, "veryhigh": 3, "ultra": 3, "epic": 3,
+              "cinematic": 3}
+ENUM_NOT = UE_NOT_GRAPHICS + ("reflex", "latency", "frameinterpolation", "framegeneration", "grain",
+                              "fringe", "hdr", "audio", "subtitle", "hud", "aspect", "vsync")
+
+
+def enum_level(name, value):
+    """Рівень 0–3 для текстового значення якості або None (не якість / вимкнено / не графіка)."""
+    n = name.lower()
+    if any(w in n for w in ENUM_NOT):
+        return None
+    m = ENUM_RE.match(str(value).strip())
+    return ENUM_LEVEL[m.group("lvl").lower()] if m else None
+
+
 def ue_follow(name):
     """За якою стандартною групою sg.* іде нестандартне налаштування (sg.HairQuality тощо)."""
     n = name.lower()
-    table = [(("volumetric", "fog", "cloud", "sky", "atmospher", "lumen", "gi", "illum"), "GlobalIlluminationQuality"),
+    table = [(("antialias",), "AntiAliasingQuality"),
+             (("volumetric", "fog", "cloud", "sky", "atmospher", "lumen", "gi", "illum", "lighting"),
+              "GlobalIlluminationQuality"),
+             (("ambientocclusion", "occlusion"), "PostProcessQuality"),
              (("reflect", "ssr"), "ReflectionQuality"),
              (("shadow",), "ShadowQuality"),
              (("motionblur", "dof", "depthoffield", "bloom", "postprocess", "lens"), "PostProcessQuality"),
@@ -342,7 +365,8 @@ class UnrealAdapter:
                 cur = st[1:-1]
             elif cur and cur != self.SECTION and "=" in st and not st.startswith((";", "#")):
                 k, v = (x.strip() for x in st.split("=", 1))
-                if k not in where and (k in UE_EXTRA_KEYS or ue_is_quality(k, v)) \
+                if k not in where and (k in UE_EXTRA_KEYS or ue_is_quality(k, v)
+                                       or enum_level(k, v) is not None) \
                         and not cur.startswith("/Script/Engine."):
                     where[k] = cur
         return where
@@ -353,11 +377,28 @@ class UnrealAdapter:
         for k, v in vals.items():            # нестандартні групи гри (sg.HairQuality, …)
             if k.startswith("sg.") and k not in out and ue_is_quality(k[3:], v):
                 out[k] = v
+        self.enum_words = getattr(self, "enum_words", {})
         for k, sec in self._extra_where(cfg).items():
             v = read_ini_section(cfg, sec).get(k)
-            if v is not None:
-                out[f"x.{k}"] = v
+            if v is None:
+                continue
+            lvl = enum_level(k, v)
+            if lvl is not None:
+                m = ENUM_RE.match(v.strip())
+                words = self.enum_words.setdefault(k, {"pre": m.group("pre") or "", "top": "VERYHIGH"})
+                if lvl == 3:
+                    words["top"] = m.group("lvl").upper()
+                v = str(lvl)
+            out[f"x.{k}"] = v
         return out
+
+    def _enum_text(self, key, value):
+        """Число 0–3 → слово гри для текстового налаштування (інакше як є)."""
+        w = getattr(self, "enum_words", {}).get(key)
+        if not w:
+            return value
+        n = max(0, min(3, int(float(value))))
+        return w["pre"] + ("LOW", "MEDIUM", "HIGH", w["top"])[n]
 
     def ladder(self, original, lowres=None):
         steps = ue_ladder(lowres, getattr(self, "bound", None))
@@ -412,9 +453,11 @@ class UnrealAdapter:
             lines = f.readlines()
         changes = {self.SECTION: {k: v for k, v in values.items() if not k.startswith("x.")}}
         where = self._extra_where(cfg)
+        if not getattr(self, "enum_words", None):
+            self.read(cfg)                     # слова гри для текстових рівнів
         for k, v in values.items():
             if k.startswith("x.") and k[2:] in where:
-                changes.setdefault(where[k[2:]], {})[k[2:]] = v
+                changes.setdefault(where[k[2:]], {})[k[2:]] = self._enum_text(k[2:], v)
         new = patch_ini(lines, changes)
         with open(cfg, "w", encoding="utf-8") as f:
             f.writelines(new)
