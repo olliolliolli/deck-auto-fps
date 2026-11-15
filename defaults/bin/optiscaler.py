@@ -1692,6 +1692,8 @@ def parse_log(text):
     """Що OptiScaler написав про цю сесію (рядки з його вихідного коду)."""
     working = re.findall(r"OptiScaler working as ([\w.\-]+)", text)
     created = re.findall(r"Creating new (\w+) upscaler", text)
+    if not created and "Created driver upscaler context" in text:
+        created = ["FSR4"]           # OptiScaler 10: контекст FSR 4 через драйвер (amdxcffx64)
     srver = re.findall(r"FfxApi Dx12 SR version: (\d+\.\d+\.\d+)", text)
     errors = [ln.strip()[-160:] for ln in text.splitlines()
               if re.search(r"Upscaler can't created|_createContext error|InitFSR\w* fail", ln)]

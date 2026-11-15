@@ -34,6 +34,11 @@ class Lite(unittest.TestCase):
         ok = base + ("Hooked ffxProvider_FSR4Lite_Int8\nLoaded amdxcffx64.dll\n"
                      "Render Resolution: 960x540, Display Resolution: 1920x1080\n")
         self.assertTrue(O.parse_log(ok)["lite"])
+        v10 = ("OptiScaler working as dxgi.dll\nHooked the support check of ffxProvider_FSR4Lite_Int8\n"
+               "amdxcffx64.dll loaded from X\nRender Resolution: 960x540, Display Resolution 1920x1080\n"
+               "Created driver upscaler context, result: The operation was successful.\n")
+        info = O.parse_log(v10)
+        self.assertTrue(info["lite"] and info["upscalers"])
         self.assertFalse(O.parse_log(base + "Hooked ffxProvider_FSR4Lite_Int8\n")["lite"])
         self.assertFalse(O.parse_log(ok.replace("Loaded amdxcffx64.dll", "Failed to load amdxcffx64.dll"))["lite"])
 
