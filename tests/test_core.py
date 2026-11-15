@@ -173,5 +173,13 @@ class Dock(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class UnrealLadder(unittest.TestCase):
+    def test_aa_not_epic(self):
+        aa = [int(st["sg.AntiAliasingQuality"]) for st in A.ue_ladder()]
+        self.assertLessEqual(max(aa), 2)
+        self.assertTrue(all(v == 1 for v in aa[2:]))
+        self.assertEqual(len(A.ue_ladder()), 12)        # кількість сходинок та сама — підбір не скидається
+
+
 if __name__ == "__main__":
     unittest.main()
