@@ -130,8 +130,16 @@ def _check_log():
     return _item("log", "ok", "Останній запуск без помилок")
 
 
+def _check_enabled():
+    if C.load_json(C.SETTINGS_FILE, {}).get("enabled", True) is False:
+        return _item("enabled", "warn", "Керування FPS вимкнено",
+                     "Перемикач «AutoFPS керує FPS» вимкнено: ліміт FPS, живлення й генерація кадрів "
+                     "не керуються (графіка підбирається й так).", "enable_fps")
+    return _item("enabled", "ok", "Керування FPS увімкнено")
+
+
 def check(appid=None):
-    items = [_check_launcher(), _check_mangohud(), _check_fg()]
+    items = [_check_launcher(), _check_mangohud(), _check_fg(), _check_enabled()]
     if appid and str(appid) not in ("0", ""):
         items += _check_game(str(appid))
     lg = _check_log()
@@ -148,6 +156,11 @@ def fix(fix_id, install_launcher=None):
             return False, "Лаунчер створює сам плагін — перезапусти Decky"
         install_launcher()
         return True, "Лаунчер AutoFPS створено"
+    if kind == "enable_fps":
+        st = C.load_json(C.SETTINGS_FILE, {})
+        st["enabled"] = True
+        C.save_json(C.SETTINGS_FILE, st)
+        return True, "Керування FPS увімкнено"
     if kind == "reset_mode" and appid.isdigit():
         for fn in (f"mode_{appid}", f"fast_{appid}"):
             try:

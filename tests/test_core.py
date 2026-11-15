@@ -97,15 +97,16 @@ class Reasons(Base):
 class Doctor(Base):
     def setUp(self):
         super().setUp()
-        self.old = (C.CFG_DIR, C.TUNE_FILE, D.LAUNCHER, D.WRAPPER_LOG)
+        self.old = (C.CFG_DIR, C.TUNE_FILE, D.LAUNCHER, D.WRAPPER_LOG, C.SETTINGS_FILE)
         C.CFG_DIR = os.path.join(self.tmp, "cfg")
         C.TUNE_FILE = os.path.join(C.CFG_DIR, "tune.json")
+        C.SETTINGS_FILE = os.path.join(C.CFG_DIR, "settings.json")
         D.LAUNCHER = os.path.join(self.tmp, "launcher")
         D.WRAPPER_LOG = os.path.join(self.tmp, "wrapper.log")
         os.makedirs(C.CFG_DIR)
 
     def tearDown(self):
-        C.CFG_DIR, C.TUNE_FILE, D.LAUNCHER, D.WRAPPER_LOG = self.old
+        C.CFG_DIR, C.TUNE_FILE, D.LAUNCHER, D.WRAPPER_LOG, C.SETTINGS_FILE = self.old
         super().tearDown()
 
     def by_id(self, appid=None):
@@ -132,6 +133,13 @@ class Doctor(Base):
         self.assertEqual((it["level"], it["detail"]), ("warn", "x"))
         D.fix(it["fix"])
         self.assertNotIn("engine", C.load_json(C.TUNE_FILE, {})["42:legion_go_s"])
+
+    def test_fps_disabled_fixable(self):
+        C.save_json(C.SETTINGS_FILE, {"enabled": False})
+        it = self.by_id()["enabled"]
+        self.assertEqual((it["level"], it["fix"]), ("warn", "enable_fps"))
+        D.fix("enable_fps")
+        self.assertEqual(self.by_id()["enabled"]["level"], "ok")
 
     def test_log_errors_reported(self):
         with open(D.WRAPPER_LOG, "w", encoding="utf-8") as f:

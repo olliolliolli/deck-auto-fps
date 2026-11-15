@@ -2101,7 +2101,14 @@ class Plugin:
             if self.phase != "disabled":
                 self._restore_display()  # прибрати наш ліміт FPS і FG
                 self.phase = "disabled"
-            self.message = "Автоматика вимкнена"
+            # керування FPS вимкнено, але підбір графіки — окрема функція: міряємо далі
+            # (без ліміту — це навіть чесніший замір)
+            for fps, gpu in self.reader.read(self.game_started):
+                if self.tuning:
+                    self.tm_raw.append((now, fps, gpu))
+            self.reader.hw = []
+            self._tm_tick(now)
+            self.message = "Керування FPS вимкнено" + (" · графіка підбирається" if self.tuning else "")
             return
         if self.phase == "disabled":
             self.phase, self.phase_t = "warmup", now
@@ -3120,6 +3127,9 @@ class Plugin:
             return {"ok": False, "message": str(e)[:300]}
 
     async def health_fix(self, fix_id):
+        if fix_id == "enable_fps":         # налаштування живуть у пам'яті плагіна — міняємо тут
+            await self.set_setting("enabled", True)
+            return {"ok": True, "message": "Керування FPS увімкнено"}
         try:
             import doctor
             ok, msg = await self._blocking(doctor.fix, fix_id, install_launcher)
