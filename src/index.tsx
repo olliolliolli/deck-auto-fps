@@ -81,6 +81,8 @@ type Tune = {
   note: string;
   summary: string;
   target: number | null;
+  bound?: "cpu" | "gpu" | null;
+  gpu_load?: number | null;
 };
 
 type Status = {
@@ -1373,7 +1375,10 @@ function Content() {
                   ? ` · сходинка ${st.tune.level + 1}/${st.tune.steps}`
                   : "")
               }
-              description={[st.tune.summary, st.tune.note].filter(Boolean).join(" — ")}
+              description={[
+                st.tune.bound === "cpu" ? `Упор у процесор (GPU ${st.tune.gpu_load ?? "?"}%) — знижую дальність, рослинність, тіні`
+                  : st.tune.bound === "gpu" ? `Упор у відеокарту (GPU ${st.tune.gpu_load ?? "?"}%)` : "",
+                st.tune.summary, st.tune.note].filter(Boolean).join(" — ")}
             />
           </PanelSectionRow>
         )}

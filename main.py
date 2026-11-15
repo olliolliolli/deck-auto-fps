@@ -1609,7 +1609,7 @@ class Plugin:
             return
         self.menu_changed = True
         was_tuning, self.tuning = self.tuning, False
-        self.tm_raw, self.tm_windows = [], []
+        self.tm_raw, self.tm_windows, self.tm_gpu = [], [], []
         lvl = int(e.get("applied_level", e.get("level", 0))) + 1
         if now - self.game_started < 75:
             # так швидко в меню не дійти — гра сама перезаписала файл з іншого джерела
@@ -1705,6 +1705,9 @@ class Plugin:
         else:
             est = mean
         self.tm_windows.append((round(med, 1), round(est, 1)))
+        if gpu is not None and not capped:
+            # завантаження GPU, коли гра НЕ впирається в ліміт: показує, у що упор (GPU чи CPU)
+            self.tm_gpu = (getattr(self, "tm_gpu", []) + [gpu])[-60:]
         del self.tm_windows[:-60]
         # провали відносно звичного рівня цієї сесії (перехід між рівнями, заставка) — геть
         # орієнтир — верхня чверть вікон: довгі провали (завантаження рівня, 3–10 FPS
@@ -1817,6 +1820,9 @@ class Plugin:
             return
         entry["last"] = {"level": entry["applied_level"], "p10": round(p10, 1),
                          "target": target, "t": int(time.time())}
+        g = getattr(self, "tm_gpu", [])
+        if len(g) >= 3:
+            entry["last"]["gpu"] = round(percentile(g, 0.5), 1)
         _save_json(TUNE_FILE, tune)
 
     def _modify_tune(self, appid, fn):
@@ -2400,7 +2406,7 @@ class Plugin:
         return {"appid": appid, "engine": e.get("engine"), "state": state,
                 "level": e.get("level"), "steps": e.get("steps"),
                 "note": e.get("note", ""), "summary": e.get("summary", ""),
-                "target": e.get("target")}
+                "target": e.get("target"), "bound": e.get("bound"), "gpu_load": e.get("gpu_load")}
 
     async def retune(self, appid=None):
         """Почати підбір графіки цієї гри з нуля (з наступного запуску). Повертає повідомлення."""

@@ -88,10 +88,57 @@ UE_DELTAS = [
 ]
 
 
-def ue_ladder(lowres=None):
+# Упор у ПРОЦЕСОР: відеокарта недовантажена, тож роздільність і «красиві» ефекти не чіпаємо —
+# знижуємо те, що навантажує CPU (кількість об'єктів і викликів відмальовки):
+# дальність промальовки/LOD, рослинність, тіні (кожен каскад — ще один прохід усіх об'єктів),
+# частинки й фізика ефектів. Порядок — від найбільшого виграшу для CPU до найменш помітного.
+UE_CPU_DELTAS = [
+    {"ViewDistanceQuality": 2},
+    {"FoliageQuality": 2},
+    {"ShadowQuality": 2},
+    {"EffectsQuality": 2},
+    {"ViewDistanceQuality": 1},
+    {"FoliageQuality": 1},
+    {"ShadowQuality": 1},
+    {"EffectsQuality": 1},
+    {"ViewDistanceQuality": 0},
+    {"FoliageQuality": 0},
+    {"ShadowQuality": 0, "EffectsQuality": 0},
+]
+GPU_BUSY = 90        # % завантаження GPU, вище — упор у відеокарту
+GPU_IDLE = 80        # нижче, а FPS не дотягує — упор у процесор
+
+
+def bottleneck(entry, last, target):
+    """Оновити entry["bound"] ("gpu" / "cpu") за останнім заміром (з гістерезисом)."""
+    gpu = (last or {}).get("gpu")
+    if gpu is None:
+        return entry.get("bound")
+    short = float(last.get("p10", 0)) < target * 0.97
+    prev = entry.get("bound")
+    if gpu >= GPU_BUSY:
+        new = "gpu"
+    elif gpu < GPU_IDLE and short:
+        new = "cpu"
+    else:
+        new = prev
+    entry["bound"] = new
+    entry["gpu_load"] = round(float(gpu))
+    return new
+
+
+def ue_ladder(lowres=None, bound=None):
     """lowres=67 — та сама сходинка якості, але роздільність рендеру зафіксовано (≈HD)."""
     cur = {k.split(".", 1)[1]: 3 for k in UE_KEYS}
     cur["ResolutionQuality"] = lowres or 100
+    if bound == "cpu":
+        cur["AntiAliasingQuality"] = 2
+        ladder = [dict(cur)]
+        for d in UE_CPU_DELTAS:
+            cur.update(d)
+            cur["LandscapeQuality"] = cur["ViewDistanceQuality"]
+            ladder.append(dict(cur))
+        return [{f"sg.{k}": str(v) for k, v in step.items()} for step in ladder]
     # Згладжування на портативному екрані: «Епічно» в UE5 (TSR) дуже дороге й майже непомітне,
     # а з апскейлером (FSR / DLSS через OptiScaler) його й так замінює апскейлер. Максимум —
     # «Високо», з другої сходинки — «Середньо» (TSR нижче вже дає мерехтіння).
@@ -309,7 +356,7 @@ class UnrealAdapter:
         return out
 
     def ladder(self, original, lowres=None):
-        steps = ue_ladder(lowres)
+        steps = ue_ladder(lowres, getattr(self, "bound", None))
         # роздільність рендеру гри (власний TSR/FSR гри ставить sg.ResolutionQuality, напр. 40%) —
         # ніколи не вища за ту, що стояла в грі: 40% → 100% дало б у 6 разів більше пікселів
         try:
@@ -935,6 +982,10 @@ def decide(entry, target, n):
     # Сходинки відрізняються на 2+, а FPS той самий — налаштування не діють
     for h in hist:
         if abs(int(h["level"]) - lvl) >= 2 and abs(float(h["p10"]) - p10) / max(float(h["p10"]), 1) < 0.04:
+            if entry.get("bound") != "cpu" and not entry.get("cpu_tried"):
+                # FPS не реагує на «відеокартні» налаштування — упор у процесор: інша драбина
+                entry.update(bound="cpu", cpu_tried=True)
+                return lvl, "FPS не залежить від графіки — упор у процесор: знижую дальність, рослинність, тіні"
             entry["ineffective"] = True
             return lvl, ("Налаштування не впливають на FPS: гра впирається в процесор "
                          "або зберігає графіку деінде")
@@ -1211,11 +1262,15 @@ def run(appid, args, device=None, log=print):
     scale = lowres_scale(device) if getattr(adapter, "lowres_supported", True) \
         and not device.get("res_override") else None
     track = entry.get("track", "native")
+    last = entry.get("last")
+    if last:
+        bottleneck(entry, last, target)
+    adapter.bound = entry.get("bound")
     ladder = adapter.ladder(entry["original"], scale if track == "lowres" else None)
     # Стартова сходинка задана для 12-сходинкової драбини Unreal. У коротших (RE Engine — 4–8)
     # вона означала б «усе на мінімум» — масштабуємо пропорційно (один раз, до першого заміру).
     # Драбина змінилась (напр. увімкнено міст FSR 4 — з'явились кроки роздільності): підбір заново
-    sig = f"{len(ladder)}:{RE_FSR2_KEY in ladder[0]}:hh2:{device.get('res')}"
+    sig = f"{len(ladder)}:{RE_FSR2_KEY in ladder[0]}:hh2:{device.get('res')}:{entry.get('bound') or 'gpu'}"
     if entry.get("ladder_sig") != sig and (entry.get("ladder_sig") or RE_FSR2_KEY in ladder[0]):
         for k in ("history", "failed", "ok", "converged", "ineffective", "last", "start_scaled"):
             entry.pop(k, None)

@@ -954,6 +954,15 @@ class GenericAdapter:
         known = self._settings_of(fmt)
         return {k: v for k, v in fmt.items() if k in known}
 
+    # налаштування, що навантажують ПРОЦЕСОР (кількість об'єктів, дальність, симуляція)
+    CPU_WORDS = ("view", "distance", "lod", "levelofdetail", "detail", "foliage", "grass", "vegetation",
+                 "tree", "object", "mesh", "geometry", "draw", "shadow", "cascade", "particle", "effect",
+                 "physics", "simulation", "destruct", "debris", "terrain", "landscape", "streaming")
+
+    def _cpu_heavy(self, key):
+        n = _name(key.rsplit("/", 1)[-1].rsplit("\\", 1)[-1])
+        return any(w in n for w in self.CPU_WORDS)
+
     def ladder(self, original, lowres=None):
         fmt = self.fmt_cls(self.cfg)
         settings = self._settings_of(fmt)
@@ -975,6 +984,17 @@ class GenericAdapter:
                 floor = 1 if sc[0] in ("off", "disable") and len(sc) > 2 and not pref else 0
                 floor = min(floor, cap)
                 idx = max(floor, int(round(cap - frac * (cap - floor))))
+                if getattr(self, "bound", None) == "cpu":
+                    # упор у процесор: від налаштувань гри як є; «відеокартні» не чіпаємо,
+                    # процесорні (дальність, LOD, тіні, частинки) — рівномірно вниз
+                    o = _core((original or {}).get(k, cur.get(k, "")))
+                    base = min(sc.index(o), cap) if o in sc else cap
+                    if not self._cpu_heavy(k):
+                        idx = base
+                    else:
+                        f2 = min(1.0, i / float(STEPS - 1))
+                        floor = min(floor, base)
+                        idx = max(floor, int(round(base - f2 * (base - floor))))
                 st[k] = _cased(sc[idx], cur.get(k, ""))
             # сходинка, що нічим не відрізняється від попередньої, — лише марний запуск:
             # кожна сходинка драбини має справді щось змінювати
