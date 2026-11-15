@@ -168,9 +168,13 @@ def lowres_scale(device):
 RES_SCALES = [100, 85, 75, 67, 58, 50]
 
 
-def unity_ladder(q0, lowres=None):
+def unity_ladder(q0, lowres=None, bound=None):
     """Чергуємо: рівень якості Unity ↓, роздільна здатність ↓.
-    lowres — роздільність зафіксовано на ≈HD, знижується лише рівень якості."""
+    lowres — роздільність зафіксовано на ≈HD, знижується лише рівень якості.
+    bound="cpu" — упор у процесор: роздільність не чіпаємо (GPU вільна), лише рівень якості
+    (у Unity він задає дальність тіней, LOD bias, кількість частинок — процесорне навантаження)."""
+    if bound == "cpu" and q0 is not None:
+        return [{"quality": q, "scale": lowres or RES_SCALES[0]} for q in range(q0, -1, -1)]
     if lowres:
         if q0 is None:
             return [{"quality": None, "scale": lowres}]
@@ -664,7 +668,7 @@ class UnityAdapter:
     lowres_min_gain = 2        # рівнів якості Unity мало (зазвичай 0–5), кожен — помітний
 
     def ladder(self, original, lowres=None):
-        return unity_ladder(original.get("quality"), lowres)
+        return unity_ladder(original.get("quality"), lowres, getattr(self, "bound", None))
 
     def rank(self, values, ladder):
         q0 = ladder[0].get("quality")
@@ -779,6 +783,10 @@ UE_HANDHELD_TEXTURE_MAX = 2
 
 RE_FSR2_KEY = "AppUpScalingTypeFSR2"   # 1 «Якість», 2 «Баланс», 3 «Продуктивність» (з мостом — FSR 4)
 RE_TO_ZERO = {"AppRayTraceOnOff", "AppStrandHair", "AppSSRefrection", "AppContactShadow"}
+# RE Engine, упор у процесор: моделі (LOD, кількість об'єктів), тіні (каскади — проходи по
+# об'єктах), ефекти частинок, дощ. Натовп і фізику не чіпаємо (геймплей).
+RE_CPU_KEYS = ["AppMeshQuality", "AppShadowQuality", "AppSpecificEffectQuality",
+               "AppParticleLighting", "AppRainQuality"]
 RE_LABELS = {"AppShadowQuality": "тіні", "AppVolumeLightQuality": "об'ємне світло",
              "AppAmbientOcclusion": "AO", "AppMeshQuality": "моделі", "AppStrandHair": "волосся",
              "AppRayTraceOnOff": "трасування"}
@@ -854,6 +862,23 @@ class REEngineAdapter:
 
     def ladder(self, original, lowres=None):
         cur = self._ceiling(original)
+        if getattr(self, "bound", None) == "cpu":
+            # упор у процесор: режим FSR і «відеокартні» налаштування — як у грі зараз;
+            # знижуємо моделі/LOD, тіні, ефекти частинок, дощ
+            cur = dict(cur)
+            ladder = [dict(cur)]
+            keys = [k for k in RE_CPU_KEYS if k in cur]
+            for _ in range(14):
+                changed = 0
+                for k in keys:
+                    if cur[k] > 0:
+                        cur[k] -= 1
+                        changed += 1
+                        break                # одна зміна на сходинку
+                if not changed:
+                    break
+                ladder.append(dict(cur))
+            return [{k: str(v) for k, v in st.items()} for st in ladder]
         if self.fsr4_bridge():
             # З FSR 4 роздільність — найдешевший важіль: спершу «Якість» → «Баланс» →
             # «Продуктивність» за повних налаштувань, і лише потім — графіка (на «Продуктивності»).
