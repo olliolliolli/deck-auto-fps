@@ -40,6 +40,25 @@ class Bottleneck(unittest.TestCase):
     def test_ue_gpu_ladder_unchanged(self):
         self.assertEqual(A.ue_ladder(), A.ue_ladder(bound="gpu"))
 
+    def test_unity_cpu(self):
+        L = A.unity_ladder(4, bound="cpu")
+        self.assertEqual([st["quality"] for st in L], [4, 3, 2, 1, 0])
+        self.assertEqual({st["scale"] for st in L}, {A.RES_SCALES[0]})
+        self.assertGreater(len({st["scale"] for st in A.unity_ladder(4)}), 1)   # GPU-драбина як була
+
+    def test_re_engine_cpu(self):
+        a = A.REEngineAdapter("", "", {"id": "legion_go_s", "res": [1920, 1200]})
+        a._ceiling = lambda o: {"AppMeshQuality": 2, "AppShadowQuality": 3, "AppVolumeLightQuality": 3,
+                                "AppAmbientOcclusion": 2, A.RE_FSR2_KEY: 1}
+        a.bound = "cpu"
+        L = a.ladder({})
+        for st in L:
+            self.assertEqual(st["AppVolumeLightQuality"], "3")
+            self.assertEqual(st["AppAmbientOcclusion"], "2")
+            self.assertEqual(st[A.RE_FSR2_KEY], "1")
+        self.assertEqual(L[-1]["AppMeshQuality"], "0")
+        self.assertEqual(L[-1]["AppShadowQuality"], "0")
+
     def test_generic_cpu_mode(self):
         tmp = tempfile.mkdtemp()
         try:
