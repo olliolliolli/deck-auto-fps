@@ -208,6 +208,12 @@ log "mangohud=$USE_MANGO lsfg=$USE_LSFG (v${LSFG_VER:-?}, ×$WANT, режим FG
 printf '{"appid":"%s","pid":%d,"started":%d,"mode":"%s","mangohud":%d,"lsfg":%d,"fg":%d,"fg_want":%d,"opti":"%s","opti_fg":%d,"opti_method":"%s","ext_fg":%d}\n' \
   "$APPID" "$$" "$(date +%s)" "$MODE" "$USE_MANGO" "$USE_LSFG" "$WANT" "$FG_WANT" "$OPTI_DLL" "${OPTI_FG:-0}" "$OPTI_METHOD" "$EXT_FG" >"$CACHE/current.json"
 
+# --- Cyberpunk 2077: без лаунчера CD Projekt (REDlauncher чекає кнопки «Грати», а з OptiScaler
+#     у грі запуск через нього нестабільний) — гра стартує одразу
+if [ "$APPID" = "1091500" ] && [ "$MODE" != "safe" ]; then
+  case " $* " in *" --launcher-skip "*) ;; *) set -- "$@" --launcher-skip; log "Cyberpunk: --launcher-skip" ;; esac
+fi
+
 # --- запуск (дочірнім процесом, щоб знати, чи гра не впала одразу)
 START=$(date +%s)
 if [ "$USE_MANGO" = 1 ]; then
