@@ -971,7 +971,22 @@ def install(appid, install_path, game_name="", args=None, settings=None, log=pri
     ours = set(game.get("files", []))
     helix_here = os.path.isfile(os.path.join(target, HELIX_MARKER)) or \
         os.path.isdir(os.path.join(target, "HelixSR"))
-    for name in ORIGINAL_BACKUPS + (["dinput8.dll"] if ref_kind else []):
+    if vinfo.get("source"):
+        # OptiScaler 10 тримає свої бібліотеки в підтеці OptiScaler/ — бібліотеки гри
+        # (FidelityFX, XeSS, dbghelp…) мають лишитися на місці: без них гра падає на старті
+        # (Cyberpunk 2077). Повертаємо те, що попередні версії сховали в *.b.
+        keep = []
+        for name in backups:
+            p = os.path.join(target, name)
+            if name != dll and os.path.isfile(p + ".b") and not os.path.exists(p):
+                shutil.move(p + ".b", p)
+            elif os.path.isfile(p + ".b"):
+                keep.append(name)
+        backups = keep
+        originals = [dll] + (["dinput8.dll"] if ref_kind else [])
+    else:
+        originals = ORIGINAL_BACKUPS + (["dinput8.dll"] if ref_kind else [])
+    for name in originals:
         if helix_here and name.startswith("amd_fidelityfx"):
             continue                 # HelixSR уже стоїть у грі — його файли не чіпаємо
         p = os.path.join(target, name)
