@@ -25,7 +25,16 @@ class ForceIni(unittest.TestCase):
         self.a.entry = {"force_ini": True, "original": self.orig}
 
     def tearDown(self):
+        for root, _d, files in os.walk(self.tmp):
+            for f in files:
+                os.chmod(os.path.join(root, f), 0o644)
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_engine_ini_read_only(self):
+        self.a.write(self.gus, {"sg.ShadowQuality": "0", "sg.GlobalIlluminationQuality": "0"})
+        self.assertFalse(os.access(self.eng, os.W_OK))
+        self.a.write(self.gus, {"sg.ShadowQuality": "1", "sg.GlobalIlluminationQuality": "0"})
+        self.assertIn("sg.ShadowQuality=1", self.eng_text())     # наш повторний запис проходить
 
     def eng_text(self):
         with open(self.eng) as f:
