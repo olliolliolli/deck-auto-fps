@@ -202,6 +202,8 @@ def ue_cvars(values):
             lvl = max(0, min(3, int(float(v))))
         except ValueError:
             continue
+        if grp == "ShadowQuality":
+            lvl = max(1, lvl)
         for k, vals in cvars.items():
             out[k] = vals[lvl]
     return out
@@ -216,6 +218,7 @@ def ue_ladder(lowres=None, bound=None):
         ladder = [dict(cur)]
         for d in UE_CPU_DELTAS:
             cur.update(d)
+            cur["ShadowQuality"] = max(1, cur["ShadowQuality"])
             cur["LandscapeQuality"] = cur["ViewDistanceQuality"]
             ladder.append(dict(cur))
         return [{f"sg.{k}": str(v) for k, v in step.items()} for step in ladder]
@@ -226,6 +229,7 @@ def ue_ladder(lowres=None, bound=None):
     ladder = [dict(cur)]
     for d in UE_DELTAS:
         cur.update({k: v for k, v in d.items() if not (lowres and k == "ResolutionQuality")})
+        cur["ShadowQuality"] = max(1, cur["ShadowQuality"])   # тіні 0 — «драбинка» на персонажі
         cur["LandscapeQuality"] = cur["ViewDistanceQuality"]
         ladder.append(dict(cur))
     return [{f"sg.{k}": str(v) for k, v in step.items()} for step in ladder]
@@ -1529,7 +1533,7 @@ def run(appid, args, device=None, log=print):
             return
     else:
         entry.pop("write_failures", None)
-    if settings.get("lock_config", False) or entry.get("force_ini"):
+    if settings.get("lock_config", False) or entry.get("force_ini") or C.game_facts(appid).get("ro"):
         # «лише читання»: гра не перезапише підібране (ні з меню, ні при виході, ні з хмари);
         # для ігор, що самі відновлюють графіку зі свого сейва (force_ini), — завжди
         files = [cfg] + (adapter.overlays(cfg) if hasattr(adapter, "overlays") else [])

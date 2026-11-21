@@ -94,6 +94,16 @@ def _check_game(appid):
     elif opts is not None:
         out.append(_item("wrapper", "ok", "AutoFPS підключено до гри"))
 
+    f = C.game_facts(appid)
+    if f.get("ac"):
+        out.append(_item("anticheat", "warn", f"У грі античит: {f['ac']}",
+                         "Підміну бібліотек (FSR 4 / OptiScaler) для цієї гри плагін не робить — "
+                         "можливий бан у мережевій грі. Підбір FPS і графіки працює."))
+    if f:
+        info = ", ".join(x for x in (f.get("e"), ("DirectX " + "/".join(f["dx"])) if f.get("dx") else "",
+                                     "Vulkan" if f.get("vk") else "", f.get("up")) if x)
+        if info:
+            out.append(_item("facts", "ok", "PCGamingWiki: " + info[:120]))
     mode = _read(os.path.join(C.CFG_DIR, f"mode_{appid}"))
     if mode in ("nolsfg", "safe"):
         what = "без генерації кадрів" if mode == "nolsfg" else "у безпечному режимі (AutoFPS нічого не змінює)"

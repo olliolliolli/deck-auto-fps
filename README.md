@@ -250,3 +250,10 @@ RE Engine поки не підтримується.
 - Якщо MangoHud рахує FPS до фрейм-генерації, вимкніть `fps_counts_generated`
   у `~/.config/autofps/settings.json`.
 - TDP плагін не чіпає — для цього є SimpleDeckyTDP / вбудований слайдер.
+
+## Дані PCGamingWiki (0.61)
+
+`config_paths.json` (де лежать налаштування) і `game_facts.json` (рушій, DirectX/Vulkan, апскейлери,
+генерація кадрів, античит, «файл треба зробити лише для читання») зібрані з усіх 56 268 сторінок
+ігор [PCGamingWiki](https://www.pcgamingwiki.com) — CC BY-NC-SA 3.0, див. `config_paths-LICENSE.txt`.
+Оновлення: `tools/pcgw/pcgw_full.py` → `pcgw_build.py` + `pcgw_facts.py`.
