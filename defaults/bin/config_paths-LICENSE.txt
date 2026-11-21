@@ -1,0 +1,12 @@
+config_paths.json — шляхи до файлів налаштувань ігор (Windows) і рушії ігор за Steam AppID.
+
+Джерело: PCGamingWiki (https://www.pcgamingwiki.com), розділи «Configuration file(s) location»
+та інфобокси сторінок ігор. Зібрано через MediaWiki API 21.11.2026; дані перетворено
+(плейсхолдери шляхів → відносні шляхи в префіксі Proton).
+
+Вміст PCGamingWiki поширюється за ліцензією Creative Commons
+Attribution-NonCommercial-ShareAlike 3.0 Unported (CC BY-NC-SA 3.0):
+https://creativecommons.org/licenses/by-nc-sa/3.0/
+
+Цей файл даних поширюється на тих самих умовах (CC BY-NC-SA 3.0), з посиланням на
+PCGamingWiki та її авторів. Код плагіна AutoFPS — окремо, BSD-3-Clause.
