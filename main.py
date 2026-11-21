@@ -581,7 +581,7 @@ class Plugin:
         try:   # «лише читання» вимкнено (загально чи для гри) — повернути запис заблокованим файлам
             tune = _load_json(TUNE_FILE, {})
             for k, e in tune.items():
-                if isinstance(e, dict) and e.get("locked") and \
+                if isinstance(e, dict) and e.get("locked") and not e.get("force_ini") and \
                         not C.settings_for(k.split(":")[0], dict(self.settings)).get("lock_config", False):
                     C.unlock_files(e.pop("locked"))
                     decky.logger.info(f"знято «лише читання»: {k}")
