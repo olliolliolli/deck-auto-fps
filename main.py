@@ -1615,11 +1615,19 @@ class Plugin:
             # так швидко в меню не дійти — гра сама перезаписала файл з іншого джерела
             decky.logger.warning(f"гра перезаписала налаштування при старті: {diff}")
             found = self._find_settings_sources(e)
-            self._modify_tune(self.appid, lambda x: x.update(settings_sources=found))
+            # джерела не знайдено (графіка в двійковому сейві, як у Ninja Gaiden 2 Black) —
+            # Unreal: з наступного запуску пишемо sg.* у Engine.ini [SystemSettings]; цей рівень
+            # пріоритету вищий за налаштування, які гра ставить зі свого меню чи сейва
+            force = not found and str(e.get("engine", "")).startswith("unreal")
+            self._modify_tune(self.appid, lambda x: x.update(settings_sources=found,
+                                                             **({"force_ini": True} if force else {})))
             if found:
                 body = ("Гра відновила графіку з іншого місця. Знайшов, де вона її тримає: "
                         + ", ".join(os.path.basename(f) for f in found[:3])
                         + ". З наступного запуску записуватиму й туди")
+            elif force:
+                body = ("Гра тримає графіку у власному сейві. З наступного запуску задаю її через "
+                        "Engine.ini — так гра не зможе її перекрити")
             else:
                 body = ("Гра відновила графіку з іншого місця, і я його не знайшов. "
                         "Збери діагностику й надішли Claude")

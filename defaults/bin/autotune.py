@@ -447,6 +447,47 @@ class UnrealAdapter:
         except ValueError:
             return 100
 
+    FORCE_BEGIN = "; >>> AutoFPS graphics (game keeps its settings elsewhere) >>>"
+    FORCE_END = "; <<< AutoFPS graphics <<<"
+
+    def _force_engine_ini(self, cfg, values):
+        """Гра перезаписує GameUserSettings зі свого сейва — задаємо sg.* в Engine.ini
+        [SystemSettings] (пріоритет SystemSettingsIni вищий за GameSetting). Оригінал гри
+        (values == original) — блок прибираємо."""
+        path = os.path.join(os.path.dirname(cfg), "Engine.ini")
+        entry = getattr(self, "entry", None) or {}
+        sg = {k: v for k, v in values.items() if k.startswith("sg.") and k in UE_KEYS}
+        lines = []
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+        out, skip = [], False
+        for ln in lines:
+            st = ln.strip()
+            if st == self.FORCE_BEGIN:
+                skip = True
+                continue
+            if skip and st == self.FORCE_END:
+                skip = False
+                continue
+            if not skip:
+                out.append(ln)
+        restoring = values == entry.get("original")
+        if entry.get("force_ini") and sg and not restoring:
+            block = [self.FORCE_BEGIN + "\n"] + [f"{k}={v}\n" for k, v in sg.items()] + [self.FORCE_END + "\n"]
+            sec = next((i for i, ln in enumerate(out) if ln.strip().lower() == "[systemsettings]"), None)
+            if sec is None:
+                if out and not out[-1].endswith("\n"):
+                    out[-1] += "\n"
+                out += ["[SystemSettings]\n"] + block
+            else:
+                out[sec + 1:sec + 1] = block
+        if out != lines:
+            if os.path.isfile(path):
+                backup_once(path)
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(out)
+
     def write(self, cfg, values):
         backup_once(cfg)
         with open(cfg, encoding="utf-8", errors="ignore") as f:
@@ -461,6 +502,10 @@ class UnrealAdapter:
         new = patch_ini(lines, changes)
         with open(cfg, "w", encoding="utf-8") as f:
             f.writelines(new)
+        try:
+            self._force_engine_ini(cfg, values)
+        except Exception as e:  # noqa: BLE001
+            print(f"engine.ini force: {e!r}")
         try:
             self._sync_sav(cfg, values)
         except Exception as e:  # noqa: BLE001 — сейв лише доповнення до ini
