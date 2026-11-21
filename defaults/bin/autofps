@@ -126,6 +126,26 @@ if [ "$MODE" != "safe" ]; then
   if command -v mangohud >/dev/null 2>&1; then
     USE_MANGO=1
     export MANGOHUD=1
+    unset DISABLE_MANGOHUD
+    # Інша обгортка (MAKO: mako-run) могла задати власний список Vulkan-шарів без MangoHud —
+    # тоді MangoHud не завантажиться і FPS не буде видно. Додаємо теку лише з шаром MangoHud
+    # (першою, як це робить сам MAKO: MangoHud бачить справжні кадри гри)
+    if [ -n "$VK_IMPLICIT_LAYER_PATH" ]; then
+      MH_HAS=0
+      IFS=: read -ra _lp <<<"$VK_IMPLICIT_LAYER_PATH"
+      for _d in "${_lp[@]}"; do ls "$_d"/MangoHud*.json >/dev/null 2>&1 && MH_HAS=1; done
+      if [ "$MH_HAS" = 0 ]; then
+        MH_DIR="$CACHE/vk_mangohud"
+        mkdir -p "$MH_DIR" 2>/dev/null
+        for _j in /usr/share/vulkan/implicit_layer.d/MangoHud*.json; do
+          [ -f "$_j" ] && cp -f "$_j" "$MH_DIR/" 2>/dev/null
+        done
+        if ls "$MH_DIR"/MangoHud*.json >/dev/null 2>&1; then
+          export VK_IMPLICIT_LAYER_PATH="$MH_DIR:$VK_IMPLICIT_LAYER_PATH"
+          log "MangoHud додано до шарів Vulkan іншої обгортки (MAKO)"
+        fi
+      fi
+    fi
     # read_cfg + власний файл: у ньому лише fps_limit, який плагін змінює посеред гри
     #   (MangoHud стежить за файлом); fps_limit=0 — без обмеження
     printf 'fps_limit=0\n' >"$CACHE/mangohud_limit.conf" 2>/dev/null
