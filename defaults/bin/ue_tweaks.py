@@ -50,7 +50,27 @@ TWEAKS = [
     # UE5: Nanite і відбиття Lumen трохи грубші — найбільший виграш на APU
     ("r.Nanite.MaxPixelsPerEdge", "2"),
     ("r.Lumen.Reflections.DownsampleFactor", "2"),
+    # Lumen для портативки — лише команди, які Epic у «Lumen Performance Guide» називає
+    # безпечними для зниження вартості, або які пройшли перевірку на Legion Go S:
+    #  * відбиття на рослинності не трасуються («significant performance win» за Epic)
+    ("r.Lumen.Reflections.MaxRoughnessToTraceForFoliage", "0"),
+    #  * трасуються лише гладкі поверхні (за замовчуванням 0.4)
+    ("r.Lumen.Reflections.MaxRoughnessToTraceClamp", "0.3"),
+    #  * рідший final gather (перевірено: Ninja Gaiden 2 Black працює)
+    ("r.Lumen.ScreenProbeGather.DownsampleFactor", "32"),
+    #  * без трасування окремих distance field мешів (перевірено на Legion)
+    ("r.Lumen.TraceMeshSDFs", "0"),
+    #  * освітлення поверхневого кешу оновлюється рідше (частка кешу за кадр)
+    ("r.LumenScene.DirectLighting.UpdateFactor", "64"),
+    ("r.LumenScene.Radiosity.UpdateFactor", "128"),
+    #  * Lumen паралельно з рештою кадру (async compute — AMD RDNA це вміє)
+    ("r.LumenScene.Lighting.AsyncCompute", "1"),
+    ("r.Lumen.DiffuseIndirect.AsyncCompute", "1"),
+    ("r.Lumen.Reflections.AsyncCompute", "1"),
 ]
+# НЕ додавати (зупиняли рендер / fatal error у Ninja Gaiden 2 Black на Legion):
+# r.Lumen.ScreenProbeGather.TracingOctahedronResolution, r.LumenScene.Radiosity.ProbeSpacing,
+# r.LumenScene.Radiosity.HemisphereProbeResolution, r.Lumen.Reflections.Allow=0
 
 
 UE5_MARKERS = [
