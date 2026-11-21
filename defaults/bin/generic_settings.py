@@ -839,6 +839,92 @@ def _known(compat):
     return None
 
 
+# База шляхів до налаштувань з PCGamingWiki для всієї бібліотеки (config_paths.json поруч):
+# appid -> paths: ["pfx:AppData/Local/<гра>/…", "game:<тека в грі>", "reg:…"]
+CONFIG_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_paths.json")
+_db_cache = {}
+
+
+def db_paths(appid):
+    if "db" not in _db_cache:
+        try:
+            with open(CONFIG_DB, encoding="utf-8") as f:
+                _db_cache["db"] = json.load(f)
+        except (OSError, ValueError):
+            _db_cache["db"] = {}
+    return (_db_cache["db"].get(str(appid)) or {}).get("paths", [])
+
+
+def ci_glob(base, rel):
+    """Шлях без урахування регістру (Wine його не розрізняє; вікі пише як заманеться);
+    «*» у частинах шляху — будь-яке ім'я (ID користувача тощо)."""
+    import fnmatch
+    cur = [base]
+    for part in [x for x in rel.split("/") if x]:
+        nxt = []
+        pat = part.lower()
+        for d in cur:
+            try:
+                names = os.listdir(d)
+            except OSError:
+                continue
+            for n in names:
+                if fnmatch.fnmatchcase(n.lower(), pat):
+                    nxt.append(os.path.join(d, n))
+        cur = nxt[:40]
+        if not cur:
+            break
+    return cur
+
+
+def _db_files(compat, install, appid):
+    """Файли-кандидати з бази для гри: самі файли й файли в теках (до 3 рівнів)."""
+    root = os.path.join(compat, "pfx", "drive_c", "users", "steamuser")
+    out = []
+    for p in db_paths(appid):
+        kind, _, rel = p.partition(":")
+        base = root if kind == "pfx" else install if kind == "game" else None
+        if not base or not os.path.isdir(base):
+            continue
+        for hit in ci_glob(base, rel):
+            if os.path.isfile(hit):
+                out.append(hit)
+            elif os.path.isdir(hit):
+                b0 = hit.rstrip("/").count("/")
+                for cur, dirs, files in os.walk(hit):
+                    if cur.count("/") - b0 >= 3:
+                        dirs[:] = []
+                    dirs[:] = [d for d in dirs if not any(x in d.lower() for x in ("cache", "log", "crash", "shader"))]
+                    for fn in files:
+                        out.append(os.path.join(cur, fn))
+    return out
+
+
+def _from_db(compat, install, appid=None):
+    appid = appid or os.path.basename(os.path.normpath(compat))
+    best = None
+    for path in _db_files(compat, install, appid):
+        ext = os.path.splitext(path)[1].lower()
+        if os.path.basename(path).lower() == "preferences" and "feral" in path:
+            names = ("feral",)
+        else:
+            names = EXT_FORMATS.get(ext)
+        if not names:
+            continue
+        try:
+            if os.path.getsize(path) > (SAV_MAX if ext == ".sav" else MAX_SIZE):
+                continue
+        except OSError:
+            continue
+        for fn in names:
+            n = _try(fn, path)
+            if n >= 3:
+                if best is None or n > best[0]:
+                    best = (n, fn, path)
+                break
+    return (best[1], best[2]) if best else None
+
+
 def _alnum(s):
     return re.sub(r"[^a-z0-9]", "", str(s).lower())
 
@@ -860,7 +946,7 @@ def native_candidates(install):
 
 def discover(compat, install):
     """(формат, шлях) файлу з найбільшою кількістю налаштувань якості (≥ 3) або None."""
-    hit = _known(compat)
+    hit = _known(compat) or _from_db(compat, install)
     if hit:
         return hit
     for fmt, p in native_candidates(install):
