@@ -457,6 +457,9 @@ class UnrealAdapter:
         path = os.path.join(os.path.dirname(cfg), "Engine.ini")
         entry = getattr(self, "entry", None) or {}
         sg = {k: v for k, v in values.items() if k.startswith("sg.") and k in UE_KEYS}
+        # роздільністю тут керують гра й апскейлер (у Ninja Gaiden 2 Black sg.ResolutionQuality=0 —
+        # DLSS/FSR) — примусово задаємо лише групи якості
+        sg.pop("sg.ResolutionQuality", None)
         lines = []
         if os.path.isfile(path):
             with open(path, encoding="utf-8", errors="ignore") as f:
