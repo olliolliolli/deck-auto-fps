@@ -115,11 +115,17 @@ def _strip_block(lines):
     return out
 
 
-def _write(path, lines):
+def _write(path, lines, lock=True):
+    """Запис Engine.ini. lock=True — файл лишається «лише для читання»: деякі ігри
+    (Ninja Gaiden 2 Black) видаляють чи переписують Engine.ini при запуску, і тоді твік і
+    примусова графіка не діяли б. Wine не дає грі видалити чи змінити такий файл."""
+    C.unlock_files([path])
     tmp = path + ".autofps.tmp"
     with open(tmp, "w", encoding="utf-8", newline="") as f:
         f.writelines(lines)
     os.replace(tmp, path)
+    if lock:
+        C.lock_files([path])
 
 
 def remove_from(path):
@@ -129,8 +135,9 @@ def remove_from(path):
         lines = f.readlines()
     new = _strip_block(lines)
     if new == lines:
+        C.unlock_files([path])
         return False
-    _write(path, new)
+    _write(path, new, lock=False)
     return True
 
 
@@ -146,6 +153,7 @@ def apply_to(path):
     own = {ln.split("=", 1)[0].strip().lower() for ln in lines if "=" in ln and not ln.lstrip().startswith(";")}
     add = [(k, v) for k, v in TWEAKS if k.lower() not in own]
     if not add:
+        C.lock_files([path])
         return 0
     block = [BEGIN + nl] + [f"{k}={v}{nl}" for k, v in add] + [END + nl]
     sec = next((i for i, ln in enumerate(lines) if ln.strip().lower() == "[systemsettings]"), None)
@@ -186,8 +194,12 @@ def run_ue(cmd, appid, args, log=print):
         C.save_json(STATE_FILE, state)
         log("UE5 твік: тека налаштувань гри ще не створена — наступного запуску")
         return
+    prev = state.get(str(appid), {})
+    if prev.get("applied") and prev.get("path") == path and not os.path.isfile(path):
+        log("UE5 твік: гра видалила Engine.ini після минулого запуску — тепер файл лише для читання")
     n = apply_to(path)
-    state[str(appid)] = {"install": install, "path": path, "applied": True, "lines": n, "t": int(time.time())}
+    state[str(appid)] = {"install": install, "path": path, "applied": True, "lines": n, "t": int(time.time()),
+                         "locked": True}
     C.save_json(STATE_FILE, state)
     log(f"UE5 твік: {n} параметрів у {path}")
 

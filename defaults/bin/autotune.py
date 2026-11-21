@@ -484,9 +484,11 @@ class UnrealAdapter:
                 out[sec + 1:sec + 1] = block
         if out != lines:
             if os.path.isfile(path):
+                C.unlock_files([path])            # Engine.ini тримаємо «лише для читання»
                 backup_once(path)
             with open(path, "w", encoding="utf-8") as f:
                 f.writelines(out)
+            C.lock_files([path])
 
     def write(self, cfg, values):
         backup_once(cfg)
