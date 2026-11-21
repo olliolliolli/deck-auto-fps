@@ -41,7 +41,7 @@ class Enum(unittest.TestCase):
         st = self.a.ladder(cur)[8]
         self.a.write(self.cfg, st)
         t = self.text()
-        self.assertIn("ShadowQuality=SB_GAMEUSERSETTINGS_LOW", t)
+        self.assertIn("ShadowQuality=SB_GAMEUSERSETTINGS_MEDIUM", t)   # тіні не нижче 1
         self.assertIn("NvidiaDLSS=SB_GAMEUSERSETTINGS_VERYHIGH", t)           # апскейлер не чіпаємо
         self.assertIn("MaterialQuality=SB_GAMEUSERSETTINGS_LOW", t)           # не вище, ніж було
         self.assertNotIn("=SB_GAMEUSERSETTINGS_0", t)

@@ -919,7 +919,7 @@ def install(appid, install_path, game_name="", args=None, settings=None, log=pri
         raise NeedPdPlugin(f"для {prof.get('name', 'цієї гри')} потрібен {PD_PLUGIN_NAME} з Nexus Mods")
     if not install_path or not os.path.isdir(install_path):
         raise RuntimeError("не знайдено теку гри")
-    ac = has_anticheat(install_path)
+    ac = has_anticheat(install_path) or C.game_facts(appid).get("ac")
     if ac:
         raise RuntimeError(f"у грі є античит ({ac}) — підміна бібліотек може призвести до бану, "
                            "тому OptiScaler тут не вмикається")
@@ -1153,7 +1153,7 @@ def direct_install(appid, install_path, game_name="", args=None, settings=None, 
     appid = str(appid)
     if not install_path or not os.path.isdir(install_path):
         raise RuntimeError("не знайдено теку гри")
-    ac = has_anticheat(install_path)
+    ac = has_anticheat(install_path) or C.game_facts(appid).get("ac")
     if ac:
         raise RuntimeError(f"у грі є античит ({ac}) — зміна файлів гри може призвести до бану, "
                            "тому FSR 4 тут не вмикається")

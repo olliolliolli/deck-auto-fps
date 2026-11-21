@@ -24,6 +24,22 @@ PER_GAME_KEYS = ("bat_mode", "ac_mode", "quality_target", "auto_tdp", "auto_gpu_
 LOCKABLE_EXT = (".ini", ".xml", ".json", ".cfg", ".txt", ".lua", ".config", ".conf")
 
 
+_FACTS = {}
+
+
+def game_facts(appid):
+    """Факти PCGamingWiki про гру (game_facts.json): e — рушій, dx — версії DirectX, vk — Vulkan,
+    up — апскейлери, fg — генерація кадрів, ac — античит, ro — вікі радить «лише для читання»."""
+    if "db" not in _FACTS:
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "game_facts.json"),
+                      encoding="utf-8") as f:
+                _FACTS["db"] = json.load(f)
+        except (OSError, ValueError):
+            _FACTS["db"] = {}
+    return _FACTS["db"].get(str(appid), {}) if appid else {}
+
+
 def lock_files(paths):
     """Зняти дозвіл на запис (гра не перезапише). Повертає список заблокованих."""
     out = []

@@ -56,7 +56,7 @@ class ForceIni(unittest.TestCase):
     def test_cvars_written(self):
         self.a.write(self.gus, {"sg.ShadowQuality": "0", "sg.GlobalIlluminationQuality": "0"})
         t = self.eng_text()
-        self.assertIn("r.Shadow.MaxResolution=512", t)
+        self.assertIn("r.Shadow.MaxResolution=1024", t)          # тіні не нижче рівня 1
         self.assertNotIn("r.Lumen", t)                           # Lumen не чіпаємо
         self.assertEqual(A.ue_cvars({"sg.ShadowQuality": "3"})["r.Shadow.CSM.MaxCascades"], "10")
 
