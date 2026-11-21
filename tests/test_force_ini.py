@@ -53,6 +53,13 @@ class ForceIni(unittest.TestCase):
         self.assertNotIn("AutoFPS graphics", self.eng_text())
         self.assertIn("r.Foo=1", self.eng_text())
 
+    def test_cvars_written(self):
+        self.a.write(self.gus, {"sg.ShadowQuality": "0", "sg.GlobalIlluminationQuality": "0"})
+        t = self.eng_text()
+        self.assertIn("r.Shadow.MaxResolution=512", t)
+        self.assertIn("r.Lumen.TraceMeshSDFs=0", t)
+        self.assertEqual(A.ue_cvars({"sg.ShadowQuality": "3"})["r.Shadow.CSM.MaxCascades"], "10")
+
     def test_off_without_flag(self):
         self.a.entry = {"original": self.orig}
         self.a.write(self.gus, {"sg.ShadowQuality": "0"})

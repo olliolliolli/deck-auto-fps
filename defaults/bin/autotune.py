@@ -150,6 +150,71 @@ def bottleneck(entry, last, target):
     return new
 
 
+# Групи якості UE → конкретні команди рушія (за рівнями 0 низько … 3 епічно, як у стандартній
+# таблиці якості UE5, лише ті, що зменшують навантаження). Гра може перекрити sg.* своїм сейвом
+# (Ninja Gaiden 2 Black), але не r.* з Engine.ini [SystemSettings] — вони мають вищий пріоритет.
+UE_CVARS = {
+    "ShadowQuality": {
+        "r.Shadow.MaxResolution": ("512", "1024", "2048", "2048"),
+        "r.Shadow.MaxCSMResolution": ("512", "1024", "2048", "2048"),
+        "r.Shadow.CSM.MaxCascades": ("1", "1", "4", "10"),
+        "r.Shadow.DistanceScale": ("0.6", "0.7", "0.85", "1.0"),
+        "r.Shadow.RadiusThreshold": ("0.06", "0.05", "0.04", "0.03"),
+        "r.Shadow.Virtual.ResolutionLodBiasDirectional": ("2.0", "1.0", "0", "-0.5"),
+        "r.Shadow.Virtual.ResolutionLodBiasLocal": ("2.0", "1.0", "0", "0"),
+    },
+    "GlobalIlluminationQuality": {
+        "r.Lumen.TraceMeshSDFs": ("0", "0", "1", "1"),
+        "r.Lumen.ScreenProbeGather.DownsampleFactor": ("32", "32", "16", "16"),
+        "r.Lumen.ScreenProbeGather.TracingOctahedronResolution": ("8", "8", "8", "8"),
+        "r.LumenScene.Radiosity.ProbeSpacing": ("8", "8", "4", "4"),
+        "r.LumenScene.Radiosity.HemisphereProbeResolution": ("2", "3", "4", "4"),
+        "r.SSGI.Quality": ("0", "1", "2", "3"),
+    },
+    "ReflectionQuality": {
+        "r.Lumen.Reflections.Allow": ("0", "0", "1", "1"),
+        "r.Lumen.Reflections.DownsampleFactor": ("2", "2", "2", "1"),
+        "r.SSR.Quality": ("0", "1", "2", "3"),
+    },
+    "PostProcessQuality": {
+        "r.DepthOfFieldQuality": ("0", "1", "2", "2"),
+        "r.BloomQuality": ("3", "4", "5", "5"),
+        "r.AmbientOcclusionLevels": ("0", "1", "2", "3"),
+        "r.MotionBlurQuality": ("0", "0", "0", "0"),
+        "r.LensFlareQuality": ("0", "0", "2", "2"),
+    },
+    "EffectsQuality": {
+        "r.VolumetricFog.GridPixelSize": ("16", "16", "8", "8"),
+        "r.VolumetricFog.GridSizeZ": ("64", "64", "128", "128"),
+        "r.RefractionQuality": ("0", "0", "2", "2"),
+        "r.TranslucencyVolumeBlur": ("0", "0", "1", "1"),
+    },
+    "FoliageQuality": {
+        "foliage.DensityScale": ("0.4", "0.6", "0.8", "1.0"),
+        "grass.DensityScale": ("0.4", "0.6", "0.8", "1.0"),
+    },
+    "ViewDistanceQuality": {
+        "r.ViewDistanceScale": ("0.5", "0.7", "0.85", "1.0"),
+    },
+}
+
+
+def ue_cvars(values):
+    """sg.* сходинки → {r.*: значення} для Engine.ini [SystemSettings]."""
+    out = {}
+    for grp, cvars in UE_CVARS.items():
+        v = values.get(f"sg.{grp}")
+        if v is None:
+            continue
+        try:
+            lvl = max(0, min(3, int(float(v))))
+        except ValueError:
+            continue
+        for k, vals in cvars.items():
+            out[k] = vals[lvl]
+    return out
+
+
 def ue_ladder(lowres=None, bound=None):
     """lowres=67 — та сама сходинка якості, але роздільність рендеру зафіксовано (≈HD)."""
     cur = {k.split(".", 1)[1]: 3 for k in UE_KEYS}
@@ -477,7 +542,10 @@ class UnrealAdapter:
                 out.append(ln)
         restoring = values == entry.get("original")
         if entry.get("force_ini") and sg and not restoring:
-            block = [self.FORCE_BEGIN + "\n"] + [f"{k}={v}\n" for k, v in sg.items()] + [self.FORCE_END + "\n"]
+            # і групи sg.*, і їхні конкретні команди r.* (гра може перекрити sg.* своїм сейвом)
+            cv = ue_cvars(sg)
+            block = [self.FORCE_BEGIN + "\n"] + [f"{k}={v}\n" for k, v in sg.items()] + \
+                [f"{k}={v}\n" for k, v in cv.items()] + [self.FORCE_END + "\n"]
             sec = next((i for i, ln in enumerate(out) if ln.strip().lower() == "[systemsettings]"), None)
             if sec is None:
                 if out and not out[-1].endswith("\n"):
