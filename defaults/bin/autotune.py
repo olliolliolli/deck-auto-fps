@@ -1469,8 +1469,9 @@ def run(appid, args, device=None, log=print):
             return
     else:
         entry.pop("write_failures", None)
-    if settings.get("lock_config", False):
-        # «лише читання»: гра не перезапише підібране (ні з меню, ні при виході, ні з хмари)
+    if settings.get("lock_config", False) or entry.get("force_ini"):
+        # «лише читання»: гра не перезапише підібране (ні з меню, ні при виході, ні з хмари);
+        # для ігор, що самі відновлюють графіку зі свого сейва (force_ini), — завжди
         files = [cfg] + (adapter.overlays(cfg) if hasattr(adapter, "overlays") else [])
         locked = C.lock_files(files)
         if locked:
