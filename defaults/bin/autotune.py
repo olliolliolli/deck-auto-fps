@@ -163,17 +163,9 @@ UE_CVARS = {
         "r.Shadow.Virtual.ResolutionLodBiasDirectional": ("2.0", "1.0", "0", "-0.5"),
         "r.Shadow.Virtual.ResolutionLodBiasLocal": ("2.0", "1.0", "0", "0"),
     },
-    "GlobalIlluminationQuality": {
-        "r.Lumen.TraceMeshSDFs": ("0", "0", "1", "1"),
-        "r.Lumen.ScreenProbeGather.DownsampleFactor": ("32", "32", "16", "16"),
-        "r.Lumen.ScreenProbeGather.TracingOctahedronResolution": ("8", "8", "8", "8"),
-        "r.LumenScene.Radiosity.ProbeSpacing": ("8", "8", "4", "4"),
-        "r.LumenScene.Radiosity.HemisphereProbeResolution": ("2", "3", "4", "4"),
-        "r.SSGI.Quality": ("0", "1", "2", "3"),
-    },
+    # Lumen (GI і відбиття) свідомо не чіпаємо: зміна його команд через Engine.ini
+    # зупиняла рендер Ninja Gaiden 2 Black (0 FPS) — керує ним лише sg.* гри
     "ReflectionQuality": {
-        "r.Lumen.Reflections.Allow": ("0", "0", "1", "1"),
-        "r.Lumen.Reflections.DownsampleFactor": ("2", "2", "2", "1"),
         "r.SSR.Quality": ("0", "1", "2", "3"),
     },
     "PostProcessQuality": {
